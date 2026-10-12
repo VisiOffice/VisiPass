@@ -208,6 +208,34 @@ enum EnvCommands {
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
+    /// Move plaintext secrets from an env file into the vault and rewrite them to references
+    Import {
+        file: PathBuf,
+        /// Destination vault name or ID; required, no implicit default
+        #[arg(long)]
+        vault: String,
+        #[arg(long)]
+        account: Option<String>,
+        /// Item title prefix; defaults to the project (git repository) name
+        #[arg(long)]
+        prefix: Option<String>,
+        /// Import exactly these variables (comma-separated), instead of the secret-looking ones
+        #[arg(long, value_delimiter = ',')]
+        only: Vec<String>,
+        /// Leave these variables as they are (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        except: Vec<String>,
+        /// Import every plaintext value, not only the secret-looking ones
+        #[arg(long, conflicts_with = "only")]
+        all: bool,
+        /// Show what would be imported (names only) and change nothing
+        #[arg(long)]
+        dry_run: bool,
+        #[command(flatten)]
+        purpose: Purpose,
+    },
+    /// Check that every reference in an env file resolves, without revealing any value
+    Check { file: PathBuf },
     /// Materialise references into a plaintext env file (mode 0600)
     Resolve {
         file: PathBuf,
@@ -419,6 +447,107 @@ fn execute(command: Commands) -> Result<i32, Failure> {
             let code = run::run_with_literals(&command, &secrets, &literals, !no_mask)?;
             Ok(code)
         }
+        Commands::Env(EnvCommands::Import {
+            file,
+            vault,
+            account,
+            prefix,
+            only,
+            except,
+            all,
+            dry_run,
+            purpose,
+        }) => {
+            let content = read_text(&file)?;
+            let lines = env::parse_env(&content);
+            let prefix = prefix.unwrap_or_else(|| project_name(&absolute(&file)));
+            let mut chosen = Vec::new();
+            let mut kept = Vec::new();
+            for line in &lines {
+                if let env::EnvLine::Literal {
+                    var: Some((name, value)),
+                    ..
+                } = line
+                {
+                    let wanted = if !only.is_empty() {
+                        only.contains(name)
+                    } else {
+                        all || env::looks_secret(name, value)
+                    } && !except.contains(name)
+                        && !value.trim().is_empty();
+                    if wanted && !chosen.iter().any(|(n, _): &(String, Secret)| n == name) {
+                        chosen.push((name.clone(), Secret::new(value.clone())));
+                    } else if !wanted {
+                        kept.push(name.clone());
+                    }
+                }
+            }
+            let titled: Vec<(String, String)> = chosen
+                .iter()
+                .map(|(n, _)| (n.clone(), format!("{prefix} {n}")))
+                .collect();
+            if dry_run || chosen.is_empty() {
+                let would: Vec<Value> = titled
+                    .iter()
+                    .map(|(n, t)| serde_json::json!({ "name": n, "title": t }))
+                    .collect();
+                return print(
+                    &serde_json::json!({ "vault": vault, "wouldImport": would, "kept": kept, "dryRun": true }),
+                );
+            }
+            let entries = chosen
+                .into_iter()
+                .zip(&titled)
+                .map(|((name, value), (_, title))| vp_core::ipc::ImportEntry {
+                    name,
+                    title: title.clone(),
+                    value,
+                })
+                .collect();
+            let result = client::call(Request::ImportEnv {
+                vault,
+                account,
+                entries,
+                purpose: purpose.purpose,
+            })?;
+            let mut replacements = HashMap::new();
+            for done in result["imported"].as_array().into_iter().flatten() {
+                if let (Some(name), Some(reference)) = (done["name"].as_str(), done["ref"].as_str())
+                {
+                    replacements.insert(name.to_string(), SecretRef::parse(reference)?);
+                }
+            }
+            if !replacements.is_empty() {
+                write_keeping_mode(&file, &env::rewrite(&content, &replacements))?;
+            }
+            eprintln!(
+                "Moved {} secret{} into the vault and rewrote them as references in {}. Run commands with: vp env run {} -- <command>",
+                replacements.len(),
+                if replacements.len() == 1 { "" } else { "s" },
+                file.display(),
+                file.display()
+            );
+            print(
+                &serde_json::json!({ "imported": result["imported"], "failed": result["failed"], "kept": kept }),
+            )
+        }
+        Commands::Env(EnvCommands::Check { file }) => {
+            let refs = env::references(&env::parse_env(&read_text(&file)?));
+            let result = client::call(Request::CheckRefs { refs })?;
+            let unresolved = result["unresolved"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0);
+            print(&result)?;
+            if unresolved > 0 {
+                eprintln!(
+                    "visipass: {unresolved} reference{} did not resolve",
+                    if unresolved == 1 { "" } else { "s" }
+                );
+                return Ok(1);
+            }
+            Ok(0)
+        }
         Commands::Env(EnvCommands::Resolve {
             file,
             output,
@@ -605,6 +734,47 @@ fn execute(command: Commands) -> Result<i32, Failure> {
         Commands::Doctor => print(&doctor::doctor()),
         Commands::Daemon { stop, restart } => daemon(stop, restart),
     }
+}
+
+/// The git repository's name for a file, else its directory's name.
+fn project_name(file: &Path) -> String {
+    let dir = file.parent().unwrap_or(Path::new("."));
+    dir.ancestors()
+        .find(|d| d.join(".git").exists())
+        .unwrap_or(dir)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("project")
+        .to_string()
+}
+
+/// Replaces a file atomically, keeping its permissions.
+fn write_keeping_mode(target: &Path, contents: &str) -> Result<(), Failure> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(target)
+        .map(|m| m.permissions().mode())
+        .unwrap_or(0o600);
+    let dir = target
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = target.file_name().and_then(|n| n.to_str()).unwrap_or("env");
+    let temporary = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+    let result = (|| {
+        std::fs::write(&temporary, contents)?;
+        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(mode))?;
+        std::fs::rename(&temporary, target)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result.map_err(|e| {
+        Failure::new(format!(
+            "Could not rewrite {}: {}",
+            target.display(),
+            e.kind()
+        ))
+    })
 }
 
 fn unique(refs: impl Iterator<Item = SecretRef>) -> Vec<SecretRef> {

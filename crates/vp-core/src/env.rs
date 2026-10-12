@@ -183,6 +183,69 @@ pub fn environment(
         .collect()
 }
 
+/// Whether a plaintext assignment looks like a secret worth moving into the
+/// vault. Names like `*_KEY`, `*_TOKEN`, `*SECRET*`, `*PASSWORD*`, and any URL
+/// carrying a password (`postgres://user:pass@host`).
+pub fn looks_secret(name: &str, value: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    let by_name = [
+        "KEY",
+        "TOKEN",
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "PASS",
+        "PRIVATE",
+        "CREDENTIAL",
+        "AUTH",
+        "DSN",
+        "SALT",
+        "COOKIE",
+    ]
+    .iter()
+    .any(|word| {
+        upper
+            .split('_')
+            .any(|part| part == *word || part.ends_with(word) && word.len() > 4)
+    }) || upper == "DATABASE_URL";
+    let by_value = value
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split('/').next())
+        .is_some_and(|authority| {
+            authority.contains('@')
+                && authority
+                    .split('@')
+                    .next()
+                    .is_some_and(|user| user.contains(':'))
+        });
+    !value.trim().is_empty() && (by_name || by_value)
+}
+
+/// Rewrites the given variables to references, keeping every other line,
+/// comment and `export` prefix as it was.
+pub fn rewrite(content: &str, replacements: &HashMap<String, SecretRef>) -> String {
+    content
+        .split('\n')
+        .map(|line| {
+            let original = line.strip_suffix('\r').unwrap_or(line);
+            let trimmed = original.trim_start();
+            let (export, rest) = match trimmed.strip_prefix("export ") {
+                Some(rest) => ("export ", rest.trim_start()),
+                None => ("", trimmed),
+            };
+            match rest
+                .split_once('=')
+                .map(|(n, _)| n.trim())
+                .and_then(|n| replacements.get(n).map(|r| (n, r)))
+            {
+                Some((name, reference)) => format!("{export}{name}={reference}"),
+                None => line.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,5 +299,51 @@ mod tests {
     fn renders_template() {
         let a = parse_assignment("X=op://a/b/c").unwrap();
         assert_eq!(render_env(&[a]), "X=op://a/b/c\n");
+    }
+
+    #[test]
+    fn spots_secrets_and_leaves_settings() {
+        for (name, value) in [
+            ("OPENAI_API_KEY", "sk-1"),
+            ("STRIPE_SECRET", "x"),
+            ("GITHUB_TOKEN", "x"),
+            ("DB_PASSWORD", "x"),
+            ("DATABASE_URL", "postgres://localhost/db"),
+            ("REDIS_URL", "redis://default:hunter2@host:6379"),
+            ("SENTRY_DSN", "https://abc@sentry.io/1"),
+        ] {
+            assert!(looks_secret(name, value), "{name}");
+        }
+        for (name, value) in [
+            ("PORT", "3000"),
+            ("NODE_ENV", "development"),
+            ("API_URL", "https://api.example.com"),
+            ("KEYBOARD_LAYOUT", "us"),
+            ("EMPTY_KEY", ""),
+        ] {
+            assert!(!looks_secret(name, value), "{name}");
+        }
+    }
+
+    #[test]
+    fn rewrites_only_named_lines() {
+        let content =
+            "# keys\nexport OPENAI_API_KEY=sk-sentinel\nPORT=3000\nSTRIPE_KEY=\"rk-sentinel\"\n";
+        let replacements = HashMap::from([
+            (
+                "OPENAI_API_KEY".to_string(),
+                r("op://Dev/app OPENAI_API_KEY/credential"),
+            ),
+            (
+                "STRIPE_KEY".to_string(),
+                r("op://Dev/app STRIPE_KEY/credential"),
+            ),
+        ]);
+        let out = rewrite(content, &replacements);
+        assert_eq!(
+            out,
+            "# keys\nexport OPENAI_API_KEY=op://Dev/app OPENAI_API_KEY/credential\nPORT=3000\nSTRIPE_KEY=op://Dev/app STRIPE_KEY/credential\n"
+        );
+        assert!(!out.contains("sentinel"));
     }
 }

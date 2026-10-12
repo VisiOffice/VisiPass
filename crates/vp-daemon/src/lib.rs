@@ -247,6 +247,50 @@ fn assess(request: &Request, requester: &Requester) -> Assessment {
         Request::Item { id, .. }
         | Request::Archive { id, .. }
         | Request::SetFavorite { id, .. } => none(Some(id.clone())),
+        Request::ImportEnv {
+            vault,
+            entries,
+            purpose,
+            ..
+        } => {
+            let names: Vec<String> = entries
+                .iter()
+                .map(|e| format!("{}  →  {}", e.name, e.title))
+                .collect();
+            Assessment {
+                need: Some(Need {
+                    operation: Operation::Write,
+                    refs: BTreeSet::new(),
+                    vaults: BTreeSet::from([vault.clone()]),
+                }),
+                refs: vec![],
+                detail: Some(format!(
+                    "import {} into {vault}",
+                    plural(entries.len(), "secret")
+                )),
+                prompt: Some(Prompt {
+                    who: who(requester),
+                    action: format!(
+                        "move {} from a plaintext env file into the vault \"{vault}\"",
+                        plural(entries.len(), "secret")
+                    ),
+                    details: vec![
+                        project_line(requester),
+                        ("Will create".into(), names.join("\n")),
+                    ],
+                    secrets: vec![],
+                    purpose: purpose.clone(),
+                    timeout_secs: approval::TIMEOUT.as_secs(),
+                    paste: None,
+                }),
+            }
+        }
+        Request::CheckRefs { refs } => Assessment {
+            need: None,
+            refs: refs.iter().map(|r| r.to_string()).collect(),
+            detail: None,
+            prompt: None,
+        },
         Request::RequestSecret { destination, .. } => none(Some(format!(
             "request \"{}\" in {}",
             destination.title, destination.vault
@@ -448,6 +492,52 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                         .create_api_credential(&destination, value)
                         .await?,
                 ))
+            }
+            Request::ImportEnv {
+                vault,
+                account,
+                entries,
+                ..
+            } => {
+                if entries.is_empty() {
+                    return Err(Failure::new("Nothing to import"));
+                }
+                let mut imported = Vec::new();
+                let mut failed = Vec::new();
+                // One at a time, each verified; a failure never stops the rest
+                // and is never retried.
+                for entry in entries {
+                    let destination = vp_core::model::Destination {
+                        title: entry.title.clone(),
+                        vault: vault.clone(),
+                        account: account.clone(),
+                        url: None,
+                        notes: Some(format!("Imported by vp env import ({})", entry.name)),
+                    };
+                    match self.backend.create_api_credential(&destination, entry.value).await {
+                        Ok(receipt) => imported.push(json!({ "name": entry.name, "title": entry.title, "ref": receipt.reference })),
+                        Err(e) => failed.push(json!({ "name": entry.name, "title": entry.title, "error": e.0 })),
+                    }
+                }
+                Ok(json!({ "imported": imported, "failed": failed }))
+            }
+            Request::CheckRefs { refs } => {
+                if refs.is_empty() {
+                    return Ok(json!({ "ok": [], "unresolved": [] }));
+                }
+                // Values are resolved here and dropped; only names leave the daemon.
+                if self.backend.resolve(&refs).await.is_ok() {
+                    return Ok(json!({ "ok": refs, "unresolved": [] }));
+                }
+                let mut ok = Vec::new();
+                let mut unresolved = Vec::new();
+                for reference in refs {
+                    match self.backend.resolve(std::slice::from_ref(&reference)).await {
+                        Ok(_) => ok.push(reference),
+                        Err(_) => unresolved.push(reference),
+                    }
+                }
+                Ok(json!({ "ok": ok, "unresolved": unresolved }))
             }
             Request::OpenApp { .. } => Err(Failure::new("visipassd could not open the app")),
         }

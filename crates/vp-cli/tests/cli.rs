@@ -47,7 +47,11 @@ elif args[:3] == ["item", "get", "-"]:
             print(json.dumps(it))
 elif args[0] == "run":
     n = int(args[-1])
-    print(json.dumps([VALUES[os.environ["VISIPASS_SECRET_%d" % i]] for i in range(n)]), end="")
+    refs = [os.environ["VISIPASS_SECRET_%d" % i] for i in range(n)]
+    if any(r not in VALUES for r in refs):
+        sys.stderr.write("fake op: could not resolve a reference")
+        sys.exit(1)
+    print(json.dumps([VALUES[r] for r in refs]), end="")
 elif args[:2] == ["item", "create"]:
     t = json.loads(stdin)
     t.update({"id": "c" * 26, "vault": V})
@@ -540,6 +544,76 @@ fn a_cancelled_request_saves_nothing() {
     assert!(!out.status.success());
     assert!(text(&out.stderr).contains("cancelled"));
     assert!(world.calls().is_empty(), "op is never called");
+}
+
+#[test]
+fn env_import_moves_secrets_and_keeps_settings() {
+    let world = World::new(&[Decision::Once]);
+    let file = world.path("app.env");
+    std::fs::write(
+        &file,
+        format!("# app\nexport NEW_API_KEY={NEW_KEY}\nPORT=3000\n"),
+    )
+    .unwrap();
+    let dry = json(&world.vp(
+        &[
+            "env",
+            "import",
+            file.to_str().unwrap(),
+            "--vault",
+            "Dev",
+            "--prefix",
+            "app",
+            "--dry-run",
+        ],
+        None,
+    ));
+    assert_eq!(dry["wouldImport"][0]["name"], "NEW_API_KEY");
+    assert_eq!(dry["kept"][0], "PORT");
+    assert_eq!(world.approver.asked(), 0, "a dry run asks nothing");
+
+    let out = world.vp(
+        &[
+            "env",
+            "import",
+            file.to_str().unwrap(),
+            "--vault",
+            "Dev",
+            "--prefix",
+            "app",
+        ],
+        None,
+    );
+    clean(&out);
+    let result = json(&out);
+    assert_eq!(result["imported"][0]["name"], "NEW_API_KEY");
+    let rewritten = std::fs::read_to_string(&file).unwrap();
+    assert!(!rewritten.contains(NEW_KEY), "{rewritten}");
+    assert!(
+        rewritten.contains("export NEW_API_KEY=op://"),
+        "{rewritten}"
+    );
+    assert!(rewritten.contains("PORT=3000"));
+    assert_eq!(world.approver.asked(), 1, "one approval for the file");
+    world.assert_contained();
+}
+
+#[test]
+fn env_check_reports_without_revealing() {
+    let world = World::new(&[]);
+    let file = world.path("check.env");
+    std::fs::write(
+        &file,
+        "A=op://Dev/OpenAI API Key/credential\nB=op://Dev/Missing/credential\n",
+    )
+    .unwrap();
+    let out = world.vp(&["env", "check", file.to_str().unwrap()], None);
+    clean(&out);
+    assert_eq!(out.status.code(), Some(1));
+    let result: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(result["ok"][0], "op://Dev/OpenAI API Key/credential");
+    assert_eq!(result["unresolved"][0], "op://Dev/Missing/credential");
+    assert_eq!(world.approver.asked(), 0);
 }
 
 #[test]

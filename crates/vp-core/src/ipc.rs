@@ -89,6 +89,16 @@ pub enum PasteAnswer {
     Timeout,
 }
 
+/// One plaintext value `vp env import` moves into the vault.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ImportEntry {
+    /// The variable name, e.g. `OPENAI_API_KEY`.
+    pub name: String,
+    /// The item title to create, e.g. `myapp OPENAI_API_KEY`.
+    pub title: String,
+    pub value: Secret,
+}
+
 /// The human's answer, as `visipass-prompt` prints it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Answer {
@@ -201,6 +211,19 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         purpose: Option<String>,
     },
+    /// Move plaintext env values into the vault: one approval for the batch.
+    ImportEnv {
+        vault: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
+        entries: Vec<ImportEntry>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        purpose: Option<String>,
+    },
+    /// Report which references resolve. Values never leave the daemon.
+    CheckRefs {
+        refs: Vec<SecretRef>,
+    },
     Grants,
     Revoke {
         #[serde(default)]
@@ -251,6 +274,8 @@ impl Request {
             Request::Archive { .. } => "archive",
             Request::SetFavorite { .. } => "favorite",
             Request::RequestSecret { .. } => "request",
+            Request::ImportEnv { .. } => "env-import",
+            Request::CheckRefs { .. } => "env-check",
             Request::Grants => "grants",
             Request::Revoke { .. } => "revoke",
             Request::Log { .. } => "log",
