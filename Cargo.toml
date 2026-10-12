@@ -8,6 +8,7 @@ default-members = ["crates/vp-core", "crates/vp-op", "crates/vp-daemon", "crates
 version = "0.1.0"
 edition = "2024"
 license = "AGPL-3.0-only"
+repository = "https://github.com/VisiOffice/VisiPass"
 rust-version = "1.85"
 
 [workspace.dependencies]
