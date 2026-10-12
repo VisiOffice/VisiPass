@@ -46,6 +46,7 @@ impl Client {
         let mut line = serde_json::to_string(&Envelope {
             version: PROTOCOL_VERSION,
             request,
+            token: None,
         })
         .map_err(|_| lost())?;
         line.push('\n');
@@ -116,6 +117,7 @@ pub fn hand_off() -> Result<(), Failure> {
     let line = serde_json::to_string(&Envelope {
         version: PROTOCOL_VERSION,
         request: Request::OpenApp { quick: false },
+        token: None,
     })
     .map_err(|_| Failure::new("Could not encode the request"))?
         + "\n";

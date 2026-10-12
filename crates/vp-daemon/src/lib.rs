@@ -11,6 +11,7 @@ pub mod grants;
 pub mod log;
 pub mod paths;
 pub mod procinfo;
+pub mod tokens;
 
 use approval::{Approver, Prompt};
 use grants::{Decision, Grants, Need};
@@ -62,6 +63,7 @@ pub struct Daemon<B, A> {
     backend: B,
     approver: A,
     grants: Mutex<Grants>,
+    tokens: Mutex<tokens::Tokens>,
     log: Mutex<AccessLog>,
     /// One prompt at a time; a request queued behind a prompt re-checks grants first.
     approvals: tokio::sync::Mutex<()>,
@@ -310,6 +312,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
             backend,
             approver,
             grants: Mutex::new(Grants::load(state_dir.join("grants.json"))),
+            tokens: Mutex::new(tokens::Tokens::load(state_dir.join("tokens.json"))),
             log: Mutex::new(AccessLog::open(state_dir.join("access.log"))),
             approvals: tokio::sync::Mutex::new(()),
             socket,
@@ -330,6 +333,17 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
         need: &Need,
         prompt: &Prompt,
     ) -> Result<String, Failure> {
+        // A token is checked, never prompted for: there is no human to ask.
+        if let Some(token) = &requester.token {
+            return if token.covers(need) {
+                Ok(format!("token:{}", token.id))
+            } else {
+                Err(Failure::new(format!(
+                    "The agent token \"{}\" does not allow this. It covers {:?} in the vaults {:?}. Ask the human for a token with that scope",
+                    token.name, token.operations, token.vaults
+                )))
+            };
+        }
         if let Some(id) = self.grants().find(requester, need) {
             return Ok(id);
         }
@@ -539,6 +553,93 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 }
                 Ok(json!({ "ok": ok, "unresolved": unresolved }))
             }
+            Request::CreateToken {
+                name,
+                vaults,
+                operations,
+                days,
+                purpose,
+            } => {
+                if requester.token.is_some() {
+                    return Err(Failure::new(
+                        "An agent token cannot create tokens. Ask the human",
+                    ));
+                }
+                let name = name.trim().to_string();
+                if name.is_empty() || vaults.is_empty() {
+                    return Err(Failure::new("A token needs a name and at least one vault"));
+                }
+                let operations: BTreeSet<Operation> = if operations.is_empty() {
+                    BTreeSet::from([Operation::Run])
+                } else {
+                    operations.into_iter().collect()
+                };
+                let vaults: BTreeSet<String> = vaults.into_iter().collect();
+                let ops: Vec<&str> = operations.iter().map(|o| o.describe()).collect();
+                let prompt = Prompt {
+                    who: who(requester),
+                    action: format!(
+                        "create an agent token \"{name}\" that works without asking you"
+                    ),
+                    details: vec![
+                        project_line(requester),
+                        ("Allows".into(), ops.join(", ")),
+                        (
+                            "Vaults".into(),
+                            vaults.iter().cloned().collect::<Vec<_>>().join(", "),
+                        ),
+                        (
+                            "Expires".into(),
+                            days.map(|d| format!("in {d} days"))
+                                .unwrap_or_else(|| "never".into()),
+                        ),
+                        ("Shown to".into(), format!("{}, once", who(requester))),
+                    ],
+                    secrets: vec![],
+                    purpose,
+                    timeout_secs: approval::TIMEOUT.as_secs(),
+                    paste: None,
+                };
+                let decision = {
+                    let _turn = self.approvals.lock().await;
+                    self.approver.ask(&prompt).await?
+                };
+                if decision == Decision::Deny {
+                    return Err(Failure::new(
+                        "The human denied this request. Do not retry it; ask them how to proceed",
+                    ));
+                }
+                let (record, secret) = self
+                    .tokens
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .create(&name, vaults, operations, days)
+                    .map_err(|_| Failure::new("Could not save the token"))?;
+                let mut view = record.view();
+                view["token"] = json!(secret);
+                view["note"] = json!(
+                    "Shown once. Set it as VISIPASS_TOKEN where the agent runs; vp strips it from commands it runs."
+                );
+                Ok(view)
+            }
+            Request::Tokens => Ok(
+                json!({ "tokens": self.tokens.lock().unwrap_or_else(|e| e.into_inner()).list() }),
+            ),
+            Request::RevokeToken { id } => {
+                let removed = self
+                    .tokens
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .revoke(&id)
+                    .map_err(|_| Failure::new("Could not save the tokens file"))?;
+                if removed {
+                    Ok(json!({ "revoked": id }))
+                } else {
+                    Err(Failure::new(
+                        "No token has that ID; list them with vp agent list",
+                    ))
+                }
+            }
             Request::OpenApp { .. } => Err(Failure::new("visipassd could not open the app")),
         }
     }
@@ -558,6 +659,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 | Request::Log { .. }
                 | Request::Vaults { .. }
                 | Request::Items { .. }
+                | Request::Tokens
         );
         let mut grant = None;
         let result = if channel == Channel::Public && request.app_only() {
@@ -633,11 +735,30 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                     Err(e) => Response::err(e.0),
                 },
                 Ok(envelope) => {
-                    let requester = tokio::task::spawn_blocking(move || procinfo::identify(pid))
-                        .await
-                        .unwrap_or_else(|_| procinfo::identify(0));
-                    self.handle(envelope.request, &requester, Channel::Public)
-                        .await
+                    let mut requester =
+                        tokio::task::spawn_blocking(move || procinfo::identify(pid))
+                            .await
+                            .unwrap_or_else(|_| procinfo::identify(0));
+                    match envelope.token.map(|t| {
+                        self.tokens
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .verify(t.expose())
+                    }) {
+                        Some(None) => Response::err(
+                            "The agent token is not valid, was revoked, or has expired",
+                        ),
+                        Some(Some(record)) => {
+                            requester.agent = Some(format!("token {}", record.name));
+                            requester.token = Some(record);
+                            self.handle(envelope.request, &requester, Channel::Public)
+                                .await
+                        }
+                        None => {
+                            self.handle(envelope.request, &requester, Channel::Public)
+                                .await
+                        }
+                    }
                 }
                 Err(_) => Response::err("visipassd could not read the request"),
             },
@@ -729,6 +850,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 root: "(desktop app)".into(),
                 remote: None,
             },
+            token: None,
         };
         let (read, mut write) = stream.into_split();
         let mut lines = BufReader::new(read).lines();

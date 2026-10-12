@@ -209,6 +209,7 @@ mod tests {
                 root: root.into(),
                 remote: None,
             },
+            token: None,
         }
     }
 

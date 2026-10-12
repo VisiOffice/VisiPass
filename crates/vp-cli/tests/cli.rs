@@ -667,6 +667,72 @@ fn mcp_serves_tools_that_never_return_values() {
 }
 
 #[test]
+fn agent_tokens_run_within_scope_and_never_prompt() {
+    let world = World::new(&[Decision::Once]);
+    let created = json(&world.vp(
+        &[
+            "agent", "create", "nightly", "--vault", "Dev", "--ops", "run", "--days", "7",
+        ],
+        None,
+    ));
+    assert_eq!(world.approver.asked(), 1, "creating a token asks the human");
+    let token = created["token"].as_str().unwrap().to_string();
+    let id = created["id"].as_str().unwrap().to_string();
+    let with_token = |args: &[&str], token: &str| {
+        Command::new(env!("CARGO_BIN_EXE_vp"))
+            .args(args)
+            .env("VISIPASS_SOCKET", world.path("vp.sock"))
+            .env("VISIPASS_TOKEN", token)
+            .output()
+            .unwrap()
+    };
+    let run = with_token(
+        &[
+            "run",
+            "--env",
+            "K=op://Dev/OpenAI API Key/credential",
+            "--",
+            "sh",
+            "-c",
+            "echo $K; echo token=${VISIPASS_TOKEN:-gone}",
+        ],
+        &token,
+    );
+    assert!(run.status.success(), "{}", text(&run.stderr));
+    assert_eq!(
+        text(&run.stdout),
+        "<vp:K>\ntoken=gone\n",
+        "masked, and the token is stripped from the child"
+    );
+    assert_eq!(world.approver.asked(), 1, "a token never prompts");
+
+    let reveal = with_token(&["read", "op://Dev/OpenAI API Key/credential"], &token);
+    assert!(!reveal.status.success());
+    assert!(text(&reveal.stderr).contains("does not allow"));
+    let other_vault = with_token(
+        &["run", "--env", "K=op://Private/Bank/password", "--", "true"],
+        &token,
+    );
+    assert!(!other_vault.status.success());
+    let mint = with_token(&["agent", "create", "more", "--vault", "Dev"], &token);
+    assert!(text(&mint.stderr).contains("cannot create tokens"));
+    let bogus = with_token(&["find", "openai"], "vpt_bogus");
+    assert!(text(&bogus.stderr).contains("not valid"));
+
+    let listed = json(&world.vp(&["agent", "list"], None));
+    assert!(
+        !listed.to_string().contains(&token),
+        "the secret is never listed"
+    );
+    json(&world.vp(&["agent", "revoke", &id], None));
+    let after = with_token(&["find", "openai"], &token);
+    assert!(text(&after.stderr).contains("not valid"));
+    let log = std::fs::read_to_string(world.path("state/access.log")).unwrap();
+    assert!(!log.contains(&token));
+    assert!(log.contains("token nightly"));
+}
+
+#[test]
 fn doctor_never_prompts() {
     let world = World::new(&[]);
     let out = world.vp(&["doctor"], None);

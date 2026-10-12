@@ -42,6 +42,38 @@ vp read "op://Personal/OpenAI API Key/credential"   # last resort: prints the va
 - A `.env.tpl` holding only references is safe to read. A resolved `.env` is plaintext: do not read it.
 - Grants are per operation: approval to `run` does not cover `read`.
 
+## A secret that does not exist yet
+
+```bash
+vp request --title "Stripe Live Key" --vault Work --purpose "configure billing"
+```
+
+The human gets a VisiPass window and pastes the value; you get back only `{ ref, verified }`. Never ask the human to paste a secret into the chat or a file. If they cancel, do not ask again; ask how to proceed.
+
+## Plaintext .env files
+
+```bash
+vp env import .env --vault Dev --dry-run    # which variables would move (names only)
+vp env import .env --vault Dev              # one approval; secrets move into the vault, lines become references
+vp env check .env.tpl                        # which references resolve; never values; exit 1 if any do not
+```
+
+`env import` moves secret-looking values (keys, tokens, passwords, DSNs, URLs with credentials) and leaves settings like `PORT`. Choose with `--only A,B`, `--except A,B` or `--all`. Then run with `vp env run .env -- <command>`. Do not read a `.env` that still holds plaintext.
+
+## MCP
+
+`vp mcp` serves the same discovery, request, env and grant tools over MCP (stdio). None returns a value and none runs commands; use `vp run` / `vp env run` in the shell for that.
+
+## Unattended agents
+
+```bash
+vp agent create nightly-deploy --vault Automation --ops run --days 30   # the human approves; the token is shown once
+VISIPASS_TOKEN=vpt_... vp env run .env.tpl -- ./deploy.sh              # within scope: no prompt
+vp agent list ; vp agent revoke <id>
+```
+
+A token only covers its vaults and operations and is refused, never prompted, outside them. Only create one when the human asks for unattended access. Never print, log or commit the token.
+
 ## Save a new API key
 
 ```bash

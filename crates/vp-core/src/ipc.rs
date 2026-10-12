@@ -224,6 +224,20 @@ pub enum Request {
     CheckRefs {
         refs: Vec<SecretRef>,
     },
+    /// Create a scoped agent token. Always asks the human.
+    CreateToken {
+        name: String,
+        vaults: Vec<String>,
+        operations: Vec<Operation>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        days: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        purpose: Option<String>,
+    },
+    Tokens,
+    RevokeToken {
+        id: String,
+    },
     Grants,
     Revoke {
         #[serde(default)]
@@ -276,6 +290,9 @@ impl Request {
             Request::RequestSecret { .. } => "request",
             Request::ImportEnv { .. } => "env-import",
             Request::CheckRefs { .. } => "env-check",
+            Request::CreateToken { .. } => "token-create",
+            Request::Tokens => "tokens",
+            Request::RevokeToken { .. } => "token-revoke",
             Request::Grants => "grants",
             Request::Revoke { .. } => "revoke",
             Request::Log { .. } => "log",
@@ -287,6 +304,9 @@ impl Request {
 pub struct Envelope {
     pub version: u32,
     pub request: Request,
+    /// An agent token (`VISIPASS_TOKEN`), for agents with no human at hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<Secret>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -365,6 +385,7 @@ mod tests {
                 },
                 purpose: None,
             },
+            token: None,
         })
         .unwrap();
         assert!(line.contains(r#""type":"resolve""#));

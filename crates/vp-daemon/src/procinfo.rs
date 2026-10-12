@@ -36,6 +36,8 @@ pub struct Requester {
     /// What "this task" binds to: the agent process, else the requester's parent.
     pub task: Option<ProcessId>,
     pub project: Project,
+    /// Set when the request carried a valid agent token.
+    pub token: Option<crate::tokens::TokenRecord>,
 }
 
 impl Requester {
@@ -195,6 +197,7 @@ pub fn identify(pid: u32) -> Requester {
         agent,
         task,
         project: project_of(&cwd),
+        token: None,
     }
 }
 

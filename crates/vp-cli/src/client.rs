@@ -80,6 +80,10 @@ pub fn call_with(stream: UnixStream, request: Request) -> Result<Value, Failure>
     let mut line = serde_json::to_string(&Envelope {
         version: PROTOCOL_VERSION,
         request,
+        token: std::env::var("VISIPASS_TOKEN")
+            .ok()
+            .filter(|t| !t.is_empty())
+            .map(vp_core::secret::Secret::new),
     })
     .map_err(|_| Failure::new("Could not encode the request"))?;
     line.push('\n');

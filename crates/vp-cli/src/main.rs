@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use vp_core::env::{self, Assignment};
-use vp_core::ipc::{Request, Usage};
+use vp_core::ipc::{Operation, Request, Usage};
 use vp_core::model::{Destination, PasswordRequest, Scope};
 use vp_core::refs::SecretRef;
 use vp_core::secret::Secret;
@@ -163,6 +163,9 @@ enum Commands {
         #[command(flatten)]
         purpose: Purpose,
     },
+    /// Scoped tokens for agents with no human at hand (creating one asks the human)
+    #[command(subcommand)]
+    Agent(AgentCommands),
     /// List or revoke the standing grants the human has given
     #[command(subcommand)]
     Grant(GrantCommands),
@@ -278,6 +281,30 @@ enum CreateCommands {
         #[command(flatten)]
         purpose: Purpose,
     },
+}
+
+#[derive(Subcommand)]
+enum AgentCommands {
+    /// Create a token; the human approves it, and it is shown once
+    Create {
+        /// A name for the token, e.g. "nightly-deploy"
+        name: String,
+        /// Vaults the token may use; repeat for several
+        #[arg(long = "vault", required = true)]
+        vaults: Vec<String>,
+        /// What it may do: run, materialize, reveal, write (comma-separated; default run)
+        #[arg(long, value_delimiter = ',')]
+        ops: Vec<String>,
+        /// Expire after this many days
+        #[arg(long)]
+        days: Option<u64>,
+        #[command(flatten)]
+        purpose: Purpose,
+    },
+    /// List live tokens (never their secrets)
+    List,
+    /// Revoke a token by ID
+    Revoke { id: String },
 }
 
 #[derive(Subcommand)]
@@ -649,6 +676,37 @@ fn execute(command: Commands) -> Result<i32, Failure> {
                 value,
                 purpose: purpose.purpose,
             })?)
+        }
+        Commands::Agent(AgentCommands::Create {
+            name,
+            vaults,
+            ops,
+            days,
+            purpose,
+        }) => {
+            let operations = ops
+                .iter()
+                .map(|o| match o.trim() {
+                    "run" => Ok(Operation::Run),
+                    "materialize" => Ok(Operation::Materialize),
+                    "reveal" => Ok(Operation::Reveal),
+                    "write" => Ok(Operation::Write),
+                    other => Err(Failure::new(format!(
+                        "Unknown operation \"{other}\"; use run, materialize, reveal or write"
+                    ))),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            print(&client::call(Request::CreateToken {
+                name,
+                vaults,
+                operations,
+                days,
+                purpose: purpose.purpose,
+            })?)
+        }
+        Commands::Agent(AgentCommands::List) => print(&client::call(Request::Tokens)?),
+        Commands::Agent(AgentCommands::Revoke { id }) => {
+            print(&client::call(Request::RevokeToken { id })?)
         }
         Commands::Grant(GrantCommands::List) => print(&client::call(Request::Grants)?),
         Commands::Grant(GrantCommands::Revoke { id, all }) => {

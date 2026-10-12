@@ -44,6 +44,9 @@ vp find openai stripe                     # op:// references, never values
 vp run --env "OPENAI_API_KEY=op://Personal/OpenAI API Key/credential" -- bun dev
 vp env run .env.tpl -- cargo test         # one approval for every reference in the file
 vp create api-credential --title "OpenAI API Key" --vault Personal --clipboard
+vp request --title "Stripe Live Key" --vault Work   # you paste it; the agent gets a reference
+vp env import .env --vault Dev            # move plaintext secrets into the vault, rewrite to refs
+vp app                                    # the desktop app; vp quick for Quick Access
 vp grant list                             # what you have approved
 vp log                                    # what was asked for, by whom
 ```
