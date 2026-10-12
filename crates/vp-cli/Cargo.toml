@@ -1,0 +1,23 @@
+[package]
+name = "vp-cli"
+description = "vp: find, use and save secrets without exposing them to coding agents."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "vp"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+vp-core.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true
+vp-daemon.workspace = true
+vp-op.workspace = true

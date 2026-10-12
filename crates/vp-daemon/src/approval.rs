@@ -1,0 +1,296 @@
+//! Asking the human.
+//!
+//! Approval is never a command an agent can run: a `vp approve` would be one
+//! shell call away from the agent itself. The human answers in a window the
+//! daemon launches and alone holds the output pipe of: `visipass-prompt` (GPUI,
+//! styled after the desktop theme), else zenity. When visipassd runs in the
+//! foreground of a terminal with no graphical session, it asks there.
+
+use crate::grants::Decision;
+use std::future::Future;
+use std::path::PathBuf;
+use std::process::Stdio;
+use std::time::Duration;
+use vp_core::Failure;
+
+pub const TIMEOUT: Duration = Duration::from_secs(120);
+
+use vp_core::ipc::Answer;
+pub use vp_core::ipc::ApprovalPrompt as Prompt;
+
+pub trait Approver: Send + Sync + 'static {
+    fn method(&self) -> &'static str;
+    fn ask(&self, prompt: &Prompt) -> impl Future<Output = Result<Decision, Failure>> + Send;
+}
+
+const ONCE: &str = "Allow once";
+const TASK: &str = "This task";
+const HOURS: &str = "This project, 8 hours";
+const ALWAYS: &str = "Always for this project";
+const STANDING_HOURS: u64 = 8;
+
+fn truncate(text: &str, max: usize) -> String {
+    let clean: String = text
+        .chars()
+        .map(|c| if c.is_control() && c != '\n' { ' ' } else { c })
+        .collect();
+    if clean.chars().count() <= max {
+        clean
+    } else {
+        format!("{}…", clean.chars().take(max).collect::<String>())
+    }
+}
+
+fn pango(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn markup(prompt: &Prompt) -> String {
+    let mut text = format!(
+        "<b>{}</b> wants to {}.\n",
+        pango(&prompt.who),
+        pango(&prompt.action)
+    );
+    for (label, value) in &prompt.details {
+        text.push_str(&format!(
+            "\n<b>{}</b>\n{}\n",
+            pango(label),
+            pango(&truncate(value, 600))
+        ));
+    }
+    if !prompt.secrets.is_empty() {
+        text.push_str(&format!(
+            "\n<b>Secrets</b>\n{}\n",
+            pango(&truncate(&prompt.secrets.join("\n"), 600))
+        ));
+    }
+    if let Some(purpose) = &prompt.purpose {
+        text.push_str(&format!(
+            "\n<b>Purpose</b> <i>(the agent's own words)</i>\n{}\n",
+            pango(&truncate(purpose, 300))
+        ));
+    }
+    text
+}
+
+fn plain(prompt: &Prompt) -> String {
+    let mut text = format!("{} wants to {}.\n", prompt.who, prompt.action);
+    for (label, value) in &prompt.details {
+        text.push_str(&format!(
+            "  {label}: {}\n",
+            truncate(value, 600).replace('\n', "\n    ")
+        ));
+    }
+    if !prompt.secrets.is_empty() {
+        text.push_str(&format!(
+            "  Secrets: {}\n",
+            truncate(&prompt.secrets.join("\n"), 600).replace('\n', "\n    ")
+        ));
+    }
+    if let Some(purpose) = &prompt.purpose {
+        text.push_str(&format!(
+            "  Purpose (the agent's own words): {}\n",
+            truncate(purpose, 300)
+        ));
+    }
+    text
+}
+
+pub enum Desktop {
+    /// `visipass-prompt`, found next to visipassd or on PATH.
+    Native(PathBuf),
+    Zenity,
+    Terminal,
+    Unavailable,
+}
+
+fn on_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|p| p.is_file())
+}
+
+fn beside_self(name: &str) -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    Some(exe.parent()?.join(name)).filter(|p| p.is_file())
+}
+
+impl Desktop {
+    /// Chooses how to ask, once, at startup.
+    pub fn detect(foreground_terminal: bool) -> Self {
+        let display = ["WAYLAND_DISPLAY", "DISPLAY"]
+            .iter()
+            .any(|v| std::env::var_os(v).is_some_and(|x| !x.is_empty()));
+        if display
+            && let Some(native) =
+                beside_self("visipass-prompt").or_else(|| on_path("visipass-prompt"))
+        {
+            return Desktop::Native(native);
+        }
+        if display && on_path("zenity").is_some() {
+            Desktop::Zenity
+        } else if foreground_terminal {
+            Desktop::Terminal
+        } else {
+            Desktop::Unavailable
+        }
+    }
+
+    async fn native(program: &PathBuf, prompt: &Prompt) -> Result<Decision, Failure> {
+        let unavailable = || Failure::new("Could not show the approval prompt");
+        let mut child = tokio::process::Command::new(program)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|_| unavailable())?;
+        let request = serde_json::to_vec(prompt).map_err(|_| unavailable())?;
+        {
+            use tokio::io::AsyncWriteExt;
+            let mut stdin = child.stdin.take().ok_or_else(unavailable)?;
+            stdin.write_all(&request).await.map_err(|_| unavailable())?;
+        }
+        // The prompt times itself out; this only guards against a hung window.
+        let output =
+            tokio::time::timeout(TIMEOUT + Duration::from_secs(10), child.wait_with_output())
+                .await
+                .map_err(|_| Failure::new("No one answered the approval prompt within 2 minutes"))?
+                .map_err(|_| unavailable())?;
+        Ok(
+            match Answer::parse(&String::from_utf8_lossy(&output.stdout)) {
+                Some(Answer::Once) => Decision::Once,
+                Some(Answer::Task) => Decision::Task,
+                Some(Answer::Hours) => Decision::Hours(STANDING_HOURS),
+                Some(Answer::Always) => Decision::Always,
+                Some(Answer::Timeout) => {
+                    return Err(Failure::new(
+                        "No one answered the approval prompt within 2 minutes. Ask the human to approve, then run the command again",
+                    ));
+                }
+                // Deny, a closed window, a crash: all deny.
+                Some(Answer::Deny) | None => Decision::Deny,
+            },
+        )
+    }
+
+    async fn zenity(prompt: &Prompt) -> Result<Decision, Failure> {
+        let mut command = tokio::process::Command::new("zenity");
+        command
+            .args([
+                "--question",
+                "--title",
+                "VisiPass",
+                "--width",
+                "560",
+                "--text",
+            ])
+            .arg(markup(prompt))
+            .args(["--ok-label", ONCE, "--cancel-label", "Deny"])
+            .args([
+                "--extra-button",
+                TASK,
+                "--extra-button",
+                HOURS,
+                "--extra-button",
+                ALWAYS,
+            ])
+            .args(["--timeout", &TIMEOUT.as_secs().to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let output = command
+            .output()
+            .await
+            .map_err(|_| Failure::new("Could not show the approval prompt"))?;
+        let choice = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Ok(match (output.status.code(), choice.as_str()) {
+            (Some(0), _) => Decision::Once,
+            (_, TASK) => Decision::Task,
+            (_, HOURS) => Decision::Hours(STANDING_HOURS),
+            (_, ALWAYS) => Decision::Always,
+            (Some(5), _) => {
+                return Err(Failure::new(
+                    "No one answered the approval prompt within 2 minutes. Ask the human to approve, then run the command again",
+                ));
+            }
+            _ => Decision::Deny,
+        })
+    }
+
+    async fn terminal(prompt: &Prompt) -> Result<Decision, Failure> {
+        let text = plain(prompt);
+        let answer = tokio::task::spawn_blocking(move || {
+            use std::io::{BufRead, Write};
+            let tty = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty").ok()?;
+            let mut out = &tty;
+            write!(out, "\n{text}  [d]eny  [o]nce  [t]his task  [p]roject {STANDING_HOURS}h  [a]lways for project: ").ok()?;
+            out.flush().ok()?;
+            let mut line = String::new();
+            std::io::BufReader::new(&tty).read_line(&mut line).ok()?;
+            Some(line.trim().to_lowercase())
+        })
+        .await
+        .ok()
+        .flatten()
+        .ok_or_else(|| Failure::new("Could not read an answer from the visipassd terminal"))?;
+        Ok(match answer.as_str() {
+            "o" | "once" => Decision::Once,
+            "t" | "task" => Decision::Task,
+            "p" | "project" => Decision::Hours(STANDING_HOURS),
+            "a" | "always" => Decision::Always,
+            _ => Decision::Deny,
+        })
+    }
+}
+
+impl Approver for Desktop {
+    fn method(&self) -> &'static str {
+        match self {
+            Desktop::Native(_) => "VisiPass window",
+            Desktop::Zenity => "desktop dialog (zenity)",
+            Desktop::Terminal => "visipassd terminal",
+            Desktop::Unavailable => "none",
+        }
+    }
+
+    async fn ask(&self, prompt: &Prompt) -> Result<Decision, Failure> {
+        match self {
+            Desktop::Native(program) => Self::native(program, prompt).await,
+            Desktop::Zenity => Self::zenity(prompt).await,
+            Desktop::Terminal => tokio::time::timeout(TIMEOUT, Self::terminal(prompt))
+                .await
+                .map_err(|_| {
+                    Failure::new("No one answered the approval prompt within 2 minutes")
+                })?,
+            Desktop::Unavailable => Err(Failure::new(
+                "visipassd cannot ask for approval: it has no graphical session and no terminal. Ask the human to run `vp daemon` in a terminal",
+            )),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escapes_markup_and_controls() {
+        let prompt = Prompt {
+            who: "Claude <Code>".into(),
+            action: "inject 1 secret into a command".into(),
+            details: vec![("Command".into(), "echo \x1b[31m & done".into())],
+            secrets: vec![],
+            purpose: Some("<b>trust me</b>".into()),
+            timeout_secs: 120,
+        };
+        let text = markup(&prompt);
+        assert!(text.contains("Claude &lt;Code&gt;"));
+        assert!(text.contains("&lt;b&gt;trust me&lt;/b&gt;"));
+        assert!(!text.contains('\x1b'));
+    }
+}
