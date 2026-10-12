@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="vp-mark-title">
+  <title id="vp-mark-title">VisiPass</title>
+  <!-- VisiPass mark: a block with a keyhole, on the VisiGrid construction grid
+       (512 units, corner radius 76). Keyhole: circle r84 at (256,208) joined to a
+       56-wide slot (the grid's gutter width) down to y=400. -->
+  <path fill="currentColor" fill-rule="evenodd" d="M76,0 H436 A76,76 0 0 1 512,76 V436 A76,76 0 0 1 436,512 H76 A76,76 0 0 1 0,436 V76 A76,76 0 0 1 76,0 Z M228,400 H284 V287.2 A84,84 0 1 0 228,287.2 Z"/>
+</svg>

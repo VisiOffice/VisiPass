@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="vo-icon-title">
+  <title id="vo-icon-title">VisiOffice</title>
+  <rect width="512" height="512" rx="115" fill="#101014"/>
+  <g fill="#F5F6F8" transform="translate(256,256) scale(0.76) translate(-256,-256)">
+    <path d="M0,168 L56,112 H133 V512 H76 A76,76 0 0 1 0,436 Z"/>
+    <path d="M189,56 L245,0 H267 L323,56 V512 H189 Z"/>
+    <path d="M379,112 H456 L512,168 V436 A76,76 0 0 1 436,512 H379 Z"/>
+  </g>
+</svg>

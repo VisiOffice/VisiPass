@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="vo-mark-title">
+  <title id="vo-mark-title">VisiOffice</title>
+  <!-- VisiOffice mark: three slabs, one per product family, on the VisiGrid grid
+       (56-unit gutters, 45-degree chamfers, outer radius 76). The middle slab is
+       tallest and comes to a point. -->
+  <g fill="currentColor">
+    <path d="M0,168 L56,112 H133 V512 H76 A76,76 0 0 1 0,436 Z"/>
+    <path d="M189,56 L245,0 H267 L323,56 V512 H189 Z"/>
+    <path d="M379,112 H456 L512,168 V436 A76,76 0 0 1 436,512 H379 Z"/>
+  </g>
+</svg>

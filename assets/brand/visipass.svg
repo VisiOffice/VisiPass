@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="vp-icon-title">
+  <title id="vp-icon-title">VisiPass</title>
+  <rect width="512" height="512" rx="115" fill="#101014"/>
+  <g transform="translate(256,256) scale(0.76) translate(-256,-256)">
+    <path fill="#F5F6F8" fill-rule="evenodd" d="M76,0 H436 A76,76 0 0 1 512,76 V436 A76,76 0 0 1 436,512 H76 A76,76 0 0 1 0,436 V76 A76,76 0 0 1 76,0 Z M228,400 H284 V287.2 A84,84 0 1 0 228,287.2 Z"/>
+  </g>
+</svg>

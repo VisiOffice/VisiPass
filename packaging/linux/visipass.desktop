@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=VisiPass
+GenericName=Password Manager
+Comment=Browse, add and edit passwords; approve what coding agents may use
+Exec=visipass-app
+Icon=visipass
+Terminal=false
+Categories=Utility;Security;
+Keywords=password;secrets;1password;vault;totp;
+StartupWMClass=visipass

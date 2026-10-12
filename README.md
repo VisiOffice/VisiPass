@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/brand/visipass.svg" width="96" alt="VisiPass"></p>
+
 # VisiPass
 
 A password manager built for coding agents. Your agent finds, uses and saves secrets without ever seeing them, and you approve per task and project instead of per shell.

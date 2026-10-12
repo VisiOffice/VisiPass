@@ -44,6 +44,8 @@ jobs:
           cp target/release/vp target/release/visipassd target/release/visipass-prompt target/release/visipass-app "dist/$name/"
           cp LICENSE README.md SECURITY.md "dist/$name/"
           cp skills/visipass/SKILL.md "dist/$name/SKILL.md"
+          cp packaging/linux/visipass.desktop assets/brand/visipass.svg "dist/$name/"
+          mkdir -p "dist/$name/icons" && cp assets/icons/visipass-*.png "dist/$name/icons/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
       - uses: actions/upload-artifact@v4
