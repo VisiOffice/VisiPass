@@ -8,6 +8,7 @@
 mod client;
 mod doctor;
 mod input;
+mod mcp;
 mod run;
 
 use clap::{Args, Parser, Subcommand};
@@ -178,6 +179,8 @@ enum Commands {
     Status,
     /// Check the setup without authenticating or prompting; safe to paste into an issue
     Doctor,
+    /// Serve VisiPass to an agent over MCP (stdio). No tool ever returns a secret value
+    Mcp,
     /// Run visipassd in this terminal, so approvals can be answered here
     Daemon {
         /// Stop the running daemon
@@ -458,78 +461,17 @@ fn execute(command: Commands) -> Result<i32, Failure> {
             dry_run,
             purpose,
         }) => {
-            let content = read_text(&file)?;
-            let lines = env::parse_env(&content);
-            let prefix = prefix.unwrap_or_else(|| project_name(&absolute(&file)));
-            let mut chosen = Vec::new();
-            let mut kept = Vec::new();
-            for line in &lines {
-                if let env::EnvLine::Literal {
-                    var: Some((name, value)),
-                    ..
-                } = line
-                {
-                    let wanted = if !only.is_empty() {
-                        only.contains(name)
-                    } else {
-                        all || env::looks_secret(name, value)
-                    } && !except.contains(name)
-                        && !value.trim().is_empty();
-                    if wanted && !chosen.iter().any(|(n, _): &(String, Secret)| n == name) {
-                        chosen.push((name.clone(), Secret::new(value.clone())));
-                    } else if !wanted {
-                        kept.push(name.clone());
-                    }
-                }
-            }
-            let titled: Vec<(String, String)> = chosen
-                .iter()
-                .map(|(n, _)| (n.clone(), format!("{prefix} {n}")))
-                .collect();
-            if dry_run || chosen.is_empty() {
-                let would: Vec<Value> = titled
-                    .iter()
-                    .map(|(n, t)| serde_json::json!({ "name": n, "title": t }))
-                    .collect();
-                return print(
-                    &serde_json::json!({ "vault": vault, "wouldImport": would, "kept": kept, "dryRun": true }),
-                );
-            }
-            let entries = chosen
-                .into_iter()
-                .zip(&titled)
-                .map(|((name, value), (_, title))| vp_core::ipc::ImportEntry {
-                    name,
-                    title: title.clone(),
-                    value,
-                })
-                .collect();
-            let result = client::call(Request::ImportEnv {
+            let options = ImportOptions {
                 vault,
                 account,
-                entries,
+                prefix,
+                only,
+                except,
+                all,
+                dry_run,
                 purpose: purpose.purpose,
-            })?;
-            let mut replacements = HashMap::new();
-            for done in result["imported"].as_array().into_iter().flatten() {
-                if let (Some(name), Some(reference)) = (done["name"].as_str(), done["ref"].as_str())
-                {
-                    replacements.insert(name.to_string(), SecretRef::parse(reference)?);
-                }
-            }
-            if !replacements.is_empty() {
-                write_keeping_mode(&file, &env::rewrite(&content, &replacements))?;
-            }
-            eprintln!(
-                "Moved {} secret{} into the vault and rewrote them as references in {}. Run commands with: vp env run {} -- <command>",
-                replacements.len(),
-                if replacements.len() == 1 { "" } else { "s" },
-                file.display(),
-                file.display()
-            );
-            print(
-                &serde_json::json!({ "imported": result["imported"], "failed": result["failed"], "kept": kept }),
-            )
+            };
+            print(&env_import(&file, options)?)
         }
         Commands::Env(EnvCommands::Check { file }) => {
             let refs = env::references(&env::parse_env(&read_text(&file)?));
@@ -732,8 +674,96 @@ fn execute(command: Commands) -> Result<i32, Failure> {
             Err(_) => print(&serde_json::json!({ "running": false })),
         },
         Commands::Doctor => print(&doctor::doctor()),
+        Commands::Mcp => mcp::serve(),
         Commands::Daemon { stop, restart } => daemon(stop, restart),
     }
+}
+
+pub struct ImportOptions {
+    pub vault: String,
+    pub account: Option<String>,
+    pub prefix: Option<String>,
+    pub only: Vec<String>,
+    pub except: Vec<String>,
+    pub all: bool,
+    pub dry_run: bool,
+    pub purpose: Option<String>,
+}
+
+/// Moves secret-looking plaintext values into the vault and rewrites them as
+/// references. Shared by `vp env import` and the MCP server. Never returns values.
+pub fn env_import(file: &Path, o: ImportOptions) -> Result<Value, Failure> {
+    let content = read_text(file)?;
+    let lines = env::parse_env(&content);
+    let prefix = o.prefix.unwrap_or_else(|| project_name(&absolute(file)));
+    let mut chosen: Vec<(String, Secret)> = Vec::new();
+    let mut kept = Vec::new();
+    for line in &lines {
+        if let env::EnvLine::Literal {
+            var: Some((name, value)),
+            ..
+        } = line
+        {
+            let wanted = if !o.only.is_empty() {
+                o.only.contains(name)
+            } else {
+                o.all || env::looks_secret(name, value)
+            } && !o.except.contains(name)
+                && !value.trim().is_empty();
+            if wanted && !chosen.iter().any(|(n, _)| n == name) {
+                chosen.push((name.clone(), Secret::new(value.clone())));
+            } else if !wanted {
+                kept.push(name.clone());
+            }
+        }
+    }
+    let titled: Vec<(String, String)> = chosen
+        .iter()
+        .map(|(n, _)| (n.clone(), format!("{prefix} {n}")))
+        .collect();
+    if o.dry_run || chosen.is_empty() {
+        let would: Vec<Value> = titled
+            .iter()
+            .map(|(n, t)| serde_json::json!({ "name": n, "title": t }))
+            .collect();
+        return Ok(
+            serde_json::json!({ "vault": o.vault, "wouldImport": would, "kept": kept, "dryRun": true }),
+        );
+    }
+    let entries = chosen
+        .into_iter()
+        .zip(&titled)
+        .map(|((name, value), (_, title))| vp_core::ipc::ImportEntry {
+            name,
+            title: title.clone(),
+            value,
+        })
+        .collect();
+    let result = client::call(Request::ImportEnv {
+        vault: o.vault,
+        account: o.account,
+        entries,
+        purpose: o.purpose,
+    })?;
+    let mut replacements = HashMap::new();
+    for done in result["imported"].as_array().into_iter().flatten() {
+        if let (Some(name), Some(reference)) = (done["name"].as_str(), done["ref"].as_str()) {
+            replacements.insert(name.to_string(), SecretRef::parse(reference)?);
+        }
+    }
+    if !replacements.is_empty() {
+        write_keeping_mode(file, &env::rewrite(&content, &replacements))?;
+    }
+    eprintln!(
+        "Moved {} secret{} into the vault and rewrote them as references in {}. Run commands with: vp env run {} -- <command>",
+        replacements.len(),
+        if replacements.len() == 1 { "" } else { "s" },
+        file.display(),
+        file.display()
+    );
+    Ok(
+        serde_json::json!({ "imported": result["imported"], "failed": result["failed"], "kept": kept }),
+    )
 }
 
 /// The git repository's name for a file, else its directory's name.

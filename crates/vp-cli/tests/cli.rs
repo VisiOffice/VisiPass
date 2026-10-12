@@ -617,6 +617,56 @@ fn env_check_reports_without_revealing() {
 }
 
 #[test]
+fn mcp_serves_tools_that_never_return_values() {
+    let world = World::new(&[Decision::Once]);
+    let messages = [
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}}),
+        serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "find", "arguments": {"queries": ["openai"]}}}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "request_secret", "arguments": {"title": "Mcp Key", "vault": "Dev", "purpose": "test"}}}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "nope", "arguments": {}}}),
+    ];
+    let input: String = messages.iter().map(|m| m.to_string() + "\n").collect();
+    let out = world.vp(&["mcp"], Some(&input));
+    clean(&out);
+    let replies: Vec<serde_json::Value> = text(&out.stdout)
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(replies.len(), 5, "no reply to the notification");
+    assert_eq!(replies[0]["result"]["serverInfo"]["name"], "visipass");
+    let names: Vec<&str> = replies[1]["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"find") && names.contains(&"request_secret"));
+    assert!(
+        !names
+            .iter()
+            .any(|n| n.contains("read") || n.contains("run")),
+        "{names:?}"
+    );
+    assert!(
+        replies[2]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("op://Dev/OpenAI API Key/credential")
+    );
+    assert_eq!(replies[3]["result"]["isError"], false);
+    assert!(
+        replies[3]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("\"verified\": true")
+    );
+    assert_eq!(replies[4]["result"]["isError"], true);
+    world.assert_contained();
+}
+
+#[test]
 fn doctor_never_prompts() {
     let world = World::new(&[]);
     let out = world.vp(&["doctor"], None);
