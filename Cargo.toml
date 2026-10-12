@@ -5,7 +5,7 @@ members = ["crates/*"]
 default-members = ["crates/vp-core", "crates/vp-op", "crates/vp-daemon", "crates/vp-cli"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "AGPL-3.0-only"
 repository = "https://github.com/VisiOffice/VisiPass"
