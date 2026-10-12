@@ -8,9 +8,10 @@
 mod app;
 mod client;
 mod editor;
+mod keymap;
 
-use app::{CloseEditor, FocusSearch, NewItem, VisiPassApp};
-use gpui::{App, AppContext, KeyBinding, Size, TitlebarOptions, WindowBounds, WindowOptions, px};
+use app::VisiPassApp;
+use gpui::{App, AppContext, Size, TitlebarOptions, WindowBounds, WindowOptions, px};
 use std::sync::Arc;
 
 fn main() {
@@ -26,11 +27,7 @@ fn main() {
 
     gpui_platform::application().run(move |cx: &mut App| {
         vp_gui::text_input::bind_keys(cx);
-        cx.bind_keys([
-            KeyBinding::new("secondary-f", FocusSearch, Some("VisiPassApp")),
-            KeyBinding::new("secondary-n", NewItem, Some("VisiPassApp")),
-            KeyBinding::new("escape", CloseEditor, Some("VisiPassApp")),
-        ]);
+        let keymap = std::rc::Rc::new(keymap::load(cx));
         let options = WindowOptions {
             titlebar: Some(TitlebarOptions {
                 title: Some("VisiPass".into()),
@@ -41,7 +38,7 @@ fn main() {
             ..Default::default()
         };
         let opened = cx.open_window(options, |window, cx| {
-            cx.new(|cx| VisiPassApp::new(theme.clone(), client.clone(), window, cx))
+            cx.new(|cx| VisiPassApp::new(theme.clone(), client.clone(), keymap.clone(), window, cx))
         });
         if opened.is_err() {
             eprintln!("visipass-app: could not open a window");

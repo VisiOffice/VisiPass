@@ -254,6 +254,10 @@ impl TextInput {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
             ));
+        } else {
+            // Nothing selected: let the next binding for this key run (the app's
+            // "copy username" uses Ctrl+C too).
+            cx.propagate();
         }
     }
 

@@ -2,13 +2,16 @@
 
 use crate::client::Client;
 use crate::editor::{EditorEvent, ItemEditor};
+use crate::keymap::{Keymap, SHORTCUTS, actions::*, pretty};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     ClipboardItem, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, Render,
-    SharedString, Window, actions, div, prelude::*, px, uniform_list,
+    ScrollStrategy, SharedString, UniformListScrollHandle, Window, deferred, div, prelude::*, px,
+    uniform_list,
 };
 use serde_json::Value;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use vp_core::ipc::Request;
@@ -18,8 +21,6 @@ use vp_core::totp::Totp;
 use vp_gui::text_input::{InputEvent, TextInput};
 use vp_gui::theme::{Theme, alpha};
 
-actions!(visipass_app, [FocusSearch, NewItem, CloseEditor]);
-
 const CLIPBOARD_CLEAR: Duration = Duration::from_secs(90);
 const REVEAL_FOR: Duration = Duration::from_secs(30);
 const SLOW_CALL: Duration = Duration::from_millis(1500);
@@ -28,9 +29,14 @@ const SLOW_CALL: Duration = Duration::from_millis(1500);
 pub enum Filter {
     All,
     Favorites,
-    Category(String),
     Vault(String),
     Agents,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Menu {
+    Category,
+    New,
 }
 
 pub struct VisiPassApp {
@@ -43,6 +49,13 @@ pub struct VisiPassApp {
     items: Vec<ItemSummary>,
     visible: Vec<usize>,
     filter: Filter,
+    category: Option<String>,
+    cursor: Option<usize>,
+    scroll: UniformListScrollHandle,
+    menu: Option<Menu>,
+    show_help: bool,
+    keymap: Rc<Keymap>,
+    open_generation: u64,
     selected: Option<String>,
     detail: Option<Item>,
     editor: Option<Entity<ItemEditor>>,
@@ -97,6 +110,7 @@ impl VisiPassApp {
     pub fn new(
         theme: Theme,
         client: Arc<Client>,
+        keymap: Rc<Keymap>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -108,13 +122,11 @@ impl VisiPassApp {
                 this.apply_filter();
                 cx.notify();
             }
-            InputEvent::Submit => {
-                if let Some(&first) = this.visible.first() {
-                    let summary = this.items[first].clone();
-                    this.open(summary, cx);
-                }
+            InputEvent::Submit => this.open_cursor(cx),
+            InputEvent::Cancel => {
+                this.menu = None;
+                cx.notify();
             }
-            InputEvent::Cancel => {}
         })
         .detach();
         // One tick a second: TOTP countdowns, reveal timeouts, clipboard clearing.
@@ -139,6 +151,13 @@ impl VisiPassApp {
             items: Vec::new(),
             visible: Vec::new(),
             filter: Filter::All,
+            category: None,
+            cursor: None,
+            scroll: UniformListScrollHandle::new(),
+            menu: None,
+            show_help: false,
+            keymap,
+            open_generation: 0,
             selected: None,
             detail: None,
             editor: None,
@@ -213,32 +232,133 @@ impl VisiPassApp {
     }
 
     fn apply_filter(&mut self) {
-        let query: Vec<String> = self.query.split_whitespace().map(String::from).collect();
-        self.visible = self
+        let mut scored: Vec<(u32, usize)> = self
             .items
             .iter()
             .enumerate()
             .filter(|(_, item)| match &self.filter {
                 Filter::All | Filter::Agents => true,
                 Filter::Favorites => item.favorite,
-                Filter::Category(c) => &item.category == c,
                 Filter::Vault(v) => &item.vault.id == v,
             })
-            .filter(|(_, item)| {
-                query.iter().all(|term| {
-                    item.title.to_lowercase().contains(term.as_str())
-                        || item
-                            .tags
-                            .iter()
-                            .any(|t| t.to_lowercase().contains(term.as_str()))
-                        || item
-                            .urls
-                            .iter()
-                            .any(|u| u.href.to_lowercase().contains(term.as_str()))
-                })
-            })
-            .map(|(i, _)| i)
+            .filter(|(_, item)| self.category.as_ref().is_none_or(|c| &item.category == c))
+            .filter_map(|(i, item)| vp_core::find::rank(&self.query, item).map(|score| (score, i)))
             .collect();
+        // Best match first; the item list is already alphabetical for ties.
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        self.visible = scored.into_iter().map(|(_, i)| i).collect();
+        self.cursor = (!self.visible.is_empty()).then_some(0);
+        self.scroll.scroll_to_item(0, ScrollStrategy::Top);
+    }
+
+    fn move_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.visible.is_empty() {
+            return;
+        }
+        let last = self.visible.len() as isize - 1;
+        let next = (self.cursor.map(|c| c as isize).unwrap_or(-1) + delta).clamp(0, last) as usize;
+        self.cursor = Some(next);
+        self.scroll.scroll_to_item(next, ScrollStrategy::Nearest);
+        // Each open is a vault call, so wait until the arrow keys come to rest.
+        self.open_generation += 1;
+        let generation = self.open_generation;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(220))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.open_generation == generation {
+                    this.open_cursor(cx);
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn open_cursor(&mut self, cx: &mut Context<Self>) {
+        if let Some(summary) = self
+            .cursor
+            .and_then(|c| self.visible.get(c))
+            .map(|&i| self.items[i].clone())
+            && (self.selected.as_deref() != Some(summary.id.as_str()) || self.detail.is_none())
+        {
+            self.open(summary, cx);
+        }
+    }
+
+    /// The value of the open item's field with this purpose (or id).
+    fn field_value(&self, purpose: &str, id: &str) -> Option<String> {
+        let item = self.detail.as_ref()?;
+        item.fields
+            .iter()
+            .find(|f| f.purpose.as_deref() == Some(purpose) || f.id == id)
+            .and_then(|f| f.value.as_ref())
+            .map(|v| v.expose().to_string())
+            .filter(|v| !v.is_empty())
+    }
+
+    fn copy_username(&mut self, cx: &mut Context<Self>) {
+        match self.field_value("USERNAME", "username") {
+            Some(v) => self.copy("username", &v, cx),
+            None => self.note("This item has no username", cx),
+        }
+    }
+
+    fn copy_password(&mut self, cx: &mut Context<Self>) {
+        let value = self
+            .field_value("PASSWORD", "password")
+            .or_else(|| self.field_value("", "credential"));
+        match value {
+            Some(v) => self.copy("password", &v, cx),
+            None => self.note("This item has no password", cx),
+        }
+    }
+
+    fn copy_code(&mut self, cx: &mut Context<Self>) {
+        let code = self.detail.as_ref().and_then(|item| {
+            item.fields
+                .iter()
+                .filter(|f| f.kind == "OTP")
+                .find_map(|f| Totp::parse(f.value.as_ref()?.expose()).ok())
+                .map(|t| t.now().0)
+        });
+        match code {
+            Some(code) => self.copy("one-time code", &code, cx),
+            None => self.note("This item has no one-time code", cx),
+        }
+    }
+
+    fn toggle_reveal(&mut self, cx: &mut Context<Self>) {
+        let key = self.detail.as_ref().and_then(|item| {
+            item.fields
+                .iter()
+                .find(|f| f.concealed())
+                .map(|f| f.id.clone())
+        });
+        if let Some(key) = key {
+            if self.revealed.remove(&key).is_none() {
+                self.revealed.insert(key, Instant::now() + REVEAL_FOR);
+            }
+            cx.notify();
+        }
+    }
+
+    fn open_website(&mut self, cx: &mut Context<Self>) {
+        let href = self
+            .detail
+            .as_ref()
+            .and_then(|i| i.urls.first())
+            .map(|u| u.href.clone());
+        match href.filter(|h| h.starts_with("https://") || h.starts_with("http://")) {
+            Some(href) => cx.open_url(&href),
+            None => self.note("This item has no website", cx),
+        }
+    }
+
+    fn note(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.toast = Some((text.to_string(), Instant::now() + Duration::from_secs(3)));
+        cx.notify();
     }
 
     fn set_filter(&mut self, filter: Filter, cx: &mut Context<Self>) {
@@ -246,6 +366,7 @@ impl VisiPassApp {
             self.load_agents(cx);
         }
         self.filter = filter;
+        self.menu = None;
         self.apply_filter();
         cx.notify();
     }
@@ -493,14 +614,6 @@ impl VisiPassApp {
                 .text_color(t.muted)
                 .child(text.to_uppercase())
         };
-        let mut categories: Vec<(String, usize)> = Vec::new();
-        for item in &self.items {
-            match categories.iter_mut().find(|(c, _)| c == &item.category) {
-                Some((_, n)) => *n += 1,
-                None => categories.push((item.category.clone(), 1)),
-            }
-        }
-        categories.sort_by_key(|a| category_name(&a.0));
         let favorites = self.items.iter().filter(|i| i.favorite).count();
 
         let mut sidebar = div()
@@ -551,18 +664,7 @@ impl VisiPassApp {
                     Filter::Favorites,
                     cx,
                 ))
-            })
-            .child(heading("Categories"));
-        for (category, count) in categories {
-            sidebar = sidebar.child(self.nav_row(
-                format!("cat-{category}"),
-                category_glyph(&category),
-                category_name(&category),
-                Some(count),
-                Filter::Category(category),
-                cx,
-            ));
-        }
+            });
         sidebar = sidebar.child(heading("Vaults"));
         for vault in &self.vaults {
             let count = self.items.iter().filter(|i| i.vault.id == vault.id).count();
@@ -579,7 +681,7 @@ impl VisiPassApp {
             .child(div().flex_1().min_h(px(12.)))
             .child(self.nav_row(
                 "nav-agents".into(),
-                "\u{f544}",
+                "\u{f06a9}",
                 "Agents".into(),
                 None,
                 Filter::Agents,
@@ -590,34 +692,45 @@ impl VisiPassApp {
     fn render_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme.clone();
         let count = self.visible.len();
-        let new_menu = div()
+        let category_label = match &self.category {
+            Some(c) => format!("{} ▾", category_name(c)),
+            None => "All categories ▾".to_string(),
+        };
+        let header = div()
+            .p(px(10.))
             .flex()
-            .gap(px(6.))
-            .child(self.button("new-login", "+ Login", cx, |this, w, cx| {
-                this.new_item("LOGIN", w, cx)
-            }))
-            .child(self.button("new-api", "+ API key", cx, |this, w, cx| {
-                this.new_item("API_CREDENTIAL", w, cx)
-            }))
-            .child(self.button("new-note", "+ Note", cx, |this, w, cx| {
-                this.new_item("SECURE_NOTE", w, cx)
-            }));
+            .flex_col()
+            .gap(px(8.))
+            .child(self.search.clone())
+            .child(
+                div()
+                    .flex()
+                    .gap(px(6.))
+                    .child(
+                        self.button("category-menu", category_label, cx, |this, _, cx| {
+                            this.toggle_menu(Menu::Category, cx)
+                        }),
+                    )
+                    .child(div().flex_1())
+                    .child(self.button("new-menu", "+ New ▾", cx, |this, _, cx| {
+                        this.toggle_menu(Menu::New, cx)
+                    })),
+            )
+            .child(
+                div()
+                    .text_size(px(t.size(0.833)))
+                    .text_color(t.muted)
+                    .child(format!("{count} item{}", if count == 1 { "" } else { "s" })),
+            );
         div()
             .w(px(330.))
             .h_full()
             .flex()
             .flex_col()
+            .relative()
             .border_r_1()
             .border_color(alpha(t.foreground, 0.08))
-            .child(
-                div()
-                    .p(px(10.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.))
-                    .child(self.search.clone())
-                    .child(new_menu),
-            )
+            .child(header)
             .child(
                 uniform_list(
                     "items",
@@ -631,8 +744,141 @@ impl VisiPassApp {
                             .collect::<Vec<_>>()
                     }),
                 )
+                .track_scroll(&self.scroll)
                 .flex_1(),
             )
+            .when_some(self.menu, |d, menu| d.child(self.render_menu(menu, cx)))
+    }
+
+    fn toggle_menu(&mut self, menu: Menu, cx: &mut Context<Self>) {
+        self.menu = if self.menu == Some(menu) {
+            None
+        } else {
+            Some(menu)
+        };
+        cx.notify();
+    }
+
+    fn render_menu(&self, menu: Menu, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = self.theme.clone();
+        let entry =
+            |id: String, glyph: &'static str, label: String, count: Option<usize>, chosen: bool| {
+                div()
+                    .id(gpui::ElementId::Name(id.into()))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(10.))
+                    .py(px(4.))
+                    .cursor_pointer()
+                    .text_color(if chosen { t.accent } else { t.foreground })
+                    .hover(|s| s.bg(alpha(t.foreground, t.controls.hover_fill_alpha)))
+                    .child(
+                        div()
+                            .w(px(16.))
+                            .text_color(if chosen { t.accent } else { t.muted })
+                            .child(glyph),
+                    )
+                    .child(div().flex_1().child(label))
+                    .when_some(count, |d, n| {
+                        d.child(div().text_color(t.muted).child(n.to_string()))
+                    })
+            };
+        let mut list = div().flex().flex_col().py(px(4.));
+        match menu {
+            Menu::Category => {
+                // Counts within the current sidebar view, ignoring the category itself.
+                let mut counts: Vec<(String, usize)> = Vec::new();
+                for item in self.items.iter().filter(|item| match &self.filter {
+                    Filter::All | Filter::Agents => true,
+                    Filter::Favorites => item.favorite,
+                    Filter::Vault(v) => &item.vault.id == v,
+                }) {
+                    match counts.iter_mut().find(|(c, _)| c == &item.category) {
+                        Some((_, n)) => *n += 1,
+                        None => counts.push((item.category.clone(), 1)),
+                    }
+                }
+                counts.sort_by_key(|(c, _)| category_name(c));
+                list = list.child(
+                    entry(
+                        "cat-all".into(),
+                        "\u{f03a}",
+                        "All categories".into(),
+                        None,
+                        self.category.is_none(),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.category = None;
+                        this.menu = None;
+                        this.apply_filter();
+                        cx.notify();
+                    })),
+                );
+                for (category, n) in counts {
+                    let chosen = self.category.as_deref() == Some(category.as_str());
+                    let pick = category.clone();
+                    list = list.child(
+                        entry(
+                            format!("cat-{category}"),
+                            category_glyph(&category),
+                            category_name(&category),
+                            Some(n),
+                            chosen,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.category = Some(pick.clone());
+                            this.menu = None;
+                            this.apply_filter();
+                            cx.notify();
+                        })),
+                    );
+                }
+            }
+            Menu::New => {
+                for (category, label) in [
+                    ("LOGIN", "Login"),
+                    ("PASSWORD", "Password"),
+                    ("API_CREDENTIAL", "API credential"),
+                    ("SECURE_NOTE", "Secure note"),
+                ] {
+                    list = list.child(
+                        entry(
+                            format!("new-{category}"),
+                            category_glyph(category),
+                            label.into(),
+                            None,
+                            false,
+                        )
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.menu = None;
+                                this.new_item(category, window, cx);
+                            },
+                        )),
+                    );
+                }
+            }
+        }
+        deferred(
+            div()
+                .id("menu")
+                .absolute()
+                .top(px(84.))
+                .when(menu == Menu::Category, |d| d.left(px(10.)))
+                .when(menu == Menu::New, |d| d.right(px(10.)))
+                .w(px(240.))
+                .max_h(px(420.))
+                .overflow_y_scroll()
+                .occlude()
+                .bg(t.background)
+                .border_1()
+                .border_color(t.border)
+                .rounded(px(t.radius))
+                .shadow_lg()
+                .child(list),
+        )
+        .with_priority(1)
     }
 
     fn render_row(
@@ -643,6 +889,7 @@ impl VisiPassApp {
     ) -> gpui::AnyElement {
         let t = &self.theme;
         let selected = self.selected.as_deref() == Some(item.id.as_str());
+        let cursor = self.cursor == Some(row);
         let subtitle = match item.urls.first() {
             Some(url) => format!("{} · {}", item.vault.name, host(&url.href)),
             None => item.vault.name.clone(),
@@ -656,11 +903,20 @@ impl VisiPassApp {
             .px(px(12.))
             .py(px(6.))
             .cursor_pointer()
-            .when(selected, |d| {
+            .border_l_2()
+            .border_color(if cursor {
+                t.accent
+            } else {
+                gpui::transparent_black().into()
+            })
+            .when(selected || cursor, |d| {
                 d.bg(alpha(t.foreground, t.controls.selected_fill_alpha * 0.6))
             })
             .hover(|s| s.bg(alpha(t.foreground, t.controls.hover_fill_alpha)))
-            .on_click(cx.listener(move |this, _, _, cx| this.open(open.clone(), cx)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.cursor = Some(row);
+                this.open(open.clone(), cx)
+            }))
             .child(
                 div()
                     .w(px(18.))
@@ -687,6 +943,91 @@ impl VisiPassApp {
                     ),
             )
             .into_any_element()
+    }
+
+    fn render_help(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = self.theme.clone();
+        let mut groups = div().flex().gap(px(28.));
+        let mut current: Option<&str> = None;
+        let mut column = div().flex().flex_col().gap(px(5.));
+        for (shortcut, keys) in SHORTCUTS.iter().zip(&self.keymap.keys) {
+            if current != Some(shortcut.group) {
+                if current.is_some() {
+                    groups = groups.child(column);
+                    column = div().flex().flex_col().gap(px(5.));
+                }
+                current = Some(shortcut.group);
+                column = column.child(
+                    div()
+                        .pb(px(2.))
+                        .text_size(px(t.size(0.833)))
+                        .text_color(t.muted)
+                        .child(shortcut.group.to_uppercase()),
+                );
+            }
+            let shown = if keys.is_empty() {
+                "—".to_string()
+            } else {
+                keys.iter()
+                    .map(|k| pretty(k))
+                    .collect::<Vec<_>>()
+                    .join("  ")
+            };
+            column = column.child(
+                div()
+                    .flex()
+                    .gap(px(12.))
+                    .child(div().w(px(150.)).text_color(t.accent).child(shown))
+                    .child(div().text_color(t.foreground).child(shortcut.description)),
+            );
+        }
+        groups = groups.child(column);
+        let mut card = div()
+            .id("help")
+            .occlude()
+            .p(px(20.))
+            .flex()
+            .flex_col()
+            .gap(px(14.))
+            .bg(t.background)
+            .border_2()
+            .border_color(t.border)
+            .rounded(px(t.radius))
+            .child(
+                div()
+                    .text_size(px(t.size(1.167)))
+                    .font_weight(FontWeight::BOLD)
+                    .child("Keyboard shortcuts"),
+            )
+            .child(groups)
+            .child(
+                div()
+                    .text_size(px(t.size(0.917)))
+                    .text_color(t.muted)
+                    .child(format!(
+                        "Change them in {} (restart to apply). Esc closes.",
+                        self.keymap.path.display()
+                    )),
+            );
+        for warning in &self.keymap.warnings {
+            card = card.child(div().text_color(t.danger).child(warning.clone()));
+        }
+        deferred(
+            div()
+                .id("help-scrim")
+                .absolute()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(t.scrim)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.show_help = false;
+                    cx.notify();
+                }))
+                .child(card),
+        )
+        .with_priority(2)
     }
 
     fn render_detail(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -1123,19 +1464,62 @@ impl Render for VisiPassApp {
         let slow = self
             .busy_since
             .is_some_and(|since| since.elapsed() > SLOW_CALL);
+        let help_key = self
+            .keymap
+            .keys
+            .iter()
+            .zip(SHORTCUTS)
+            .find(|(_, s)| s.name == "show-help")
+            .and_then(|(k, _)| k.first().map(|k| pretty(k)));
         div()
             .size_full()
-            .key_context("VisiPassApp")
+            .relative()
+            .key_context(crate::keymap::APP)
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
                 let focus = this.search.read(cx).focus_handle(cx);
                 window.focus(&focus, cx);
             }))
+            .on_action(cx.listener(|this, _: &NextItem, _, cx| this.move_cursor(1, cx)))
+            .on_action(cx.listener(|this, _: &PreviousItem, _, cx| this.move_cursor(-1, cx)))
+            .on_action(cx.listener(|this, _: &OpenItem, _, cx| this.open_cursor(cx)))
+            .on_action(
+                cx.listener(|this, _: &FilterCategory, _, cx| this.toggle_menu(Menu::Category, cx)),
+            )
+            .on_action(cx.listener(|this, _: &ShowAll, _, cx| this.set_filter(Filter::All, cx)))
+            .on_action(
+                cx.listener(|this, _: &ShowFavorites, _, cx| {
+                    this.set_filter(Filter::Favorites, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &ShowAgents, _, cx| this.set_filter(Filter::Agents, cx)),
+            )
+            .on_action(cx.listener(|this, _: &ShowHelp, _, cx| {
+                this.show_help = !this.show_help;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &CopyUsername, _, cx| this.copy_username(cx)))
+            .on_action(cx.listener(|this, _: &CopyPassword, _, cx| this.copy_password(cx)))
+            .on_action(cx.listener(|this, _: &CopyOneTimeCode, _, cx| this.copy_code(cx)))
+            .on_action(cx.listener(|this, _: &RevealPassword, _, cx| this.toggle_reveal(cx)))
+            .on_action(cx.listener(|this, _: &OpenWebsite, _, cx| this.open_website(cx)))
+            .on_action(cx.listener(|this, _: &EditItem, window, cx| {
+                if let Some(item) = this.detail.clone() {
+                    this.start_editing(item, window, cx);
+                }
+            }))
             .on_action(
                 cx.listener(|this, _: &NewItem, window, cx| this.new_item("LOGIN", window, cx)),
             )
-            .on_action(cx.listener(|this, _: &CloseEditor, _, cx| {
-                this.editor = None;
+            .on_action(cx.listener(|this, _: &Dismiss, _, cx| {
+                if this.show_help {
+                    this.show_help = false;
+                } else if this.menu.is_some() {
+                    this.menu = None;
+                } else {
+                    this.editor = None;
+                }
                 cx.notify();
             }))
             .flex()
@@ -1153,7 +1537,7 @@ impl Render for VisiPassApp {
                     .child(self.render_list(cx))
                     .child(self.render_detail(cx)),
             )
-            .when(slow || self.error.is_some() || self.toast.is_some(), |d| {
+            .child({
                 let (text, color) = match (&self.error, slow, &self.toast) {
                     (Some(e), _, _) => (e.clone(), t.danger),
                     (None, true, _) => (
@@ -1163,16 +1547,31 @@ impl Render for VisiPassApp {
                     (None, false, Some((toast, _))) => (toast.clone(), t.accent),
                     _ => (String::new(), t.muted),
                 };
-                d.child(
-                    div()
-                        .px(px(14.))
-                        .py(px(6.))
-                        .border_t_1()
-                        .border_color(alpha(t.foreground, 0.08))
-                        .bg(t.well)
-                        .text_color(color)
-                        .child(text),
-                )
+                div()
+                    .flex()
+                    .items_center()
+                    .px(px(14.))
+                    .py(px(4.))
+                    .border_t_1()
+                    .border_color(alpha(t.foreground, 0.08))
+                    .bg(t.well)
+                    .text_size(px(t.size(0.917)))
+                    .child(div().flex_1().text_color(color).truncate().child(text))
+                    .when_some(help_key, |d, key| {
+                        d.child(
+                            div()
+                                .id("help-hint")
+                                .cursor_pointer()
+                                .text_color(t.muted)
+                                .hover(|s| s.text_color(t.accent))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.show_help = true;
+                                    cx.notify();
+                                }))
+                                .child(format!("{key} Shortcuts")),
+                        )
+                    })
             })
+            .when(self.show_help, |d| d.child(self.render_help(cx)))
     }
 }

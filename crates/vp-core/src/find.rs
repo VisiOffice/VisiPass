@@ -3,7 +3,7 @@
 //! A query that matches nothing returns close titles as suggestions instead,
 //! fetched in the same batch, so a typo never costs another approval.
 
-use crate::model::{ItemDetail, Listed, kind};
+use crate::model::{ItemDetail, ItemSummary, Listed, kind};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 
@@ -335,5 +335,143 @@ mod tests {
         let result = assemble(&plan(&["stripe".into()], &listed), &listed, &details);
         assert_eq!(result.matches.len(), 1);
         assert_eq!(result.matches[0].queries, None);
+    }
+}
+
+/// The site name of a URL: `https://app.payvy.com/login` -> `payvy`.
+fn site_name(href: &str) -> Option<String> {
+    let rest = href.split_once("://").map(|(_, r)| r).unwrap_or(href);
+    let host = rest.split(['/', '?', '#', ':']).next()?.to_lowercase();
+    let labels: Vec<&str> = host.split('.').filter(|l| !l.is_empty()).collect();
+    // Second-level labels like co.uk or com.au: take the label before them.
+    let short_tld = |l: &&str| matches!(*l, "co" | "com" | "org" | "net" | "gov" | "ac" | "edu");
+    match labels.as_slice() {
+        [] => None,
+        [one] => Some(one.to_string()),
+        [.., name, second, tld] if short_tld(second) && tld.len() == 2 => Some(name.to_string()),
+        [.., name, _tld] => Some(name.to_string()),
+    }
+}
+
+fn host_of(href: &str) -> String {
+    let rest = href.split_once("://").map(|(_, r)| r).unwrap_or(href);
+    let host = rest
+        .split(['/', '?', '#', ':'])
+        .next()
+        .unwrap_or(rest)
+        .to_lowercase();
+    host.strip_prefix("www.").map(String::from).unwrap_or(host)
+}
+
+/// How well an item answers a search, or None if it does not match every
+/// term. Higher is better. The item for the site you typed comes first: a
+/// search for "payvy" puts payvy.com above "Amazon - Payvy".
+pub fn rank(query: &str, item: &ItemSummary) -> Option<u32> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return Some(0);
+    }
+    let title = item.title.to_lowercase();
+    let tags: Vec<String> = item.tags.iter().map(|t| t.to_lowercase()).collect();
+    let hosts: Vec<String> = item.urls.iter().map(|u| host_of(&u.href)).collect();
+    let sites: Vec<String> = item
+        .urls
+        .iter()
+        .filter_map(|u| site_name(&u.href))
+        .collect();
+    let terms: Vec<&str> = query.split_whitespace().collect();
+    let all_match = terms.iter().all(|term| {
+        title.contains(term)
+            || tags.iter().any(|t| t.contains(term))
+            || hosts.iter().any(|h| h.contains(term))
+    });
+    if !all_match {
+        return None;
+    }
+    let title_words: Vec<&str> = title
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let root = |h: &String| h.matches('.').count() <= 1 && site_name(h).is_some_and(|s| s == query);
+    let score = if hosts.iter().any(|h| *h == query || root(h)) {
+        100 // the site itself: payvy.com
+    } else if sites.contains(&query) {
+        95 // a subdomain of it: admin.payvy.com
+    } else if title == query {
+        90
+    } else if title.starts_with(&query) {
+        80
+    } else if sites.iter().any(|s| s.starts_with(&query)) {
+        70
+    } else if title_words.first().is_some_and(|w| *w == query) {
+        65
+    } else if title_words.contains(&query.as_str()) {
+        60
+    } else if title.contains(&query) {
+        50
+    } else if tags.contains(&query) {
+        40
+    } else {
+        30
+    };
+    // Shorter titles win ties: "Payvy" before "Payvy - Staging Admin".
+    Some(score * 1000 + 999u32.saturating_sub(title.len() as u32))
+}
+
+#[cfg(test)]
+mod rank_tests {
+    use super::*;
+    use crate::model::{Url, VaultRef};
+
+    fn item(title: &str, url: Option<&str>, tags: &[&str]) -> ItemSummary {
+        ItemSummary {
+            id: title.into(),
+            title: title.into(),
+            category: "LOGIN".into(),
+            vault: VaultRef {
+                id: "v".into(),
+                name: "V".into(),
+            },
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            urls: url
+                .map(|u| vec![Url { href: u.into() }])
+                .unwrap_or_default(),
+            favorite: false,
+            updated_at: None,
+        }
+    }
+
+    #[test]
+    fn own_site_ranks_first() {
+        let items = [
+            item("Amazon - Payvy", Some("https://www.amazon.com"), &[]),
+            item("Bill - Payvy", Some("https://app.bill.com"), &[]),
+            item("Payvy Admin", Some("https://admin.payvy.com/login"), &[]),
+            item("Company site", Some("https://payvy.com"), &[]),
+            item("Amazon", Some("https://amazon.com"), &["payvy"]),
+            item("Stripe", Some("https://stripe.com"), &[]),
+        ];
+        let mut ranked: Vec<(u32, &str)> = items
+            .iter()
+            .filter_map(|i| rank("payvy", i).map(|r| (r, i.title.as_str())))
+            .collect();
+        ranked.sort_by_key(|r| std::cmp::Reverse(r.0));
+        let order: Vec<&str> = ranked.iter().map(|(_, t)| *t).collect();
+        assert_eq!(order[..2], ["Company site", "Payvy Admin"]);
+        assert!(!order.contains(&"Stripe"));
+        assert_eq!(order.last(), Some(&"Amazon"), "tag-only match is last");
+    }
+
+    #[test]
+    fn site_names() {
+        assert_eq!(
+            site_name("https://app.payvy.com/x").as_deref(),
+            Some("payvy")
+        );
+        assert_eq!(
+            site_name("https://shop.example.co.uk").as_deref(),
+            Some("example")
+        );
+        assert_eq!(site_name("localhost:3000").as_deref(), Some("localhost"));
     }
 }

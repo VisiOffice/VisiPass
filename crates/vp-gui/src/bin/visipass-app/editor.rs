@@ -484,6 +484,13 @@ impl Render for ItemEditor {
 
         div()
             .id("editor")
+            .key_context(crate::keymap::EDITOR)
+            .on_action(cx.listener(|this, _: &crate::keymap::actions::SaveItem, _, cx| this.save(cx)))
+            .on_action(cx.listener(|this, _: &crate::keymap::actions::GeneratePassword, _, cx| {
+                if let Some(row) = this.rows.iter().position(|r| r.field.concealed() && r.preserved.is_none()) {
+                    this.generate_into(row, cx);
+                }
+            }))
             .size_full()
             .overflow_y_scroll()
             .p(px(24.))
@@ -547,7 +554,7 @@ impl Render for ItemEditor {
                 div()
                     .text_size(px(t.size(0.833)))
                     .text_color(t.muted)
-                    .child("Every save is read back from 1Password and compared before it counts."),
+                    .child("Ctrl+S saves, Ctrl+G generates, Esc cancels. Every save is read back from 1Password and compared before it counts."),
             )
     }
 }
