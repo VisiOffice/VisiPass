@@ -1,18 +1,27 @@
 [package]
-name = "vp-prompt"
-description = "visipass-prompt: the approval window visipassd shows, styled after the desktop theme (Omarchy first)."
+name = "vp-gui"
+description = "VisiPass desktop surfaces: the approval window and the app, styled after the desktop theme (Omarchy first)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "visipass-prompt"
-path = "src/main.rs"
+path = "src/bin/visipass-prompt/main.rs"
+
+[[bin]]
+name = "visipass-app"
+path = "src/bin/visipass-app/main.rs"
 
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+libc.workspace = true
 toml = "0.9"
+unicode-segmentation = "1.12"
 vp-core.workspace = true
 # Pinned to the same revision as VisiGrid and VisiBooks native (Zed v1.12.0).
 gpui = { git = "https://github.com/VisiGrid/zed", rev = "218fb58d83" }

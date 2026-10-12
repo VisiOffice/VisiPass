@@ -10,7 +10,6 @@
 //!
 //! `visipass-prompt --demo` shows a sample request, for checking the styling.
 
-mod theme;
 mod view;
 
 use gpui::{
@@ -103,7 +102,7 @@ fn main() {
             }
         }
     };
-    let theme = theme::Theme::load();
+    let theme = vp_gui::theme::Theme::load();
     let wayland = cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some();
 
     gpui_platform::application().run(move |cx: &mut App| {

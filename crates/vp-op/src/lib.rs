@@ -9,6 +9,7 @@
 //! - Batch: one `item get -` for many items, one `op run` for many references.
 
 mod edit;
+mod items;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -37,14 +38,14 @@ pub struct OpBackend {
 }
 
 #[derive(Default)]
-struct Call<'a> {
+pub(crate) struct Call<'a> {
     account: Option<&'a str>,
     input: Option<&'a str>,
     failure: Option<&'a str>,
     env: Vec<(String, String)>,
 }
 
-fn is_id(value: &str) -> bool {
+pub(crate) fn is_id(value: &str) -> bool {
     value.len() == 26
         && value
             .bytes()
@@ -69,7 +70,7 @@ impl OpBackend {
         }
     }
 
-    async fn op(&self, args: &[&str], call: Call<'_>) -> Result<String, Failure> {
+    pub(crate) async fn op(&self, args: &[&str], call: Call<'_>) -> Result<String, Failure> {
         let fixed = |default: &str| Failure::new(call.failure.unwrap_or(default));
         let mut command = Command::new(&self.program);
         command.args(args);
@@ -130,7 +131,7 @@ impl OpBackend {
         })
     }
 
-    async fn json<T: for<'de> Deserialize<'de>>(
+    pub(crate) async fn json<T: for<'de> Deserialize<'de>>(
         &self,
         args: &[&str],
         call: Call<'_>,
@@ -452,6 +453,25 @@ impl Backend for OpBackend {
             reference,
             verified: true,
         })
+    }
+
+    async fn vaults(&self, account: Option<&str>) -> Result<Vec<VaultRef>, Failure> {
+        self.vault_list(account).await
+    }
+
+    async fn item(&self, id: &str, vault: &str) -> Result<vp_core::model::Item, Failure> {
+        self.get_item(id, vault).await
+    }
+
+    async fn save_item(
+        &self,
+        item: &vp_core::model::Item,
+    ) -> Result<vp_core::model::Item, Failure> {
+        self.put_item(item).await
+    }
+
+    async fn archive(&self, id: &str, vault: &str) -> Result<(), Failure> {
+        self.archive_item(id, vault).await
     }
 
     async fn password(

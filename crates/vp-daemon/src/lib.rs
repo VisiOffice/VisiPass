@@ -66,7 +66,20 @@ pub struct Daemon<B, A> {
     /// One prompt at a time; a request queued behind a prompt re-checks grants first.
     approvals: tokio::sync::Mutex<()>,
     socket: PathBuf,
+    state: PathBuf,
+    /// PID of the desktop app this daemon launched, if it is running.
+    app: tokio::sync::Mutex<Option<u32>>,
 }
+
+/// Where a request arrived. Only `App`, the private socket pair visipassd
+/// handed to the desktop app it launched, may make app-only requests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Channel {
+    Public,
+    App,
+}
+
+const APP_LABEL: &str = "VisiPass app";
 
 /// What to log about a request, and what it needs from the human.
 struct Assessment {
@@ -227,6 +240,12 @@ fn assess(request: &Request, requester: &Requester) -> Assessment {
                 }),
             }
         }
+        Request::Item { id, .. } | Request::Archive { id, .. } => none(Some(id.clone())),
+        Request::SaveItem { item } => none(Some(if item.id.is_empty() {
+            format!("create \"{}\"", item.title)
+        } else {
+            format!("update {}", item.id)
+        })),
         _ => none(None),
     }
 }
@@ -240,6 +259,8 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
             log: Mutex::new(AccessLog::open(state_dir.join("access.log"))),
             approvals: tokio::sync::Mutex::new(()),
             socket,
+            state: state_dir.to_path_buf(),
+            app: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -358,20 +379,49 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .tail(limit)),
+            Request::Vaults { account } => Ok(json!({
+                "vaults": self.backend.vaults(account.as_deref()).await?
+            })),
+            Request::Items { scope } => {
+                let listed = self.backend.list(&scope).await?;
+                let items: Vec<_> = listed.into_iter().map(|l| l.summary).collect();
+                Ok(json!({ "items": items }))
+            }
+            Request::Item { id, vault } => Ok(to_json(&self.backend.item(&id, &vault).await?)),
+            Request::SaveItem { item } => Ok(to_json(&self.backend.save_item(&item).await?)),
+            Request::Archive { id, vault } => {
+                self.backend.archive(&id, &vault).await?;
+                Ok(json!({ "archived": id }))
+            }
+            Request::OpenApp => Err(Failure::new("visipassd could not open the app")),
         }
     }
 
-    pub async fn handle(&self, request: Request, requester: &Requester) -> Response {
+    pub async fn handle(
+        &self,
+        request: Request,
+        requester: &Requester,
+        channel: Channel,
+    ) -> Response {
         let name = request.name();
         let assessment = assess(&request, requester);
         let quiet = matches!(
             request,
-            Request::Status | Request::Grants | Request::Log { .. }
+            Request::Status
+                | Request::Grants
+                | Request::Log { .. }
+                | Request::Vaults { .. }
+                | Request::Items { .. }
         );
         let mut grant = None;
-        let result = self
-            .execute(request, requester, &assessment, &mut grant)
-            .await;
+        let result = if channel == Channel::Public && request.app_only() {
+            Err(Failure::new(
+                "Only the VisiPass app can do this. Use vp find, vp run or vp read instead",
+            ))
+        } else {
+            self.execute(request, requester, &assessment, &mut grant)
+                .await
+        };
         if !quiet {
             let entry = Entry {
                 at: time::now_rfc3339(),
@@ -429,11 +479,18 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 Ok(envelope) if envelope.version != PROTOCOL_VERSION => Response::err(
                     "vp and visipassd are different versions; restart the daemon with `vp daemon --restart`",
                 ),
+                Ok(envelope) if matches!(envelope.request, Request::OpenApp) => {
+                    match Arc::clone(&self).open_app().await {
+                        Ok(value) => Response::ok(value),
+                        Err(e) => Response::err(e.0),
+                    }
+                }
                 Ok(envelope) => {
                     let requester = tokio::task::spawn_blocking(move || procinfo::identify(pid))
                         .await
                         .unwrap_or_else(|_| procinfo::identify(0));
-                    self.handle(envelope.request, &requester).await
+                    self.handle(envelope.request, &requester, Channel::Public)
+                        .await
                 }
                 Err(_) => Response::err("visipassd could not read the request"),
             },
@@ -442,6 +499,101 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
         if let Ok(mut text) = serde_json::to_string(&response) {
             text.push('\n');
             let _ = write.write_all(text.as_bytes()).await;
+        }
+    }
+
+    /// Launches the desktop app with one end of a private socket pair as fd 3.
+    /// An agent may ask for this; it opens a window the agent cannot read.
+    async fn open_app(self: Arc<Self>) -> Result<Value, Failure> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::CommandExt;
+        let mut running = self.app.lock().await;
+        if let Some(pid) = *running
+            && unsafe { libc::kill(pid as libc::pid_t, 0) } == 0
+        {
+            return Ok(json!({ "running": true }));
+        }
+        let program = approval::beside_self("visipass-app")
+            .or_else(|| approval::on_path("visipass-app"))
+            .ok_or_else(|| Failure::new("visipass-app is not installed next to visipassd"))?;
+        let failed = || Failure::new("Could not start the VisiPass app");
+        let (ours, theirs) = std::os::unix::net::UnixStream::pair().map_err(|_| failed())?;
+        let fd = theirs.as_raw_fd();
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.state.join("visipass-app.log"))
+            .ok();
+        let mut command = std::process::Command::new(program);
+        command
+            .env("VISIPASS_APP_FD", "3")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(
+                log.map(std::process::Stdio::from)
+                    .unwrap_or(std::process::Stdio::null()),
+            );
+        unsafe {
+            command.pre_exec(move || {
+                // dup2 leaves the copy without close-on-exec, so fd 3 survives exec.
+                if fd == 3 {
+                    let flags = libc::fcntl(3, libc::F_GETFD);
+                    libc::fcntl(3, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+                } else if libc::dup2(fd, 3) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().map_err(|_| failed())?;
+        drop(theirs);
+        let pid = child.id();
+        *running = Some(pid);
+        std::thread::spawn(move || child.wait());
+        ours.set_nonblocking(true).map_err(|_| failed())?;
+        let stream = UnixStream::from_std(ours).map_err(|_| failed())?;
+        tokio::spawn(Arc::clone(&self).app_channel(stream, pid));
+        Ok(json!({ "opened": true }))
+    }
+
+    /// Serves the app's private connection: one request per line, in order.
+    async fn app_channel(self: Arc<Self>, stream: UnixStream, pid: u32) {
+        let requester = Requester {
+            pid,
+            agent: Some(APP_LABEL.into()),
+            task: None,
+            project: procinfo::Project {
+                root: "(desktop app)".into(),
+                remote: None,
+            },
+        };
+        let (read, mut write) = stream.into_split();
+        let mut lines = BufReader::new(read).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let response = match serde_json::from_str::<Envelope>(&line) {
+                Ok(envelope) if envelope.version != PROTOCOL_VERSION => {
+                    Response::err("The app and visipassd are different versions; restart both")
+                }
+                Ok(envelope) if matches!(envelope.request, Request::OpenApp) => {
+                    Response::ok(json!({ "running": true }))
+                }
+                Ok(envelope) => {
+                    self.handle(envelope.request, &requester, Channel::App)
+                        .await
+                }
+                Err(_) => Response::err("visipassd could not read the request"),
+            };
+            let Ok(mut text) = serde_json::to_string(&response) else {
+                break;
+            };
+            text.push('\n');
+            if write.write_all(text.as_bytes()).await.is_err() {
+                break;
+            }
+        }
+        let mut running = self.app.lock().await;
+        if *running == Some(pid) {
+            *running = None;
         }
     }
 

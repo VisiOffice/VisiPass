@@ -16,7 +16,7 @@ Not a sandbox: a command given a secret by `vp run` can do anything with it.
 
 ```sh
 cargo test --workspace          # never touches real 1Password, the clipboard or a display
-cargo build -p vp-prompt        # the GPUI approval window (slow first build)
+cargo build -p vp-gui        # the GPUI approval window (slow first build)
 cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
@@ -28,8 +28,8 @@ crates/vp-core     pure: refs, env files, find scoring, audit, masking, IPC type
 crates/vp-op       Backend over 1Password's op (ported from 2password)
 crates/vp-daemon   visipassd: grants, approval prompt, access log, process identification
 crates/vp-cli      vp: parse flags, call visipassd, print JSON; no logic
-crates/vp-prompt   visipass-prompt: GPUI approval window (layer-shell overlay on Wayland), themed from Omarchy;
-                   excluded from default-members, build with `cargo build -p vp-prompt`
+crates/vp-gui   visipass-prompt: GPUI approval window (layer-shell overlay on Wayland), themed from Omarchy;
+                   excluded from default-members, build with `cargo build -p vp-gui`
 skills/visipass    the agent skill; keep it in sync with the CLI
 ```
 

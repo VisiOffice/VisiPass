@@ -54,4 +54,4 @@ jobs:
             target/
           key: ${{ runner.os }}-prompt-${{ hashFiles('**/Cargo.lock') }}
       - name: Lint and build
-        run: cargo clippy -p vp-prompt --all-targets -- -D warnings
+        run: cargo clippy -p vp-gui --all-targets -- -D warnings

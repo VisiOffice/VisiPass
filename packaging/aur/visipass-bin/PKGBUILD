@@ -22,7 +22,7 @@ sha256sums_aarch64=('SKIP')
 
 package() {
   cd "visipass-$pkgver-linux-$CARCH"
-  install -Dm755 vp visipassd visipass-prompt -t "$pkgdir/usr/bin/"
+  install -Dm755 vp visipassd visipass-prompt visipass-app -t "$pkgdir/usr/bin/"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 README.md SECURITY.md SKILL.md -t "$pkgdir/usr/share/doc/visipass/"
 }

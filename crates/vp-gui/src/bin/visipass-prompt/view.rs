@@ -6,7 +6,6 @@
 //!   the human was already typing cannot answer it.
 //! - The answer goes to stdout, a pipe only visipassd holds.
 
-use crate::theme::{Theme, alpha};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     Context, FocusHandle, FontWeight, IntoElement, KeyDownEvent, Render, SharedString, Window, div,
@@ -15,6 +14,7 @@ use gpui::{
 use std::io::Write;
 use std::time::{Duration, Instant};
 use vp_core::ipc::{Answer, ApprovalPrompt};
+use vp_gui::theme::{Theme, alpha};
 
 const ARM_DELAY: Duration = Duration::from_millis(700);
 const KEY_GLYPH: &str = "\u{f084}"; // Nerd Font: key

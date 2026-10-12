@@ -36,12 +36,12 @@ jobs:
       - name: Test
         run: cargo test
       - name: Build
-        run: cargo build --release -p vp-cli -p vp-daemon -p vp-prompt
+        run: cargo build --release -p vp-cli -p vp-daemon -p vp-gui
       - name: Package
         run: |
           name="visipass-${GITHUB_REF_NAME#v}-linux-${{ matrix.arch }}"
           mkdir -p "dist/$name"
-          cp target/release/vp target/release/visipassd target/release/visipass-prompt "dist/$name/"
+          cp target/release/vp target/release/visipassd target/release/visipass-prompt target/release/visipass-app "dist/$name/"
           cp LICENSE README.md SECURITY.md "dist/$name/"
           cp skills/visipass/SKILL.md "dist/$name/SKILL.md"
           tar -C dist -czf "dist/$name.tar.gz" "$name"

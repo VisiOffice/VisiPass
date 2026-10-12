@@ -252,6 +252,9 @@ mod tests {
             category: "API_CREDENTIAL".into(),
             vault: vault.clone(),
             tags: vec![],
+            urls: vec![],
+            favorite: false,
+            updated_at: None,
         };
         let detail = ItemDetail {
             id: id.into(),

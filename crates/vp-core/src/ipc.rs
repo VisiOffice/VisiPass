@@ -142,6 +142,30 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         purpose: Option<String>,
     },
+    /// Opens the desktop app; visipassd launches it and hands it a private channel.
+    OpenApp,
+    // ---- Desktop app channel only. Refused on the public socket. ----
+    Vaults {
+        #[serde(default)]
+        account: Option<String>,
+    },
+    Items {
+        #[serde(default)]
+        scope: Scope,
+    },
+    Item {
+        id: String,
+        vault: String,
+    },
+    /// Creates (empty `id`) or updates an item, then reads it back and compares.
+    SaveItem {
+        item: crate::model::Item,
+    },
+    Archive {
+        id: String,
+        vault: String,
+    },
+    // ---- end of app-only requests ----
     Grants,
     Revoke {
         #[serde(default)]
@@ -160,6 +184,19 @@ fn default_log_limit() -> usize {
 }
 
 impl Request {
+    /// Requests that return or change values for a human to see. Only the app
+    /// channel visipassd itself opened may make them.
+    pub fn app_only(&self) -> bool {
+        matches!(
+            self,
+            Request::Vaults { .. }
+                | Request::Items { .. }
+                | Request::Item { .. }
+                | Request::SaveItem { .. }
+                | Request::Archive { .. }
+        )
+    }
+
     /// A short name for the access log. Never includes values.
     pub fn name(&self) -> &'static str {
         match self {
@@ -170,6 +207,12 @@ impl Request {
             Request::Resolve { .. } => "resolve",
             Request::CreateApiCredential { .. } => "create",
             Request::Password { .. } => "password",
+            Request::OpenApp => "open-app",
+            Request::Vaults { .. } => "vaults",
+            Request::Items { .. } => "items",
+            Request::Item { .. } => "item",
+            Request::SaveItem { .. } => "save-item",
+            Request::Archive { .. } => "archive",
             Request::Grants => "grants",
             Request::Revoke { .. } => "revoke",
             Request::Log { .. } => "log",

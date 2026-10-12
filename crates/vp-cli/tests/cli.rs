@@ -458,6 +458,34 @@ fn create_refuses_a_value_as_an_argument_or_from_a_missing_source() {
 }
 
 #[test]
+fn app_only_requests_are_refused_on_the_public_socket() {
+    use std::io::{BufRead, BufReader};
+    let world = World::new(&[]);
+    for request in [
+        serde_json::json!({"type": "item", "id": "o".repeat(26), "vault": "Dev"}),
+        serde_json::json!({"type": "items"}),
+        serde_json::json!({"type": "vaults"}),
+        serde_json::json!({"type": "archive", "id": "o".repeat(26), "vault": "Dev"}),
+    ] {
+        let stream = std::os::unix::net::UnixStream::connect(world.path("vp.sock")).unwrap();
+        let line = serde_json::json!({"version": 1, "request": request}).to_string() + "\n";
+        (&stream).write_all(line.as_bytes()).unwrap();
+        let mut reply = String::new();
+        BufReader::new(&stream).read_line(&mut reply).unwrap();
+        clean_text(&reply);
+        assert!(reply.contains("Only the VisiPass app"), "{reply}");
+    }
+    assert!(world.calls().is_empty(), "op is never called");
+    world.assert_contained();
+}
+
+fn clean_text(text: &str) {
+    for s in SENTINELS {
+        assert!(!text.contains(s), "secret leaked: {text}");
+    }
+}
+
+#[test]
 fn doctor_never_prompts() {
     let world = World::new(&[]);
     let out = world.vp(&["doctor"], None);

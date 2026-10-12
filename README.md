@@ -26,7 +26,7 @@ install -m755 visipass-*/vp visipass-*/visipassd visipass-*/visipass-prompt ~/.l
 ```sh
 cargo install --path crates/vp-cli
 cargo install --path crates/vp-daemon
-cargo install --path crates/vp-prompt     # the approval window (GPUI); first build takes several minutes
+cargo install --path crates/vp-gui     # the approval window (GPUI); first build takes several minutes
 ```
 
 The three binaries (`vp`, `visipassd`, `visipass-prompt`) must sit side by side or on PATH. `vp` starts the daemon when needed. Without `visipass-prompt`, approvals fall back to `zenity`, or to the terminal running `vp daemon`.

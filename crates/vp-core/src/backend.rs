@@ -1,6 +1,7 @@
 use crate::Failure;
 use crate::model::{
-    Destination, ItemDetail, Listed, PasswordOutcome, PasswordRequest, Receipt, Scope,
+    Destination, Item, ItemDetail, Listed, PasswordOutcome, PasswordRequest, Receipt, Scope,
+    VaultRef,
 };
 use crate::refs::SecretRef;
 use crate::secret::Secret;
@@ -36,6 +37,21 @@ pub trait Backend: Send + Sync + 'static {
         destination: &Destination,
         value: Secret,
     ) -> impl Future<Output = Result<Receipt, Failure>> + Send;
+
+    /// Vaults the backend can reach.
+    fn vaults(
+        &self,
+        account: Option<&str>,
+    ) -> impl Future<Output = Result<Vec<VaultRef>, Failure>> + Send;
+
+    /// One item with its values. Human surfaces only.
+    fn item(&self, id: &str, vault: &str) -> impl Future<Output = Result<Item, Failure>> + Send;
+
+    /// Creates (empty `id`) or updates an item, then reads it back and compares.
+    fn save_item(&self, item: &Item) -> impl Future<Output = Result<Item, Failure>> + Send;
+
+    /// Moves an item to the archive. Never deletes.
+    fn archive(&self, id: &str, vault: &str) -> impl Future<Output = Result<(), Failure>> + Send;
 
     /// Compares, or with `apply` updates and verifies, a login's password.
     fn password(

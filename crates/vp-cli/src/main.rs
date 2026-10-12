@@ -151,6 +151,8 @@ enum Commands {
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
+    /// Open the VisiPass desktop app to browse, add and edit items
+    App,
     /// Show whether visipassd is running and how it asks for approval
     Status,
     /// Check the setup without authenticating or prompting; safe to paste into an issue
@@ -541,6 +543,7 @@ fn execute(command: Commands) -> Result<i32, Failure> {
             print(&client::call(Request::Revoke { id, all })?)
         }
         Commands::Log { limit } => print(&client::call(Request::Log { limit })?),
+        Commands::App => print(&client::call(Request::OpenApp)?),
         Commands::Status => match client::connect(false) {
             Ok(stream) => print(&client::call_with(stream, Request::Status)?),
             Err(_) => print(&serde_json::json!({ "running": false })),

@@ -8,6 +8,7 @@ pub mod audit;
 pub mod backend;
 pub mod env;
 pub mod find;
+pub mod generate;
 pub mod ipc;
 pub mod mask;
 pub mod model;
@@ -16,6 +17,7 @@ pub mod refs;
 pub mod secret;
 pub mod template;
 pub mod time;
+pub mod totp;
 
 /// An expected error. Printed as `visipass: <message>` with exit code 1.
 /// Messages must never contain a secret value.

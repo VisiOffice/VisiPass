@@ -106,14 +106,14 @@ pub enum Desktop {
     Unavailable,
 }
 
-fn on_path(name: &str) -> Option<PathBuf> {
+pub(crate) fn on_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
         .map(|dir| dir.join(name))
         .find(|p| p.is_file())
 }
 
-fn beside_self(name: &str) -> Option<PathBuf> {
+pub(crate) fn beside_self(name: &str) -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     Some(exe.parent()?.join(name)).filter(|p| p.is_file())
 }
