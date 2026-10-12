@@ -255,6 +255,7 @@ mod tests {
             urls: vec![],
             favorite: false,
             updated_at: None,
+            additional_information: None,
         };
         let detail = ItemDetail {
             id: id.into(),
@@ -363,14 +364,80 @@ fn host_of(href: &str) -> String {
     host.strip_prefix("www.").map(String::from).unwrap_or(host)
 }
 
-/// How well an item answers a search, or None if it does not match every
-/// term. Higher is better. The item for the site you typed comes first: a
-/// search for "payvy" puts payvy.com above "Amazon - Payvy".
-pub fn rank(query: &str, item: &ItemSummary) -> Option<u32> {
-    let query = query.trim().to_lowercase();
-    if query.is_empty() {
-        return Some(0);
+/// A parsed search: free words, `"quoted phrases"`, and field filters
+/// (`url:`, `user:`, `tag:`, `vault:`, `type:`). Values may be quoted:
+/// `vault:"Work Stuff"`. Everything is case-insensitive.
+#[derive(Debug, Default, PartialEq)]
+pub struct Query {
+    pub words: Vec<String>,
+    pub phrases: Vec<String>,
+    pub filters: Vec<(String, String)>,
+}
+
+const FILTERS: [&str; 5] = ["url", "user", "tag", "vault", "type"];
+
+impl Query {
+    pub fn parse(input: &str) -> Self {
+        let mut query = Query::default();
+        let mut chars = input.chars().peekable();
+        while chars.peek().is_some() {
+            while chars.peek().is_some_and(|c| c.is_whitespace()) {
+                chars.next();
+            }
+            let mut token = String::new();
+            let mut quoted = false;
+            while let Some(&c) = chars.peek() {
+                if c == '"' {
+                    quoted = true;
+                    chars.next();
+                    for q in chars.by_ref() {
+                        if q == '"' {
+                            break;
+                        }
+                        token.push(q);
+                    }
+                } else if c.is_whitespace() {
+                    break;
+                } else {
+                    token.push(c);
+                    chars.next();
+                }
+            }
+            let token = token.to_lowercase();
+            if token.is_empty() {
+                continue;
+            }
+            match token
+                .split_once(':')
+                .filter(|(key, _)| FILTERS.contains(key))
+            {
+                Some((key, value)) if !value.is_empty() => {
+                    query.filters.push((key.into(), value.into()))
+                }
+                _ if quoted => query.phrases.push(token),
+                _ => query.words.push(token),
+            }
+        }
+        query
     }
+
+    /// The free text used for ranking: words and phrases together.
+    fn text(&self) -> String {
+        self.words
+            .iter()
+            .chain(&self.phrases)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+/// How well an item answers a search, or None if it does not match. Higher is
+/// better. The item for the site you typed comes first: a search for "payvy"
+/// puts payvy.com above "Amazon - Payvy". Usernames match, but rank last, so a
+/// domain that is also in your email address does not bury the site itself.
+pub fn rank(query: &str, item: &ItemSummary) -> Option<u32> {
+    let parsed = Query::parse(query);
     let title = item.title.to_lowercase();
     let tags: Vec<String> = item.tags.iter().map(|t| t.to_lowercase()).collect();
     let hosts: Vec<String> = item.urls.iter().map(|u| host_of(&u.href)).collect();
@@ -379,20 +446,59 @@ pub fn rank(query: &str, item: &ItemSummary) -> Option<u32> {
         .iter()
         .filter_map(|u| site_name(&u.href))
         .collect();
-    let terms: Vec<&str> = query.split_whitespace().collect();
-    let all_match = terms.iter().all(|term| {
+    let user = item
+        .additional_information
+        .as_deref()
+        .unwrap_or("")
+        .to_lowercase();
+    let vault = item.vault.name.to_lowercase();
+    let kind = crate::model::kind(&item.category);
+
+    for (key, value) in &parsed.filters {
+        let ok = match key.as_str() {
+            "url" => hosts.iter().any(|h| h.contains(value.as_str())),
+            "user" => user.contains(value.as_str()),
+            "tag" => tags.iter().any(|t| t.contains(value.as_str())),
+            "vault" => vault.contains(value.as_str()),
+            "type" => {
+                kind.contains(value.as_str())
+                    || crate::model::kind(value).replace('-', "") == kind.replace('-', "")
+            }
+            _ => true,
+        };
+        if !ok {
+            return None;
+        }
+    }
+    let anywhere = |term: &str| {
         title.contains(term)
             || tags.iter().any(|t| t.contains(term))
             || hosts.iter().any(|h| h.contains(term))
-    });
-    if !all_match {
+            || user.contains(term)
+    };
+    if !parsed
+        .words
+        .iter()
+        .chain(&parsed.phrases)
+        .all(|term| anywhere(term))
+    {
         return None;
     }
+    let text = parsed.text();
+    if text.is_empty() {
+        return Some(0);
+    }
+    let query = text;
     let title_words: Vec<&str> = title
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| !w.is_empty())
         .collect();
     let root = |h: &String| h.matches('.').count() <= 1 && site_name(h).is_some_and(|s| s == query);
+    let in_title_tags_or_sites = parsed.words.iter().chain(&parsed.phrases).all(|term| {
+        title.contains(term.as_str())
+            || tags.iter().any(|t| t.contains(term.as_str()))
+            || hosts.iter().any(|h| h.contains(term.as_str()))
+    });
     let score = if hosts.iter().any(|h| *h == query || root(h)) {
         100 // the site itself: payvy.com
     } else if sites.contains(&query) {
@@ -411,8 +517,10 @@ pub fn rank(query: &str, item: &ItemSummary) -> Option<u32> {
         50
     } else if tags.contains(&query) {
         40
-    } else {
+    } else if in_title_tags_or_sites {
         30
+    } else {
+        20 // only the username matched
     };
     // Shorter titles win ties: "Payvy" before "Payvy - Staging Admin".
     Some(score * 1000 + 999u32.saturating_sub(title.len() as u32))
@@ -438,6 +546,7 @@ mod rank_tests {
                 .unwrap_or_default(),
             favorite: false,
             updated_at: None,
+            additional_information: None,
         }
     }
 
@@ -473,5 +582,55 @@ mod rank_tests {
             Some("example")
         );
         assert_eq!(site_name("localhost:3000").as_deref(), Some("localhost"));
+    }
+
+    fn with_user(mut i: ItemSummary, user: &str) -> ItemSummary {
+        i.additional_information = Some(user.into());
+        i
+    }
+
+    #[test]
+    fn usernames_match_but_rank_last() {
+        let site = item("Payvy", Some("https://payvy.com"), &[]);
+        let other = with_user(
+            item("Stripe", Some("https://stripe.com"), &[]),
+            "robert@payvy.com",
+        );
+        assert!(rank("payvy", &site).unwrap() > rank("payvy", &other).unwrap());
+        assert!(rank("stripe", &other).is_some());
+    }
+
+    #[test]
+    fn parses_phrases_and_filters() {
+        let q = Query::parse(r#"stripe "live key" url:dashboard vault:"work stuff" nope:x"#);
+        assert_eq!(q.words, ["stripe", "nope:x"]);
+        assert_eq!(q.phrases, ["live key"]);
+        assert_eq!(
+            q.filters,
+            [
+                ("url".into(), "dashboard".into()),
+                ("vault".into(), "work stuff".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn filters_narrow_and_phrases_are_exact() {
+        let a = with_user(
+            item("CCC Bank", Some("https://ccc.au"), &["bank"]),
+            "me@example.org",
+        );
+        let b = item("CCC Com Bank", Some("https://ccc.com.au"), &[]);
+        assert!(rank("url:ccc.au", &a).is_some());
+        assert!(
+            rank("url:ccc.au", &b).is_none(),
+            "ccc.au is not inside ccc.com.au"
+        );
+        assert!(rank("\"ccc bank\"", &a).is_some());
+        assert!(rank("\"ccc bank\"", &b).is_none());
+        assert!(rank("user:example.org", &a).is_some());
+        assert!(rank("tag:bank type:login", &a).is_some());
+        assert!(rank("type:api", &a).is_none());
+        assert!(rank("vault:v", &a).is_some());
     }
 }

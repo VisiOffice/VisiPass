@@ -115,7 +115,7 @@ pub fn hand_off() -> Result<(), Failure> {
     };
     let line = serde_json::to_string(&Envelope {
         version: PROTOCOL_VERSION,
-        request: Request::OpenApp,
+        request: Request::OpenApp { quick: false },
     })
     .map_err(|_| Failure::new("Could not encode the request"))?
         + "\n";

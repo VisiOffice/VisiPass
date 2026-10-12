@@ -5,9 +5,8 @@ use crate::editor::{EditorEvent, ItemEditor};
 use crate::keymap::{Keymap, SHORTCUTS, actions::*, pretty};
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    ClipboardItem, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, Render,
-    ScrollStrategy, SharedString, UniformListScrollHandle, Window, deferred, div, prelude::*, px,
-    uniform_list,
+    Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, Render, ScrollStrategy,
+    SharedString, UniformListScrollHandle, Window, deferred, div, prelude::*, px, uniform_list,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -114,8 +113,13 @@ impl VisiPassApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let search =
-            cx.new(|cx| TextInput::new(theme.clone(), "Search titles, tags and websites", cx));
+        let search = cx.new(|cx| {
+            TextInput::new(
+                theme.clone(),
+                "Search · \"exact\" url: user: tag: vault: type:",
+                cx,
+            )
+        });
         cx.subscribe(&search, |this, input, event: &InputEvent, cx| match event {
             InputEvent::Changed => {
                 this.query = input.read(cx).text().to_lowercase();
@@ -124,7 +128,12 @@ impl VisiPassApp {
             }
             InputEvent::Submit => this.open_cursor(cx),
             InputEvent::Cancel => {
-                this.menu = None;
+                // Esc: close a menu first, then clear the search to start over.
+                if this.menu.is_some() {
+                    this.menu = None;
+                } else if !input.read(cx).text().is_empty() {
+                    input.update(cx, |input, cx| input.set_text("", cx));
+                }
                 cx.notify();
             }
         })
@@ -300,7 +309,7 @@ impl VisiPassApp {
 
     fn copy_username(&mut self, cx: &mut Context<Self>) {
         match self.field_value("USERNAME", "username") {
-            Some(v) => self.copy("username", &v, cx),
+            Some(v) => self.copy("username", &v, false, cx),
             None => self.note("This item has no username", cx),
         }
     }
@@ -310,7 +319,7 @@ impl VisiPassApp {
             .field_value("PASSWORD", "password")
             .or_else(|| self.field_value("", "credential"));
         match value {
-            Some(v) => self.copy("password", &v, cx),
+            Some(v) => self.copy("password", &v, true, cx),
             None => self.note("This item has no password", cx),
         }
     }
@@ -324,7 +333,7 @@ impl VisiPassApp {
                 .map(|t| t.now().0)
         });
         match code {
-            Some(code) => self.copy("one-time code", &code, cx),
+            Some(code) => self.copy("one-time code", &code, true, cx),
             None => self.note("This item has no one-time code", cx),
         }
     }
@@ -354,6 +363,39 @@ impl VisiPassApp {
             Some(href) => cx.open_url(&href),
             None => self.note("This item has no website", cx),
         }
+    }
+
+    fn toggle_favorite(&mut self, cx: &mut Context<Self>) {
+        let Some(item) = self.detail.clone() else {
+            return;
+        };
+        let favorite = !item.favorite;
+        let id = item.id.clone();
+        self.request(
+            Request::SetFavorite {
+                id: item.id,
+                vault: item.vault.id,
+                favorite,
+            },
+            cx,
+            move |this, _, cx| {
+                if let Some(detail) = this.detail.as_mut().filter(|d| d.id == id) {
+                    detail.favorite = favorite;
+                }
+                if let Some(summary) = this.items.iter_mut().find(|s| s.id == id) {
+                    summary.favorite = favorite;
+                }
+                this.apply_filter();
+                this.note(
+                    if favorite {
+                        "Added to Favorites."
+                    } else {
+                        "Removed from Favorites."
+                    },
+                    cx,
+                );
+            },
+        );
     }
 
     fn note(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -408,28 +450,25 @@ impl VisiPassApp {
             && *until <= now
         {
             // Clear only if the clipboard still holds what VisiPass put there.
-            let still_ours = cx
-                .read_from_clipboard()
-                .and_then(|c| c.text())
-                .is_some_and(|t| t == value.expose());
-            if still_ours {
-                cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
-            }
+            vp_gui::clipboard::clear_if_still(value.expose(), cx);
             self.copied = None;
         }
         cx.notify();
     }
 
-    fn copy(&mut self, label: &str, value: &str, cx: &mut Context<Self>) {
-        cx.write_to_clipboard(ClipboardItem::new_string(value.to_string()));
-        self.copied = Some((
-            Secret::new(value.to_string()),
-            Instant::now() + CLIPBOARD_CLEAR,
-        ));
-        self.toast = Some((
-            format!("Copied {label}. The clipboard clears in 90 seconds."),
-            Instant::now() + Duration::from_secs(4),
-        ));
+    /// Secrets are hidden from clipboard history and cleared after 90 seconds.
+    fn copy(&mut self, label: &str, value: &str, secret: bool, cx: &mut Context<Self>) {
+        vp_gui::clipboard::copy(value, secret, cx);
+        let message = if secret {
+            self.copied = Some((
+                Secret::new(value.to_string()),
+                Instant::now() + CLIPBOARD_CLEAR,
+            ));
+            format!("Copied {label}. Kept out of clipboard history; clears in 90 seconds.")
+        } else {
+            format!("Copied {label}.")
+        };
+        self.toast = Some((message, Instant::now() + Duration::from_secs(4)));
         cx.notify();
     }
 
@@ -890,8 +929,13 @@ impl VisiPassApp {
         let t = &self.theme;
         let selected = self.selected.as_deref() == Some(item.id.as_str());
         let cursor = self.cursor == Some(row);
-        let subtitle = match item.urls.first() {
-            Some(url) => format!("{} · {}", item.vault.name, host(&url.href)),
+        let detail = item
+            .additional_information
+            .clone()
+            .filter(|u| !u.is_empty())
+            .or_else(|| item.urls.first().map(|u| host(&u.href)));
+        let subtitle = match detail {
+            Some(detail) => format!("{} · {detail}", item.vault.name),
             None => item.vault.name.clone(),
         };
         let open = item.clone();
@@ -1098,7 +1142,7 @@ impl VisiPassApp {
                                 format!("copy-{key}"),
                                 "Copy",
                                 cx,
-                                move |this, _, cx| this.copy("one-time code", &copy_code, cx),
+                                move |this, _, cx| this.copy("one-time code", &copy_code, true, cx),
                             ));
                     }
                     Err(_) => {
@@ -1145,7 +1189,7 @@ impl VisiPassApp {
                     ))
                     .child(
                         self.button(format!("copy-{key}"), "Copy", cx, move |this, _, cx| {
-                            this.copy(&copy_label, copy_value.expose(), cx)
+                            this.copy(&copy_label, copy_value.expose(), true, cx)
                         }),
                     );
             } else {
@@ -1165,7 +1209,9 @@ impl VisiPassApp {
                             format!("copy-{key}"),
                             "Copy",
                             cx,
-                            move |this, _, cx| this.copy(&copy_label, copy_value.expose(), cx),
+                            move |this, _, cx| {
+                                this.copy(&copy_label, copy_value.expose(), false, cx)
+                            },
                         ))
                     });
             }
@@ -1270,6 +1316,16 @@ impl VisiPassApp {
                         item.vault.name
                     ))),
             )
+            .child(self.button(
+                "favorite",
+                if item.favorite {
+                    "\u{f005} Favorite"
+                } else {
+                    "\u{f006} Favorite"
+                },
+                cx,
+                |this, _, cx| this.toggle_favorite(cx),
+            ))
             .child(self.button("edit", "Edit", cx, move |this, w, cx| {
                 this.start_editing(edit_item.clone(), w, cx)
             }))
@@ -1513,6 +1569,7 @@ impl Render for VisiPassApp {
             .on_action(
                 cx.listener(|this, _: &NewItem, window, cx| this.new_item("LOGIN", window, cx)),
             )
+            .on_action(cx.listener(|this, _: &ToggleFavorite, _, cx| this.toggle_favorite(cx)))
             .on_action(cx.listener(|this, _: &Dismiss, _, cx| {
                 if this.show_help {
                     this.show_help = false;

@@ -170,6 +170,42 @@ impl OpBackend {
         Ok(saved)
     }
 
+    pub(crate) async fn favorite_item(
+        &self,
+        id: &str,
+        vault: &str,
+        favorite: bool,
+    ) -> Result<(), Failure> {
+        #[derive(serde::Deserialize)]
+        struct Edited {
+            #[serde(default)]
+            favorite: bool,
+        }
+        let flag = if favorite { "true" } else { "false" };
+        let edited: Edited = self
+            .json(
+                &[
+                    "item",
+                    "edit",
+                    id,
+                    "--vault",
+                    vault,
+                    "--favorite",
+                    flag,
+                    "--format",
+                    "json",
+                ],
+                Call::default(),
+            )
+            .await?;
+        if edited.favorite != favorite {
+            return Err(Failure::new(
+                "1Password did not confirm the favourite change",
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) async fn archive_item(&self, id: &str, vault: &str) -> Result<(), Failure> {
         self.op(
             &["item", "delete", id, "--vault", vault, "--archive"],

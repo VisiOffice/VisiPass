@@ -470,6 +470,10 @@ impl Backend for OpBackend {
         self.put_item(item).await
     }
 
+    async fn set_favorite(&self, id: &str, vault: &str, favorite: bool) -> Result<(), Failure> {
+        self.favorite_item(id, vault, favorite).await
+    }
+
     async fn archive(&self, id: &str, vault: &str) -> Result<(), Failure> {
         self.archive_item(id, vault).await
     }

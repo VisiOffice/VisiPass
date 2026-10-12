@@ -32,6 +32,9 @@ pub struct ItemSummary {
     pub favorite: bool,
     #[serde(default)]
     pub updated_at: Option<String>,
+    /// What the backend shows under the title: the username for a login.
+    #[serde(default)]
+    pub additional_information: Option<String>,
 }
 
 /// A listed item plus the backend's own entry for it, kept verbatim so the

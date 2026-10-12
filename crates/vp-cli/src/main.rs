@@ -153,6 +153,8 @@ enum Commands {
     },
     /// Open the VisiPass desktop app to browse, add and edit items
     App,
+    /// Open Quick Access: search and copy, then get out of the way. Bind it to a key
+    Quick,
     /// Show whether visipassd is running and how it asks for approval
     Status,
     /// Check the setup without authenticating or prompting; safe to paste into an issue
@@ -543,8 +545,15 @@ fn execute(command: Commands) -> Result<i32, Failure> {
             print(&client::call(Request::Revoke { id, all })?)
         }
         Commands::Log { limit } => print(&client::call(Request::Log { limit })?),
+        Commands::Quick => {
+            let result = client::call(Request::OpenApp { quick: true })?;
+            if result.get("running").and_then(Value::as_bool) == Some(true) {
+                vp_core::paths::focus_app_window();
+            }
+            print(&result)
+        }
         Commands::App => {
-            let result = client::call(Request::OpenApp)?;
+            let result = client::call(Request::OpenApp { quick: false })?;
             if result.get("running").and_then(Value::as_bool) == Some(true) {
                 vp_core::paths::focus_app_window();
             }

@@ -466,6 +466,8 @@ fn app_only_requests_are_refused_on_the_public_socket() {
         serde_json::json!({"type": "items"}),
         serde_json::json!({"type": "vaults"}),
         serde_json::json!({"type": "archive", "id": "o".repeat(26), "vault": "Dev"}),
+        serde_json::json!({"type": "set-favorite", "id": "o".repeat(26), "vault": "Dev", "favorite": true}),
+        serde_json::json!({"type": "save-item", "item": {"title": "x", "category": "LOGIN", "vault": {"id": "v", "name": "Dev"}}}),
     ] {
         let stream = std::os::unix::net::UnixStream::connect(world.path("vp.sock")).unwrap();
         let line = serde_json::json!({"version": 1, "request": request}).to_string() + "\n";

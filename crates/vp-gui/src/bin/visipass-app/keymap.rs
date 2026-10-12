@@ -31,6 +31,7 @@ pub mod actions {
             RevealPassword,
             OpenWebsite,
             EditItem,
+            ToggleFavorite,
             NewItem,
             Dismiss,
             SaveItem,
@@ -165,6 +166,14 @@ pub const SHORTCUTS: &[Shortcut] = &[
         OpenWebsite
     ),
     shortcut!("edit-item", "Item", "Edit", ["ctrl-e"], APP, EditItem),
+    shortcut!(
+        "toggle-favorite",
+        "Item",
+        "Add to or remove from Favorites",
+        ["ctrl-shift-f"],
+        APP,
+        ToggleFavorite
+    ),
     shortcut!("new-item", "Item", "New item", ["ctrl-n"], APP, NewItem),
     shortcut!("save-item", "Editor", "Save", ["ctrl-s"], EDITOR, SaveItem),
     shortcut!(

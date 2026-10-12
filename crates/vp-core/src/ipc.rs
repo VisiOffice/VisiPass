@@ -142,8 +142,12 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         purpose: Option<String>,
     },
-    /// Opens the desktop app; visipassd launches it and hands it a private channel.
-    OpenApp,
+    /// Opens the desktop app (or, with `quick`, the Quick Access palette);
+    /// visipassd launches it and hands it a private channel.
+    OpenApp {
+        #[serde(default)]
+        quick: bool,
+    },
     // ---- Desktop app channel only. Refused on the public socket. ----
     Vaults {
         #[serde(default)]
@@ -164,6 +168,11 @@ pub enum Request {
     Archive {
         id: String,
         vault: String,
+    },
+    SetFavorite {
+        id: String,
+        vault: String,
+        favorite: bool,
     },
     // ---- end of app-only requests ----
     Grants,
@@ -194,6 +203,7 @@ impl Request {
                 | Request::Item { .. }
                 | Request::SaveItem { .. }
                 | Request::Archive { .. }
+                | Request::SetFavorite { .. }
         )
     }
 
@@ -207,12 +217,13 @@ impl Request {
             Request::Resolve { .. } => "resolve",
             Request::CreateApiCredential { .. } => "create",
             Request::Password { .. } => "password",
-            Request::OpenApp => "open-app",
+            Request::OpenApp { .. } => "open-app",
             Request::Vaults { .. } => "vaults",
             Request::Items { .. } => "items",
             Request::Item { .. } => "item",
             Request::SaveItem { .. } => "save-item",
             Request::Archive { .. } => "archive",
+            Request::SetFavorite { .. } => "favorite",
             Request::Grants => "grants",
             Request::Revoke { .. } => "revoke",
             Request::Log { .. } => "log",

@@ -67,8 +67,9 @@ pub struct Daemon<B, A> {
     approvals: tokio::sync::Mutex<()>,
     socket: PathBuf,
     state: PathBuf,
-    /// PID of the desktop app this daemon launched, if it is running.
+    /// PIDs of the desktop app and the Quick Access palette this daemon launched.
     app: tokio::sync::Mutex<Option<u32>>,
+    quick: tokio::sync::Mutex<Option<u32>>,
 }
 
 /// Where a request arrived. Only `App`, the private socket pair visipassd
@@ -240,7 +241,9 @@ fn assess(request: &Request, requester: &Requester) -> Assessment {
                 }),
             }
         }
-        Request::Item { id, .. } | Request::Archive { id, .. } => none(Some(id.clone())),
+        Request::Item { id, .. }
+        | Request::Archive { id, .. }
+        | Request::SetFavorite { id, .. } => none(Some(id.clone())),
         Request::SaveItem { item } => none(Some(if item.id.is_empty() {
             format!("create \"{}\"", item.title)
         } else {
@@ -261,6 +264,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
             socket,
             state: state_dir.to_path_buf(),
             app: tokio::sync::Mutex::new(None),
+            quick: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -393,7 +397,15 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 self.backend.archive(&id, &vault).await?;
                 Ok(json!({ "archived": id }))
             }
-            Request::OpenApp => Err(Failure::new("visipassd could not open the app")),
+            Request::SetFavorite {
+                id,
+                vault,
+                favorite,
+            } => {
+                self.backend.set_favorite(&id, &vault, favorite).await?;
+                Ok(json!({ "id": id, "favorite": favorite }))
+            }
+            Request::OpenApp { .. } => Err(Failure::new("visipassd could not open the app")),
         }
     }
 
@@ -479,12 +491,13 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 Ok(envelope) if envelope.version != PROTOCOL_VERSION => Response::err(
                     "vp and visipassd are different versions; restart the daemon with `vp daemon --restart`",
                 ),
-                Ok(envelope) if matches!(envelope.request, Request::OpenApp) => {
-                    match Arc::clone(&self).open_app().await {
-                        Ok(value) => Response::ok(value),
-                        Err(e) => Response::err(e.0),
-                    }
-                }
+                Ok(Envelope {
+                    request: Request::OpenApp { quick },
+                    ..
+                }) => match Arc::clone(&self).open_app(quick).await {
+                    Ok(value) => Response::ok(value),
+                    Err(e) => Response::err(e.0),
+                },
                 Ok(envelope) => {
                     let requester = tokio::task::spawn_blocking(move || procinfo::identify(pid))
                         .await
@@ -504,10 +517,23 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
 
     /// Launches the desktop app with one end of a private socket pair as fd 3.
     /// An agent may ask for this; it opens a window the agent cannot read.
-    async fn open_app(self: Arc<Self>) -> Result<Value, Failure> {
+    // Boxed with an explicit Send bound: the app channel can call this, and
+    // this spawns an app channel, so the compiler needs the cycle cut here.
+    fn open_app(
+        self: Arc<Self>,
+        quick: bool,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, Failure>> + Send>> {
+        Box::pin(self.open_app_inner(quick))
+    }
+
+    async fn open_app_inner(self: Arc<Self>, quick: bool) -> Result<Value, Failure> {
         use std::os::fd::AsRawFd;
         use std::os::unix::process::CommandExt;
-        let mut running = self.app.lock().await;
+        let mut running = if quick {
+            self.quick.lock().await
+        } else {
+            self.app.lock().await
+        };
         if let Some(pid) = *running
             && unsafe { libc::kill(pid as libc::pid_t, 0) } == 0
         {
@@ -525,6 +551,9 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
             .open(self.state.join("visipass-app.log"))
             .ok();
         let mut command = std::process::Command::new(program);
+        if quick {
+            command.arg("--quick");
+        }
         command
             .env("VISIPASS_APP_FD", "3")
             .stdin(std::process::Stdio::null())
@@ -552,12 +581,12 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
         std::thread::spawn(move || child.wait());
         ours.set_nonblocking(true).map_err(|_| failed())?;
         let stream = UnixStream::from_std(ours).map_err(|_| failed())?;
-        tokio::spawn(Arc::clone(&self).app_channel(stream, pid));
+        tokio::spawn(Arc::clone(&self).app_channel(stream, pid, quick));
         Ok(json!({ "opened": true }))
     }
 
     /// Serves the app's private connection: one request per line, in order.
-    async fn app_channel(self: Arc<Self>, stream: UnixStream, pid: u32) {
+    async fn app_channel(self: Arc<Self>, stream: UnixStream, pid: u32, quick: bool) {
         let requester = Requester {
             pid,
             agent: Some(APP_LABEL.into()),
@@ -574,9 +603,18 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 Ok(envelope) if envelope.version != PROTOCOL_VERSION => {
                     Response::err("The app and visipassd are different versions; restart both")
                 }
-                Ok(envelope) if matches!(envelope.request, Request::OpenApp) => {
-                    Response::ok(json!({ "running": true }))
-                }
+                // Quick Access may hand over to the full app.
+                Ok(Envelope {
+                    request: Request::OpenApp { quick: false },
+                    ..
+                }) => match Arc::clone(&self).open_app(false).await {
+                    Ok(value) => Response::ok(value),
+                    Err(e) => Response::err(e.0),
+                },
+                Ok(Envelope {
+                    request: Request::OpenApp { quick: true },
+                    ..
+                }) => Response::ok(json!({ "running": true })),
                 Ok(envelope) => {
                     self.handle(envelope.request, &requester, Channel::App)
                         .await
@@ -591,7 +629,11 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 break;
             }
         }
-        let mut running = self.app.lock().await;
+        let mut running = if quick {
+            self.quick.lock().await
+        } else {
+            self.app.lock().await
+        };
         if *running == Some(pid) {
             *running = None;
         }

@@ -50,6 +50,14 @@ pub trait Backend: Send + Sync + 'static {
     /// Creates (empty `id`) or updates an item, then reads it back and compares.
     fn save_item(&self, item: &Item) -> impl Future<Output = Result<Item, Failure>> + Send;
 
+    /// Marks or unmarks an item as a favourite, and confirms the change.
+    fn set_favorite(
+        &self,
+        id: &str,
+        vault: &str,
+        favorite: bool,
+    ) -> impl Future<Output = Result<(), Failure>> + Send;
+
     /// Moves an item to the archive. Never deletes.
     fn archive(&self, id: &str, vault: &str) -> impl Future<Output = Result<(), Failure>> + Send;
 
