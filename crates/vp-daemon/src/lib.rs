@@ -686,7 +686,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                     .filter(|l| matches!(l.summary.category.as_str(), "LOGIN" | "PASSWORD"))
                     .filter_map(|l| find::rank(&query, &l.summary).map(|score| (score, l.summary)))
                     .collect();
-                scored.sort_by(|a, b| b.0.cmp(&a.0));
+                scored.sort_by_key(|s| std::cmp::Reverse(s.0));
                 let logins: Vec<Value> = scored
                     .into_iter()
                     .take(20)
