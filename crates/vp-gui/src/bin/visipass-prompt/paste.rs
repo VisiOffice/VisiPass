@@ -24,6 +24,8 @@ pub struct PasteView {
     overlay: bool,
     field: Entity<TextInput>,
     focus: FocusHandle,
+    /// Tab stops after the field: Show, Save, Cancel.
+    stops: [FocusHandle; 3],
     opened: Instant,
     deadline: Instant,
     answered: bool,
@@ -75,6 +77,7 @@ impl PasteView {
             overlay,
             field,
             focus: cx.focus_handle(),
+            stops: [cx.focus_handle(), cx.focus_handle(), cx.focus_handle()],
             opened: now,
             deadline: now + timeout,
             answered: false,
@@ -111,11 +114,65 @@ impl PasteView {
         cx.quit();
     }
 
+    /// Which tab stop has focus: 0 the field, 1 Show, 2 Save, 3 Cancel.
+    fn focused_stop(&self, window: &Window, cx: &Context<Self>) -> usize {
+        if gpui::Focusable::focus_handle(self.field.read(cx), cx).is_focused(window) {
+            return 0;
+        }
+        self.stops
+            .iter()
+            .position(|h| h.is_focused(window))
+            .map(|i| i + 1)
+            .unwrap_or(0)
+    }
+
+    fn activate(&mut self, stop: usize, cx: &mut Context<Self>) {
+        match stop {
+            1 => self.field.update(cx, |f, cx| {
+                let masked = f.masked();
+                f.set_masked(!masked, cx)
+            }),
+            2 => self.save(cx),
+            3 => self.finish(PasteAnswer::Cancel, cx),
+            _ => {}
+        }
+    }
+
+    fn on_key(&mut self, event: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.focused_stop(window, cx);
+        match event.keystroke.key.as_str() {
+            "tab" => {
+                let next = if event.keystroke.modifiers.shift {
+                    (current + 3) % 4
+                } else {
+                    (current + 1) % 4
+                };
+                if next == 0 {
+                    let field = gpui::Focusable::focus_handle(self.field.read(cx), cx);
+                    window.focus(&field, cx);
+                } else {
+                    window.focus(&self.stops[next - 1], cx);
+                }
+                cx.stop_propagation();
+                cx.notify();
+            }
+            "enter" | "space" if current > 0 => {
+                self.activate(current, cx);
+                cx.stop_propagation();
+            }
+            "escape" => self.finish(PasteAnswer::Cancel, cx),
+            _ => {}
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn button(
         &self,
         id: &'static str,
         label: &'static str,
         primary: bool,
+        stop: usize,
+        focused: bool,
         cx: &mut Context<Self>,
         on: impl Fn(&mut Self, &mut Context<Self>) + 'static,
     ) -> impl IntoElement {
@@ -124,11 +181,13 @@ impl PasteView {
         let armed = self.armed();
         div()
             .id(id)
+            .track_focus(&self.stops[stop - 1])
+            .when(focused, |d| d.border_2().text_color(t.accent))
             .px(px(14.))
             .py(px(6.))
             .rounded(px(t.radius))
             .border_1()
-            .border_color(if primary {
+            .border_color(if primary || focused {
                 t.accent
             } else {
                 alpha(c.color, c.border_alpha)
@@ -142,6 +201,7 @@ impl PasteView {
                 },
             ))
             .text_color(if primary { t.accent } else { t.foreground })
+            .when(focused, |d| d.bg(alpha(t.accent, 0.18)))
             .when(!armed, |d| d.opacity(0.45))
             .when(armed, |d| {
                 d.cursor_pointer()
@@ -153,9 +213,10 @@ impl PasteView {
 }
 
 impl Render for PasteView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme.clone();
         let spec = self.prompt.paste.clone().unwrap_or_default();
+        let focused = self.focused_stop(window, cx);
         let remaining = self
             .deadline
             .saturating_duration_since(Instant::now())
@@ -232,6 +293,11 @@ impl Render for PasteView {
                         ),
                     ),
             )
+            .child(
+                div()
+                    .text_color(t.muted)
+                    .child("Paste the value to save it in your vault. The agent gets a reference to it, never the value itself."),
+            )
             .child(details)
             .child(
                 div()
@@ -252,6 +318,8 @@ impl Render for PasteView {
                                 "show",
                                 if masked { "Show" } else { "Hide" },
                                 false,
+                                1,
+                                focused == 1,
                                 cx,
                                 |this, cx| {
                                     this.field.update(cx, |f, cx| {
@@ -268,8 +336,8 @@ impl Render for PasteView {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .child(self.button("save", "Save to vault", true, cx, |this, cx| this.save(cx)))
-                    .child(self.button("cancel", "Cancel", false, cx, |this, cx| {
+                    .child(self.button("save", "Save to vault", true, 2, focused == 2, cx, |this, cx| this.save(cx)))
+                    .child(self.button("cancel", "Cancel", false, 3, focused == 3, cx, |this, cx| {
                         this.finish(PasteAnswer::Cancel, cx)
                     }))
                     .child(div().flex_1())
@@ -288,12 +356,13 @@ impl Render for PasteView {
                 div()
                     .text_size(px(t.size(0.833)))
                     .text_color(t.muted)
-                    .child("The agent gets only a reference to this secret, never the value."),
+                    .child("Tab moves between the field and buttons; Enter saves; Esc cancels."),
             );
 
         div()
             .id("paste")
             .track_focus(&self.focus)
+            .on_key_down(cx.listener(Self::on_key))
             .size_full()
             .flex()
             .flex_col()
