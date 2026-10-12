@@ -105,21 +105,23 @@ fn main() {
     let theme = vp_gui::theme::Theme::load();
     let wayland = cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some();
 
-    gpui_platform::application().run(move |cx: &mut App| {
-        let open = |overlay: bool, cx: &mut App| {
-            let (prompt, theme) = (prompt.clone(), theme.clone());
-            cx.open_window(options(overlay, cx), move |window, cx| {
-                let view = cx.new(|cx| ApprovalView::new(prompt, theme, overlay, cx));
-                let focus = view.read(cx).focus_handle().clone();
-                window.focus(&focus, cx);
-                view
-            })
-        };
-        // Prefer the overlay; fall back to a window when the compositor has no layer-shell.
-        if !(wayland && open(true, cx).is_ok()) && open(false, cx).is_err() {
-            eprintln!("visipass-prompt: could not open a window");
-            cx.quit();
-        }
-        cx.on_window_closed(|cx, _| cx.quit()).detach();
-    });
+    gpui_platform::application()
+        .with_assets(vp_gui::assets::Assets)
+        .run(move |cx: &mut App| {
+            let open = |overlay: bool, cx: &mut App| {
+                let (prompt, theme) = (prompt.clone(), theme.clone());
+                cx.open_window(options(overlay, cx), move |window, cx| {
+                    let view = cx.new(|cx| ApprovalView::new(prompt, theme, overlay, cx));
+                    let focus = view.read(cx).focus_handle().clone();
+                    window.focus(&focus, cx);
+                    view
+                })
+            };
+            // Prefer the overlay; fall back to a window when the compositor has no layer-shell.
+            if !(wayland && open(true, cx).is_ok()) && open(false, cx).is_err() {
+                eprintln!("visipass-prompt: could not open a window");
+                cx.quit();
+            }
+            cx.on_window_closed(|cx, _| cx.quit()).detach();
+        });
 }

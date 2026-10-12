@@ -25,25 +25,29 @@ fn main() {
     let client = Arc::new(client);
     let theme = vp_gui::theme::Theme::load();
 
-    gpui_platform::application().run(move |cx: &mut App| {
-        vp_gui::text_input::bind_keys(cx);
-        let keymap = std::rc::Rc::new(keymap::load(cx));
-        let options = WindowOptions {
-            titlebar: Some(TitlebarOptions {
-                title: Some("VisiPass".into()),
+    gpui_platform::application()
+        .with_assets(vp_gui::assets::Assets)
+        .run(move |cx: &mut App| {
+            vp_gui::text_input::bind_keys(cx);
+            let keymap = std::rc::Rc::new(keymap::load(cx));
+            let options = WindowOptions {
+                titlebar: Some(TitlebarOptions {
+                    title: Some("VisiPass".into()),
+                    ..Default::default()
+                }),
+                app_id: Some("visipass".into()),
+                window_bounds: Some(WindowBounds::centered(Size::new(px(1180.), px(760.)), cx)),
                 ..Default::default()
-            }),
-            app_id: Some("visipass".into()),
-            window_bounds: Some(WindowBounds::centered(Size::new(px(1180.), px(760.)), cx)),
-            ..Default::default()
-        };
-        let opened = cx.open_window(options, |window, cx| {
-            cx.new(|cx| VisiPassApp::new(theme.clone(), client.clone(), keymap.clone(), window, cx))
+            };
+            let opened = cx.open_window(options, |window, cx| {
+                cx.new(|cx| {
+                    VisiPassApp::new(theme.clone(), client.clone(), keymap.clone(), window, cx)
+                })
+            });
+            if opened.is_err() {
+                eprintln!("visipass-app: could not open a window");
+                cx.quit();
+            }
+            cx.on_window_closed(|cx, _| cx.quit()).detach();
         });
-        if opened.is_err() {
-            eprintln!("visipass-app: could not open a window");
-            cx.quit();
-        }
-        cx.on_window_closed(|cx, _| cx.quit()).detach();
-    });
 }

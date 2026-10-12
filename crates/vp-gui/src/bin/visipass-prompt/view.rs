@@ -17,7 +17,6 @@ use vp_core::ipc::{Answer, ApprovalPrompt};
 use vp_gui::theme::{Theme, alpha};
 
 const ARM_DELAY: Duration = Duration::from_millis(700);
-const KEY_GLYPH: &str = "\u{f084}"; // Nerd Font: key
 
 struct Choice {
     answer: Answer,
@@ -338,10 +337,14 @@ impl Render for ApprovalView {
             .items_start()
             .gap(px(12.))
             .child(
-                div()
-                    .text_size(px(t.size(1.5)))
-                    .text_color(t.accent)
-                    .child(KEY_GLYPH),
+                div().text_size(px(t.size(1.5))).text_color(t.accent).child(
+                    gpui::svg()
+                        .path(vp_gui::assets::MARK)
+                        .flex_none()
+                        .size(px(t.size(1.5)))
+                        .mt(px(2.))
+                        .text_color(t.accent),
+                ),
             )
             .child(
                 div()

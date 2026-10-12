@@ -635,10 +635,10 @@ impl VisiPassApp {
                     .px(px(10.))
                     .py(px(8.))
                     .child(
-                        div()
-                            .text_color(t.accent)
-                            .text_size(px(t.size(1.5)))
-                            .child("\u{f084}"),
+                        gpui::svg()
+                            .path(vp_gui::assets::MARK)
+                            .size(px(t.size(1.5)))
+                            .text_color(t.accent),
                     )
                     .child(
                         div()
