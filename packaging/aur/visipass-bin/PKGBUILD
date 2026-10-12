@@ -1,0 +1,28 @@
+# Maintainer: Robert O'Neill <robertdoneill@gmail.com>
+pkgname=visipass-bin
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Password manager for coding agents: they find, use and save secrets without seeing them"
+arch=('x86_64' 'aarch64')
+url="https://github.com/VisiOffice/VisiPass"
+license=('AGPL-3.0-only')
+# visipass-prompt (the approval window) loads Wayland, Vulkan and fontconfig at runtime.
+depends=('glibc' 'gcc-libs' 'libxcb' 'libxkbcommon' 'libxkbcommon-x11' 'wayland' 'vulkan-icd-loader' 'fontconfig' 'freetype2')
+optdepends=(
+  '1password-cli: the 1Password backend (required until the native store ships)'
+  'wl-clipboard: --clipboard input on Wayland'
+  'zenity: fallback approval dialog'
+)
+provides=('visipass')
+conflicts=('visipass')
+source_x86_64=("$url/releases/download/v$pkgver/visipass-$pkgver-linux-x86_64.tar.gz")
+source_aarch64=("$url/releases/download/v$pkgver/visipass-$pkgver-linux-aarch64.tar.gz")
+sha256sums_x86_64=('SKIP')
+sha256sums_aarch64=('SKIP')
+
+package() {
+  cd "visipass-$pkgver-linux-$CARCH"
+  install -Dm755 vp visipassd visipass-prompt -t "$pkgdir/usr/bin/"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md SECURITY.md SKILL.md -t "$pkgdir/usr/share/doc/visipass/"
+}

@@ -56,3 +56,12 @@ Security properties. Do not weaken them.
 - Test end to end in `crates/vp-cli/tests/cli.rs`: fake `op`, scripted approver, sentinel secrets asserted absent from stdout, stderr, op argv and the log.
 - Do not let clap parse arguments that may hold a secret: its errors echo the rejected value.
 - User-facing change: update `skills/visipass/SKILL.md`.
+
+## Release
+
+```sh
+# bump version in Cargo.toml ([workspace.package]), commit, then:
+git tag v0.1.1 && git push origin main v0.1.1
+# CI tests, builds x86_64 + aarch64 tarballs and creates the GitHub release (0.x = prerelease).
+packaging/aur/update.sh 0.1.1   # fills PKGBUILD checksums + .SRCINFO; push to the AUR visipass-bin repo
+```

@@ -6,15 +6,32 @@ Milestone 0 runs on top of 1Password: `vp` talks to your existing vaults through
 
 ## Install
 
-Requires the [1Password CLI](https://developer.1password.com/docs/cli/get-started/) with app integration turned on.
+Requires the [1Password CLI](https://developer.1password.com/docs/cli/get-started/) with app integration turned on (Settings > Developer > Integrate with 1Password CLI). Linux on x86_64 or aarch64; Omarchy first.
+
+**Arch / Omarchy** (AUR):
+
+```sh
+yay -S visipass-bin 1password-cli
+```
+
+**Any Linux** from [the latest release](https://github.com/VisiOffice/VisiPass/releases):
+
+```sh
+tar xzf visipass-*-linux-x86_64.tar.gz
+install -m755 visipass-*/vp visipass-*/visipassd visipass-*/visipass-prompt ~/.local/bin/
+```
+
+**From source:**
 
 ```sh
 cargo install --path crates/vp-cli
 cargo install --path crates/vp-daemon
-cargo install --path crates/vp-prompt     # the approval window (GPUI); first build takes a few minutes
+cargo install --path crates/vp-prompt     # the approval window (GPUI); first build takes several minutes
 ```
 
-The binaries (`vp`, `visipassd`, `visipass-prompt`) must be on PATH or side by side. `vp` starts the daemon when needed. Without `visipass-prompt`, approvals fall back to `zenity`, or to the terminal running `vp daemon`.
+The three binaries (`vp`, `visipassd`, `visipass-prompt`) must sit side by side or on PATH. `vp` starts the daemon when needed. Without `visipass-prompt`, approvals fall back to `zenity`, or to the terminal running `vp daemon`.
+
+Then give your agent the skill: copy `SKILL.md` (in the release, or `skills/visipass/SKILL.md` here) into its skills directory, e.g. `~/.claude/skills/visipass/SKILL.md` for Claude Code. Check the setup with `vp doctor`.
 
 On Omarchy the approval window matches your theme: it reads the palette, the polkit-prompt tokens and fonts from `~/.local/state/omarchy/current/theme`, and Hyprland's rounding, every time it opens. Preview it with `visipass-prompt --demo` (Escape to close).
 
