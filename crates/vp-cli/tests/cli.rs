@@ -17,7 +17,8 @@ use vp_op::OpBackend;
 const OPENAI: &str = "sentinel-openai-1234567890";
 const STRIPE: &str = "sentinel-stripe-abcdefghij";
 const NEW_KEY: &str = "sentinel-new-key-zyxwvuts";
-const SENTINELS: [&str; 3] = [OPENAI, STRIPE, NEW_KEY];
+const LOGIN: &str = "sentinel-login-password-42";
+const SENTINELS: [&str; 4] = [OPENAI, STRIPE, NEW_KEY, LOGIN];
 
 const FAKE_OP: &str = r#"#!/usr/bin/env python3
 import json, os, sys
@@ -32,10 +33,16 @@ def item(i, title, value):
             "fields": [{"id": "credential", "type": "CONCEALED", "label": "credential", "value": value,
                         "reference": "op://Dev/" + title + "/credential"}]}
 ITEMS = [item("o", "OpenAI API Key", "__OPENAI__"), item("s", "Stripe API Key", "__STRIPE__")]
-VALUES = {f["reference"]: f["value"] for it in ITEMS for f in it["fields"]}
+ITEMS.append({"id": "l" * 26, "title": "Stripe Dashboard", "category": "LOGIN", "vault": V, "tags": [],
+              "urls": [{"href": "https://dashboard.stripe.com/login", "primary": True}],
+              "additional_information": "me@example.com",
+              "fields": [{"id": "username", "type": "STRING", "purpose": "USERNAME", "label": "username", "value": "me@example.com"},
+                         {"id": "password", "type": "CONCEALED", "purpose": "PASSWORD", "label": "password", "value": "__LOGIN__",
+                          "reference": "op://Dev/Stripe Dashboard/password"}]})
+VALUES = {f["reference"]: f["value"] for it in ITEMS for f in it["fields"] if "reference" in f}
 store = os.path.join(DIR, "created.json")
 if args[:2] == ["item", "list"]:
-    listed = [{k: it[k] for k in ("id", "title", "category", "vault", "tags")} for it in ITEMS]
+    listed = [{k: it[k] for k in ("id", "title", "category", "vault", "tags", "urls", "additional_information") if k in it} for it in ITEMS]
     if os.path.exists(store):
         c = json.load(open(store))
         listed.append({k: c[k] for k in ("id", "title", "category", "vault")})
@@ -58,7 +65,8 @@ elif args[:2] == ["item", "create"]:
     json.dump(t, open(store, "w"))
     print(json.dumps({k: t[k] for k in ("id", "title", "category", "vault")}))
 elif args[:2] == ["item", "get"] and "--reveal" in args:
-    print(json.dumps(json.load(open(store))))
+    known = [it for it in ITEMS if it["id"] == args[2]]
+    print(json.dumps(known[0] if known else json.load(open(store))))
 else:
     sys.stderr.write("fake op: unexpected " + " ".join(args))
     sys.exit(2)
@@ -106,7 +114,8 @@ impl World {
         let script = FAKE_OP
             .replace("__DIR__", dir.path().to_str().unwrap())
             .replace("__OPENAI__", OPENAI)
-            .replace("__STRIPE__", STRIPE);
+            .replace("__STRIPE__", STRIPE)
+            .replace("__LOGIN__", LOGIN);
         std::fs::write(&op, script).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&op, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -730,6 +739,130 @@ fn agent_tokens_run_within_scope_and_never_prompt() {
     let log = std::fs::read_to_string(world.path("state/access.log")).unwrap();
     assert!(!log.contains(&token));
     assert!(log.contains("token nightly"));
+}
+
+/// Talks to `vp` as Chrome does: length-prefixed JSON on stdin/stdout.
+fn native(
+    world: &World,
+    origin: &str,
+    messages: &[serde_json::Value],
+) -> (Vec<serde_json::Value>, i32) {
+    let mut input = Vec::new();
+    for m in messages {
+        let body = serde_json::to_vec(m).unwrap();
+        input.extend_from_slice(&(body.len() as u32).to_ne_bytes());
+        input.extend_from_slice(&body);
+    }
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vp"))
+        .arg(origin)
+        .env("VISIPASS_SOCKET", world.path("vp.sock"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(&input).unwrap();
+    let out = child.wait_with_output().unwrap();
+    let mut replies = Vec::new();
+    let mut rest = out.stdout.as_slice();
+    while rest.len() >= 4 {
+        let len = u32::from_ne_bytes(rest[..4].try_into().unwrap()) as usize;
+        replies.push(serde_json::from_slice(&rest[4..4 + len]).unwrap());
+        rest = &rest[4 + len..];
+    }
+    (replies, out.status.code().unwrap_or(-1))
+}
+
+const ORIGIN: &str = "chrome-extension://pmfmecknoobmojibgpbkpeckpdnmhnpm/";
+
+#[test]
+fn browser_lists_logins_for_the_site_and_fills_only_there() {
+    let world = World::new(&[Decision::Always]);
+    let id = "l".repeat(26);
+    let vault = "v".repeat(26);
+    let (replies, code) = native(
+        &world,
+        ORIGIN,
+        &[
+            serde_json::json!({"id": 1, "type": "match", "url": "https://dashboard.stripe.com/login"}),
+            serde_json::json!({"id": 2, "type": "fill", "url": "https://evil.example/login", "vault": vault}),
+        ],
+    );
+    assert_eq!(code, 0);
+    let listed = &replies[0]["result"]["logins"];
+    assert_eq!(listed[0]["title"], "Stripe Dashboard");
+    assert_eq!(listed[0]["exact"], true);
+    assert!(
+        !replies[0].to_string().contains(LOGIN),
+        "matching never returns values"
+    );
+    assert_eq!(replies[1]["ok"], false, "a fill without an item is an error");
+
+    let (wrong, _) = native(
+        &world,
+        ORIGIN,
+        &[
+            serde_json::json!({"id": 3, "type": "fill", "url": "https://dashboard-stripe.evil.example/login", "item": id, "vault": vault}),
+        ],
+    );
+    assert_eq!(wrong[0]["ok"], false);
+    let (wrong, _) = native(
+        &world,
+        ORIGIN,
+        &[
+            serde_json::json!({"id": 4, "type": "fill", "url": "https://evil.example/login", "item": id, "vault": vault}),
+        ],
+    );
+    assert!(
+        wrong[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("will not fill it here"),
+        "{wrong:?}"
+    );
+    assert!(!wrong[0].to_string().contains(LOGIN));
+    assert_eq!(
+        world.approver.asked(),
+        0,
+        "the phishing guard refuses without asking"
+    );
+
+    let (filled, _) = native(
+        &world,
+        ORIGIN,
+        &[
+            serde_json::json!({"id": 5, "type": "fill", "url": "https://dashboard.stripe.com/login", "item": id, "vault": vault}),
+        ],
+    );
+    assert_eq!(filled[0]["result"]["password"], LOGIN, "{filled:?}");
+    assert_eq!(filled[0]["result"]["username"], "me@example.com");
+    assert_eq!(world.approver.asked(), 1);
+    let (again, _) = native(
+        &world,
+        ORIGIN,
+        &[
+            serde_json::json!({"id": 6, "type": "fill", "url": "https://dashboard.stripe.com/x", "item": id, "vault": vault}),
+        ],
+    );
+    assert_eq!(again[0]["ok"], true);
+    assert_eq!(
+        world.approver.asked(),
+        1,
+        "a standing grant for this site and login"
+    );
+    world.assert_contained();
+}
+
+#[test]
+fn the_native_host_serves_only_the_visipass_extension() {
+    let world = World::new(&[]);
+    let (replies, code) = native(
+        &world,
+        "chrome-extension://someotherextensionid/",
+        &[serde_json::json!({"id": 1, "type": "ping"})],
+    );
+    assert_eq!(code, 1);
+    assert!(replies.is_empty());
 }
 
 #[test]

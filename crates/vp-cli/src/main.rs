@@ -9,6 +9,7 @@ mod client;
 mod doctor;
 mod input;
 mod mcp;
+mod native_host;
 mod run;
 
 use clap::{Args, Parser, Subcommand};
@@ -184,6 +185,9 @@ enum Commands {
     Doctor,
     /// Serve VisiPass to an agent over MCP (stdio). No tool ever returns a secret value
     Mcp,
+    /// Connect the browser extension (registers the native-messaging host)
+    #[command(subcommand)]
+    Browser(BrowserCommands),
     /// Run visipassd in this terminal, so approvals can be answered here
     Daemon {
         /// Stop the running daemon
@@ -281,6 +285,12 @@ enum CreateCommands {
         #[command(flatten)]
         purpose: Purpose,
     },
+}
+
+#[derive(Subcommand)]
+enum BrowserCommands {
+    /// Register VisiPass with Chrome, Chromium and Brave, and show where the extension is
+    Install,
 }
 
 #[derive(Subcommand)]
@@ -733,6 +743,7 @@ fn execute(command: Commands) -> Result<i32, Failure> {
         },
         Commands::Doctor => print(&doctor::doctor()),
         Commands::Mcp => mcp::serve(),
+        Commands::Browser(BrowserCommands::Install) => print(&native_host::install()?),
         Commands::Daemon { stop, restart } => daemon(stop, restart),
     }
 }
@@ -903,6 +914,13 @@ fn daemon(stop: bool, restart: bool) -> Result<i32, Failure> {
 }
 
 fn main() {
+    // Chrome starts native-messaging hosts with the extension's origin as the only argument.
+    if let Some(origin) = std::env::args()
+        .nth(1)
+        .filter(|a| a.starts_with("chrome-extension://"))
+    {
+        std::process::exit(native_host::serve(&origin));
+    }
     let cli = Cli::parse();
     let code = match execute(cli.command) {
         Ok(code) => code,

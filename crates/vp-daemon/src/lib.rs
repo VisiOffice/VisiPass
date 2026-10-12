@@ -33,6 +33,20 @@ fn to_json<T: serde::Serialize>(value: &T) -> Value {
     serde_json::to_value(value).unwrap_or(Value::Null)
 }
 
+/// A login as the browser extension lists it: never a value.
+fn browser_entry(s: &vp_core::model::ItemSummary, exact: bool) -> Value {
+    json!({
+        "id": s.id,
+        "vault": s.vault.id,
+        "vaultName": s.vault.name,
+        "title": s.title,
+        "username": s.additional_information,
+        "host": s.urls.first().map(|u| find::page_host(&u.href)),
+        "category": s.category,
+        "exact": exact,
+    })
+}
+
 /// Writes a file readable only by this user, atomically.
 pub fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
@@ -249,6 +263,12 @@ fn assess(request: &Request, requester: &Requester) -> Assessment {
         Request::Item { id, .. }
         | Request::Archive { id, .. }
         | Request::SetFavorite { id, .. } => none(Some(id.clone())),
+        Request::BrowserFill { url, id, .. } => Assessment {
+            need: None,
+            refs: vec![format!("{}#{id}", find::page_host(url))],
+            detail: Some(format!("fill on {}", find::page_host(url))),
+            prompt: None,
+        },
         Request::ImportEnv {
             vault,
             entries,
@@ -640,6 +660,156 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                     ))
                 }
             }
+            Request::BrowserMatch { url } => {
+                let listed = self.backend.list(&vp_core::model::Scope::default()).await?;
+                let mut scored: Vec<(u32, vp_core::model::ItemSummary)> = listed
+                    .into_iter()
+                    .filter_map(|l| {
+                        find::page_match(&url, &l.summary).map(|score| (score, l.summary))
+                    })
+                    .collect();
+                scored.sort_by(|a, b| {
+                    b.0.cmp(&a.0)
+                        .then_with(|| a.1.title.to_lowercase().cmp(&b.1.title.to_lowercase()))
+                });
+                let logins: Vec<Value> = scored
+                    .into_iter()
+                    .take(20)
+                    .map(|(score, s)| browser_entry(&s, score == 3))
+                    .collect();
+                Ok(json!({ "host": find::page_host(&url), "logins": logins }))
+            }
+            Request::BrowserSearch { query } => {
+                let listed = self.backend.list(&vp_core::model::Scope::default()).await?;
+                let mut scored: Vec<(u32, vp_core::model::ItemSummary)> = listed
+                    .into_iter()
+                    .filter(|l| matches!(l.summary.category.as_str(), "LOGIN" | "PASSWORD"))
+                    .filter_map(|l| find::rank(&query, &l.summary).map(|score| (score, l.summary)))
+                    .collect();
+                scored.sort_by(|a, b| b.0.cmp(&a.0));
+                let logins: Vec<Value> = scored
+                    .into_iter()
+                    .take(20)
+                    .map(|(_, s)| browser_entry(&s, false))
+                    .collect();
+                Ok(json!({ "logins": logins }))
+            }
+            Request::BrowserFill {
+                url,
+                id,
+                vault,
+                force,
+            } => {
+                let page = find::page_host(&url);
+                if page.is_empty() || !(url.starts_with("https://") || url.starts_with("http://")) {
+                    return Err(Failure::new(
+                        "VisiPass only fills web pages (http and https)",
+                    ));
+                }
+                let item = self.backend.item(&id, &vault).await?;
+                let summary = vp_core::model::ItemSummary {
+                    id: item.id.clone(),
+                    title: item.title.clone(),
+                    category: item.category.clone(),
+                    vault: item.vault.clone(),
+                    tags: item.tags.clone(),
+                    urls: item
+                        .urls
+                        .iter()
+                        .map(|u| vp_core::model::Url {
+                            href: u.href.clone(),
+                        })
+                        .collect(),
+                    favorite: item.favorite,
+                    updated_at: None,
+                    additional_information: None,
+                };
+                let matches_page = find::page_match(&url, &summary).is_some();
+                let saved_for: Vec<String> =
+                    item.urls.iter().map(|u| find::page_host(&u.href)).collect();
+                // Phishing guard: a login only fills on its own site unless the human overrides.
+                if !matches_page && !force {
+                    return Err(Failure::new(format!(
+                        "This login is saved for {}, not {page}. VisiPass will not fill it here unless you choose to",
+                        if saved_for.is_empty() {
+                            "no website".to_string()
+                        } else {
+                            saved_for.join(", ")
+                        }
+                    )));
+                }
+                let field = |purpose: &str, fallback: &str| {
+                    item.fields
+                        .iter()
+                        .find(|f| f.purpose.as_deref() == Some(purpose) || f.id == fallback)
+                        .and_then(|f| f.value.as_ref())
+                        .map(|v| v.expose().to_string())
+                        .filter(|v| !v.is_empty())
+                };
+                let username = field("USERNAME", "username");
+                let mut details = vec![
+                    ("Website".to_string(), page.clone()),
+                    (
+                        "Login".to_string(),
+                        format!(
+                            "{}{}",
+                            item.title,
+                            username
+                                .as_ref()
+                                .map(|u| format!("  ({u})"))
+                                .unwrap_or_default()
+                        ),
+                    ),
+                    ("Vault".to_string(), item.vault.name.clone()),
+                ];
+                if !matches_page {
+                    details.push((
+                        "Warning".to_string(),
+                        format!("This login is saved for {}, not this site. Only continue if you are sure.", saved_for.join(", ")),
+                    ));
+                }
+                let need = Need {
+                    operation: Operation::Fill,
+                    refs: BTreeSet::from([format!("{page}#{}", item.id)]),
+                    vaults: BTreeSet::new(),
+                };
+                let prompt = Prompt {
+                    who: who(requester),
+                    action: format!("fill your \"{}\" login on {page}", item.title),
+                    details,
+                    secrets: vec![],
+                    purpose: None,
+                    timeout_secs: approval::TIMEOUT.as_secs(),
+                    paste: None,
+                };
+                if matches_page {
+                    *grant = Some(self.authorize(requester, &need, &prompt).await?);
+                } else {
+                    // An override is asked every time and never becomes a standing grant.
+                    let decision = {
+                        let _turn = self.approvals.lock().await;
+                        self.approver.ask(&prompt).await?
+                    };
+                    if decision == Decision::Deny {
+                        return Err(Failure::new(
+                            "The human denied this request. Do not retry it; ask them how to proceed",
+                        ));
+                    }
+                    *grant = Some("once".into());
+                }
+                let totp = item
+                    .fields
+                    .iter()
+                    .filter(|f| f.kind == "OTP")
+                    .find_map(|f| vp_core::totp::Totp::parse(f.value.as_ref()?.expose()).ok())
+                    .map(|t| t.now().0);
+                Ok(json!({
+                    "username": username,
+                    "password": field("PASSWORD", "password"),
+                    "totp": totp,
+                    "title": item.title,
+                }))
+            }
             Request::OpenApp { .. } => Err(Failure::new("visipassd could not open the app")),
         }
     }
@@ -660,6 +830,8 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 | Request::Vaults { .. }
                 | Request::Items { .. }
                 | Request::Tokens
+                | Request::BrowserMatch { .. }
+                | Request::BrowserSearch { .. }
         );
         let mut grant = None;
         let result = if channel == Channel::Public && request.app_only() {

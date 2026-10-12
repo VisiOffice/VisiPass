@@ -364,6 +364,57 @@ fn host_of(href: &str) -> String {
     host.strip_prefix("www.").map(String::from).unwrap_or(host)
 }
 
+/// How well an item's websites match a page, for filling: 3 for the exact
+/// host, 2 for the same site (another subdomain), None otherwise. The exact
+/// host wins, so a login saved for admin.payvy.com is offered before one for
+/// payvy.com on admin.payvy.com.
+pub fn page_match(page_url: &str, item: &ItemSummary) -> Option<u32> {
+    let page_host = host_of(page_url);
+    let page_site = site_name(page_url);
+    if page_host.is_empty() {
+        return None;
+    }
+    item.urls
+        .iter()
+        .filter_map(|u| {
+            if host_of(&u.href) == page_host {
+                Some(3)
+            } else if page_site.is_some()
+                && site_name(&u.href) == page_site
+                && same_registrable(&u.href, page_url)
+            {
+                Some(2)
+            } else {
+                None
+            }
+        })
+        .max()
+}
+
+/// `app.payvy.com` and `payvy.com` share a registrable domain; `payvy.com` and
+/// `payvy.net` do not.
+fn same_registrable(a: &str, b: &str) -> bool {
+    let tail = |u: &str| {
+        let host = host_of(u);
+        let labels: Vec<&str> = host.split('.').collect();
+        let n = if labels.len() >= 3
+            && labels[labels.len() - 2].len() <= 3
+            && labels[labels.len() - 1].len() == 2
+        {
+            3
+        } else {
+            2
+        };
+        labels[labels.len().saturating_sub(n)..].join(".")
+    };
+    tail(a) == tail(b)
+}
+
+/// The host a page belongs to, for grants and prompts: `dashboard.stripe.com`.
+pub fn page_host(url: &str) -> String {
+    host_of(url)
+}
+
 /// A parsed search: free words, `"quoted phrases"`, and field filters
 /// (`url:`, `user:`, `tag:`, `vault:`, `type:`). Values may be quoted:
 /// `vault:"Work Stuff"`. Everything is case-insensitive.
@@ -632,5 +683,28 @@ mod rank_tests {
         assert!(rank("tag:bank type:login", &a).is_some());
         assert!(rank("type:api", &a).is_none());
         assert!(rank("vault:v", &a).is_some());
+    }
+
+    #[test]
+    fn page_matching_prefers_the_exact_host() {
+        let root = item("Payvy", Some("https://payvy.com/login"), &[]);
+        let admin = item("Payvy Admin", Some("https://admin.payvy.com"), &[]);
+        let other = item("Payvy Net", Some("https://payvy.net"), &[]);
+        assert_eq!(
+            page_match("https://admin.payvy.com/signin", &admin),
+            Some(3)
+        );
+        assert_eq!(page_match("https://admin.payvy.com/signin", &root), Some(2));
+        assert_eq!(
+            page_match("https://admin.payvy.com/signin", &other),
+            None,
+            "different domain"
+        );
+        assert_eq!(
+            page_match("https://payvy.com.evil.example/login", &root),
+            None,
+            "lookalike host"
+        );
+        assert_eq!(page_match("chrome://newtab", &root), None);
     }
 }

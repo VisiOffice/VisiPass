@@ -71,7 +71,8 @@ fn base(path: &str) -> &str {
         .unwrap_or(name)
 }
 
-const AGENTS: [(&str, &str); 10] = [
+// Browsers too: the extension's native-messaging host runs under one.
+const AGENTS: [(&str, &str); 15] = [
     ("claude", "Claude Code"),
     ("codex", "Codex"),
     ("gemini", "Gemini CLI"),
@@ -82,6 +83,11 @@ const AGENTS: [(&str, &str); 10] = [
     ("amp", "Amp"),
     ("goose", "Goose"),
     ("crush", "Crush"),
+    ("chrome", "Chrome"),
+    ("google-chrome", "Chrome"),
+    ("chromium", "Chromium"),
+    ("brave", "Brave"),
+    ("vivaldi-bin", "Vivaldi"),
 ];
 
 fn agent_name(pid: u32) -> Option<&'static str> {

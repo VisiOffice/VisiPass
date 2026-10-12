@@ -39,6 +39,8 @@ pub enum Operation {
     Materialize,
     Reveal,
     Write,
+    /// Fill a login into a web page (the browser extension).
+    Fill,
 }
 
 impl Operation {
@@ -48,6 +50,7 @@ impl Operation {
             Operation::Materialize => "write to a plaintext file",
             Operation::Reveal => "print to the agent",
             Operation::Write => "write to the vault",
+            Operation::Fill => "fill into a web page",
         }
     }
 }
@@ -238,6 +241,25 @@ pub enum Request {
     RevokeToken {
         id: String,
     },
+    // ---- Browser extension (through `vp`'s native-messaging host) ----
+    /// Logins whose website matches the page, best first. Metadata only.
+    BrowserMatch {
+        url: String,
+    },
+    /// Logins matching a search, for the popup. Metadata only.
+    BrowserSearch {
+        query: String,
+    },
+    /// Username, password and one-time code for one login, to fill into the
+    /// page at `url`. Refused when the login's website does not match the page
+    /// unless `force` (the human overrode the warning).
+    BrowserFill {
+        url: String,
+        id: String,
+        vault: String,
+        #[serde(default)]
+        force: bool,
+    },
     Grants,
     Revoke {
         #[serde(default)]
@@ -293,6 +315,9 @@ impl Request {
             Request::CreateToken { .. } => "token-create",
             Request::Tokens => "tokens",
             Request::RevokeToken { .. } => "token-revoke",
+            Request::BrowserMatch { .. } => "browser-match",
+            Request::BrowserSearch { .. } => "browser-search",
+            Request::BrowserFill { .. } => "browser-fill",
             Request::Grants => "grants",
             Request::Revoke { .. } => "revoke",
             Request::Log { .. } => "log",
