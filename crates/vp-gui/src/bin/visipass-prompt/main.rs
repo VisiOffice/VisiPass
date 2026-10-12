@@ -10,6 +10,7 @@
 //!
 //! `visipass-prompt --demo` shows a sample request, for checking the styling.
 
+mod paste;
 mod view;
 
 use gpui::{
@@ -37,6 +38,7 @@ fn demo() -> ApprovalPrompt {
         ],
         purpose: Some("run the integration tests against the sandbox accounts".into()),
         timeout_secs: 120,
+        paste: None,
     }
 }
 
@@ -91,7 +93,25 @@ fn options(overlay: bool, cx: &App) -> WindowOptions {
 }
 
 fn main() {
-    let prompt = if std::env::args().any(|a| a == "--demo") {
+    let prompt = if std::env::args().any(|a| a == "--demo-paste") {
+        ApprovalPrompt {
+            action: "add a new secret to the vault \"Dev\"".into(),
+            details: vec![
+                (
+                    "Project".into(),
+                    "/home/you/Code/visipass  (git@github.com:you/visipass.git)".into(),
+                ),
+                ("Title".into(), "Stripe Live Key".into()),
+            ],
+            secrets: vec![],
+            purpose: Some("deploy the billing service".into()),
+            paste: Some(vp_core::ipc::PasteSpec {
+                title: "Stripe Live Key".into(),
+                vault: "Dev".into(),
+            }),
+            ..demo()
+        }
+    } else if std::env::args().any(|a| a == "--demo") {
         demo()
     } else {
         match read_prompt() {
@@ -108,14 +128,25 @@ fn main() {
     gpui_platform::application()
         .with_assets(vp_gui::assets::Assets)
         .run(move |cx: &mut App| {
-            let open = |overlay: bool, cx: &mut App| {
+            vp_gui::text_input::bind_keys(cx);
+            let open = |overlay: bool, cx: &mut App| -> Result<(), ()> {
                 let (prompt, theme) = (prompt.clone(), theme.clone());
-                cx.open_window(options(overlay, cx), move |window, cx| {
-                    let view = cx.new(|cx| ApprovalView::new(prompt, theme, overlay, cx));
-                    let focus = view.read(cx).focus_handle().clone();
-                    window.focus(&focus, cx);
-                    view
-                })
+                if prompt.paste.is_some() {
+                    cx.open_window(options(overlay, cx), move |window, cx| {
+                        cx.new(|cx| paste::PasteView::new(prompt, theme, overlay, window, cx))
+                    })
+                    .map(|_| ())
+                    .map_err(|_| ())
+                } else {
+                    cx.open_window(options(overlay, cx), move |window, cx| {
+                        let view = cx.new(|cx| ApprovalView::new(prompt, theme, overlay, cx));
+                        let focus = view.read(cx).focus_handle().clone();
+                        window.focus(&focus, cx);
+                        view
+                    })
+                    .map(|_| ())
+                    .map_err(|_| ())
+                }
             };
             // Prefer the overlay; fall back to a window when the compositor has no layer-shell.
             if !(wayland && open(true, cx).is_ok()) && open(false, cx).is_err() {

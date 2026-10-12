@@ -79,6 +79,15 @@ impl Approver for Scripted {
         state.1 += 1;
         Ok(state.0.pop_front().unwrap_or(Decision::Deny))
     }
+    // Pastes NEW_KEY when the next scripted decision allows, nothing when it denies.
+    async fn paste(&self, _prompt: &Prompt) -> Result<Option<vp_core::secret::Secret>, Failure> {
+        let mut state = self.0.lock().unwrap();
+        state.1 += 1;
+        Ok(match state.0.pop_front() {
+            Some(Decision::Deny) | None => None,
+            Some(_) => Some(vp_core::secret::Secret::new(NEW_KEY.to_string())),
+        })
+    }
 }
 
 struct World {
@@ -485,6 +494,52 @@ fn clean_text(text: &str) {
     for s in SENTINELS {
         assert!(!text.contains(s), "secret leaked: {text}");
     }
+}
+
+#[test]
+fn request_saves_the_pasted_secret_and_returns_only_a_reference() {
+    let world = World::new(&[Decision::Once]);
+    let out = world.vp(
+        &[
+            "request",
+            "--title",
+            "Pasted Key",
+            "--vault",
+            "Dev",
+            "--purpose",
+            "deploy",
+        ],
+        None,
+    );
+    clean(&out);
+    let receipt = json(&out);
+    assert_eq!(receipt["verified"], true);
+    assert!(receipt["ref"].as_str().unwrap().starts_with("op://"));
+    assert_eq!(world.approver.asked(), 1);
+    let create = world
+        .calls()
+        .into_iter()
+        .find(|c| c["args"][1] == "create")
+        .unwrap();
+    assert!(
+        create["stdin"].as_str().unwrap().contains(NEW_KEY),
+        "value travels to op on stdin"
+    );
+    world.assert_contained();
+    let log = json(&world.vp(&["log"], None));
+    assert_eq!(log["entries"][0]["request"], "request");
+}
+
+#[test]
+fn a_cancelled_request_saves_nothing() {
+    let world = World::new(&[Decision::Deny]);
+    let out = world.vp(
+        &["request", "--title", "Pasted Key", "--vault", "Dev"],
+        None,
+    );
+    assert!(!out.status.success());
+    assert!(text(&out.stderr).contains("cancelled"));
+    assert!(world.calls().is_empty(), "op is never called");
 }
 
 #[test]

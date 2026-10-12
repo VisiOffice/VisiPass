@@ -68,6 +68,25 @@ pub struct ApprovalPrompt {
     pub purpose: Option<String>,
     /// The prompt denies itself after this long.
     pub timeout_secs: u64,
+    /// Set when the human is asked to paste a new secret rather than approve.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paste: Option<PasteSpec>,
+}
+
+/// What a paste prompt asks for: a new secret, saved where the agent said.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PasteSpec {
+    pub title: String,
+    pub vault: String,
+}
+
+/// A paste prompt's answer, as one JSON line on stdout.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "answer", rename_all = "kebab-case")]
+pub enum PasteAnswer {
+    Save { value: Secret },
+    Cancel,
+    Timeout,
 }
 
 /// The human's answer, as `visipass-prompt` prints it.
@@ -175,6 +194,13 @@ pub enum Request {
         favorite: bool,
     },
     // ---- end of app-only requests ----
+    /// Ask the human to paste a secret that does not exist yet. The agent
+    /// gets back only the reference.
+    RequestSecret {
+        destination: Destination,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        purpose: Option<String>,
+    },
     Grants,
     Revoke {
         #[serde(default)]
@@ -224,6 +250,7 @@ impl Request {
             Request::SaveItem { .. } => "save-item",
             Request::Archive { .. } => "archive",
             Request::SetFavorite { .. } => "favorite",
+            Request::RequestSecret { .. } => "request",
             Request::Grants => "grants",
             Request::Revoke { .. } => "revoke",
             Request::Log { .. } => "log",

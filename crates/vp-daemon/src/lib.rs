@@ -177,6 +177,7 @@ fn assess(request: &Request, requester: &Requester) -> Assessment {
                     secrets: refs.clone(),
                     purpose: purpose.clone(),
                     timeout_secs: approval::TIMEOUT.as_secs(),
+                    paste: None,
                 }),
                 refs,
                 detail,
@@ -210,6 +211,7 @@ fn assess(request: &Request, requester: &Requester) -> Assessment {
                 secrets: vec![],
                 purpose: purpose.clone(),
                 timeout_secs: approval::TIMEOUT.as_secs(),
+                paste: None,
             }),
         },
         Request::Password {
@@ -238,12 +240,17 @@ fn assess(request: &Request, requester: &Requester) -> Assessment {
                     secrets: vec![],
                     purpose: purpose.clone(),
                     timeout_secs: approval::TIMEOUT.as_secs(),
+                    paste: None,
                 }),
             }
         }
         Request::Item { id, .. }
         | Request::Archive { id, .. }
         | Request::SetFavorite { id, .. } => none(Some(id.clone())),
+        Request::RequestSecret { destination, .. } => none(Some(format!(
+            "request \"{}\" in {}",
+            destination.title, destination.vault
+        ))),
         Request::SaveItem { item } => none(Some(if item.id.is_empty() {
             format!("create \"{}\"", item.title)
         } else {
@@ -404,6 +411,43 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
             } => {
                 self.backend.set_favorite(&id, &vault, favorite).await?;
                 Ok(json!({ "id": id, "favorite": favorite }))
+            }
+            Request::RequestSecret {
+                destination,
+                purpose,
+            } => {
+                if destination.title.trim().is_empty() || destination.vault.trim().is_empty() {
+                    return Err(Failure::new("A title and an explicit vault are required"));
+                }
+                let prompt = Prompt {
+                    who: who(requester),
+                    action: format!("add a new secret to the vault \"{}\"", destination.vault),
+                    details: vec![
+                        project_line(requester),
+                        ("Title".into(), destination.title.clone()),
+                    ],
+                    secrets: vec![],
+                    purpose,
+                    timeout_secs: approval::TIMEOUT.as_secs(),
+                    paste: Some(vp_core::ipc::PasteSpec {
+                        title: destination.title.clone(),
+                        vault: destination.vault.clone(),
+                    }),
+                };
+                // The paste window is the approval; one prompt at a time.
+                let pasted = {
+                    let _turn = self.approvals.lock().await;
+                    self.approver.paste(&prompt).await?
+                };
+                let value = pasted.ok_or_else(|| {
+                    Failure::new("The human cancelled. Do not ask again; ask them how to proceed")
+                })?;
+                Ok(to_json(
+                    &self
+                        .backend
+                        .create_api_credential(&destination, value)
+                        .await?,
+                ))
             }
             Request::OpenApp { .. } => Err(Failure::new("visipassd could not open the app")),
         }

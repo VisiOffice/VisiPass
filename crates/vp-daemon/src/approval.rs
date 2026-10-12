@@ -15,12 +15,18 @@ use vp_core::Failure;
 
 pub const TIMEOUT: Duration = Duration::from_secs(120);
 
-use vp_core::ipc::Answer;
 pub use vp_core::ipc::ApprovalPrompt as Prompt;
+use vp_core::ipc::{Answer, PasteAnswer};
+use vp_core::secret::Secret;
 
 pub trait Approver: Send + Sync + 'static {
     fn method(&self) -> &'static str;
     fn ask(&self, prompt: &Prompt) -> impl Future<Output = Result<Decision, Failure>> + Send;
+    /// Asks the human to paste a new secret. `None` if they cancel.
+    fn paste(
+        &self,
+        prompt: &Prompt,
+    ) -> impl Future<Output = Result<Option<Secret>, Failure>> + Send;
 }
 
 const ONCE: &str = "Allow once";
@@ -248,6 +254,114 @@ impl Desktop {
     }
 }
 
+const NO_ANSWER: &str =
+    "No one answered the paste window within 2 minutes. Ask the human, then run the command again";
+
+impl Desktop {
+    async fn native_paste(program: &PathBuf, prompt: &Prompt) -> Result<Option<Secret>, Failure> {
+        let unavailable = || Failure::new("Could not show the paste window");
+        let mut child = tokio::process::Command::new(program)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|_| unavailable())?;
+        let request = serde_json::to_vec(prompt).map_err(|_| unavailable())?;
+        {
+            use tokio::io::AsyncWriteExt;
+            let mut stdin = child.stdin.take().ok_or_else(unavailable)?;
+            stdin.write_all(&request).await.map_err(|_| unavailable())?;
+        }
+        let output =
+            tokio::time::timeout(TIMEOUT + Duration::from_secs(10), child.wait_with_output())
+                .await
+                .map_err(|_| Failure::new(NO_ANSWER))?
+                .map_err(|_| unavailable())?;
+        let stdout = Secret::new(String::from_utf8_lossy(&output.stdout).into_owned());
+        match serde_json::from_str::<PasteAnswer>(stdout.expose().trim()) {
+            Ok(PasteAnswer::Save { value }) => Ok(Some(value)),
+            Ok(PasteAnswer::Timeout) => Err(Failure::new(NO_ANSWER)),
+            // Cancel, a closed window, a crash: nothing is saved.
+            Ok(PasteAnswer::Cancel) | Err(_) => Ok(None),
+        }
+    }
+
+    async fn zenity_paste(prompt: &Prompt) -> Result<Option<Secret>, Failure> {
+        let spec = prompt.paste.clone().unwrap_or_default();
+        let text = format!(
+            "{}\n\nPaste the secret to save as \"{}\" in the vault \"{}\".",
+            plain(prompt).trim_end(),
+            spec.title,
+            spec.vault
+        );
+        let output = tokio::process::Command::new("zenity")
+            .args([
+                "--entry",
+                "--hide-text",
+                "--title",
+                "VisiPass",
+                "--width",
+                "560",
+                "--text",
+            ])
+            .arg(text)
+            .args(["--ok-label", "Save", "--cancel-label", "Cancel"])
+            .args(["--timeout", &TIMEOUT.as_secs().to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .output()
+            .await
+            .map_err(|_| Failure::new("Could not show the paste window"))?;
+        if output.status.code() == Some(5) {
+            return Err(Failure::new(NO_ANSWER));
+        }
+        let value = Secret::new(
+            String::from_utf8_lossy(&output.stdout)
+                .trim_end_matches('\n')
+                .to_string(),
+        );
+        Ok((output.status.success() && !value.is_blank()).then_some(value))
+    }
+
+    async fn terminal_paste(prompt: &Prompt) -> Result<Option<Secret>, Failure> {
+        let spec = prompt.paste.clone().unwrap_or_default();
+        let text = plain(prompt);
+        tokio::task::spawn_blocking(move || {
+            use std::io::{BufRead, Write};
+            use std::os::fd::AsRawFd;
+            let tty = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty").ok()?;
+            let mut out = &tty;
+            write!(out, "\n{text}  Paste the secret for \"{}\" in \"{}\" (Enter on an empty line cancels): ", spec.title, spec.vault).ok()?;
+            out.flush().ok()?;
+            // Turn echo off while the secret is typed or pasted.
+            let fd = tty.as_raw_fd();
+            let mut original: libc::termios = unsafe { std::mem::zeroed() };
+            let have_termios = unsafe { libc::tcgetattr(fd, &mut original) } == 0;
+            if have_termios {
+                let mut silent = original;
+                silent.c_lflag &= !libc::ECHO;
+                unsafe { libc::tcsetattr(fd, libc::TCSANOW, &silent) };
+            }
+            let mut line = String::new();
+            let read = std::io::BufReader::new(&tty).read_line(&mut line);
+            if have_termios {
+                unsafe { libc::tcsetattr(fd, libc::TCSANOW, &original) };
+            }
+            let _ = writeln!(out);
+            read.ok()?;
+            let value = Secret::new(line.trim_end_matches(['\r', '\n']).to_string());
+            Some((!value.is_blank()).then_some(value))
+        })
+        .await
+        .ok()
+        .flatten()
+        .ok_or_else(|| Failure::new("Could not read from the visipassd terminal"))
+    }
+}
+
 impl Approver for Desktop {
     fn method(&self) -> &'static str {
         match self {
@@ -272,6 +386,19 @@ impl Approver for Desktop {
             )),
         }
     }
+
+    async fn paste(&self, prompt: &Prompt) -> Result<Option<Secret>, Failure> {
+        match self {
+            Desktop::Native(program) => Self::native_paste(program, prompt).await,
+            Desktop::Zenity => Self::zenity_paste(prompt).await,
+            Desktop::Terminal => tokio::time::timeout(TIMEOUT, Self::terminal_paste(prompt))
+                .await
+                .map_err(|_| Failure::new(NO_ANSWER))?,
+            Desktop::Unavailable => Err(Failure::new(
+                "visipassd cannot ask the human: it has no graphical session and no terminal. Ask them to run `vp daemon` in a terminal",
+            )),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -287,6 +414,7 @@ mod tests {
             secrets: vec![],
             purpose: Some("<b>trust me</b>".into()),
             timeout_secs: 120,
+            paste: None,
         };
         let text = markup(&prompt);
         assert!(text.contains("Claude &lt;Code&gt;"));

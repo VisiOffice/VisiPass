@@ -125,6 +125,25 @@ enum Commands {
     /// Create a new credential from private input
     #[command(subcommand)]
     Create(CreateCommands),
+    /// Ask the human to paste a secret that does not exist yet; returns only its reference
+    Request {
+        /// Non-secret item title, e.g. "Stripe Live Key"
+        #[arg(long)]
+        title: String,
+        /// Destination vault name or ID; required, no implicit default
+        #[arg(long)]
+        vault: String,
+        #[arg(long)]
+        account: Option<String>,
+        /// Optional non-secret website URL
+        #[arg(long)]
+        url: Option<String>,
+        /// Optional non-secret notes
+        #[arg(long)]
+        notes: Option<String>,
+        #[command(flatten)]
+        purpose: Purpose,
+    },
     /// Compare, or update and verify, a login password from private input
     Password {
         item: String,
@@ -509,6 +528,26 @@ fn execute(command: Commands) -> Result<i32, Failure> {
             print(&client::call(Request::CreateApiCredential {
                 destination,
                 value,
+                purpose: purpose.purpose,
+            })?)
+        }
+        Commands::Request {
+            title,
+            vault,
+            account,
+            url,
+            notes,
+            purpose,
+        } => {
+            let destination = Destination {
+                title: title.trim().into(),
+                vault: vault.trim().into(),
+                account,
+                url,
+                notes,
+            };
+            print(&client::call(Request::RequestSecret {
+                destination,
                 purpose: purpose.purpose,
             })?)
         }
