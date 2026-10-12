@@ -897,6 +897,7 @@ impl VisiPassApp {
         let open = item.clone();
         div()
             .id(("row", row))
+            .w_full()
             .flex()
             .items_center()
             .gap(px(10.))
