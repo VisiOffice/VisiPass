@@ -543,7 +543,13 @@ fn execute(command: Commands) -> Result<i32, Failure> {
             print(&client::call(Request::Revoke { id, all })?)
         }
         Commands::Log { limit } => print(&client::call(Request::Log { limit })?),
-        Commands::App => print(&client::call(Request::OpenApp)?),
+        Commands::App => {
+            let result = client::call(Request::OpenApp)?;
+            if result.get("running").and_then(Value::as_bool) == Some(true) {
+                vp_core::paths::focus_app_window();
+            }
+            print(&result)
+        }
         Commands::Status => match client::connect(false) {
             Ok(stream) => print(&client::call_with(stream, Request::Status)?),
             Err(_) => print(&serde_json::json!({ "running": false })),

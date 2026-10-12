@@ -127,7 +127,12 @@ pub fn hand_off() -> Result<(), Failure> {
         .read_line(&mut reply)
         .map_err(|_| Failure::new("Could not reach visipassd"))?;
     match serde_json::from_str::<Response>(&reply) {
-        Ok(Response::Ok { .. }) => Ok(()),
+        Ok(Response::Ok { result, .. }) => {
+            if result.get("running").and_then(Value::as_bool) == Some(true) {
+                vp_core::paths::focus_app_window();
+            }
+            Ok(())
+        }
         Ok(Response::Err { error, .. }) => Err(Failure::new(error)),
         Err(_) => Err(Failure::new("visipassd sent an unexpected reply")),
     }

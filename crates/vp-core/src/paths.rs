@@ -28,3 +28,17 @@ pub fn state_dir() -> PathBuf {
             .join("visipass")
     })
 }
+
+/// Brings an already-open VisiPass window to the front, where the desktop
+/// allows it. On Hyprland this asks the compositor to focus the window by class;
+/// elsewhere it does nothing.
+pub fn focus_app_window() {
+    if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
+        let _ = std::process::Command::new("hyprctl")
+            .args(["dispatch", "focuswindow", "class:^(visipass)$"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
