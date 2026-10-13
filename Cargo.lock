@@ -6292,6 +6292,16 @@ dependencies = [
 [[package]]
 name = "vp-native"
 version = "0.5.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "vp-core",
+ "vp-crypto",
+ "vp-store",
+ "zeroize",
+]
 
 [[package]]
 name = "vp-op"

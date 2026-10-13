@@ -29,6 +29,20 @@ pub fn state_dir() -> PathBuf {
     })
 }
 
+/// `$VISIPASS_DATA_DIR`, else `$XDG_DATA_HOME/visipass`, else `~/.local/share/visipass`.
+/// Holds the native vault and its Secret Key.
+pub fn data_dir() -> PathBuf {
+    set("VISIPASS_DATA_DIR").unwrap_or_else(|| {
+        set("XDG_DATA_HOME")
+            .unwrap_or_else(|| {
+                set("HOME")
+                    .unwrap_or_else(|| PathBuf::from("/"))
+                    .join(".local/share")
+            })
+            .join("visipass")
+    })
+}
+
 /// Brings an already-open VisiPass window to the front, where the desktop
 /// allows it. On Hyprland this asks the compositor to focus the window by class;
 /// elsewhere it does nothing.

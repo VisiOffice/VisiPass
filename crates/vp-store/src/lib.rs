@@ -724,65 +724,98 @@ impl Store {
         overview: &[u8],
         details: &[u8],
     ) -> Result<u64> {
+        let versions = self.put_items(
+            unlocked,
+            vault_id,
+            &[Write {
+                item_id,
+                overview,
+                details,
+            }],
+        )?;
+        Ok(versions[0])
+    }
+
+    /// Writes several items to one vault in one transaction under one manifest
+    /// signature. All or nothing. Returns each item's new version, in order.
+    pub fn put_items(
+        &mut self,
+        unlocked: &mut Unlocked,
+        vault_id: &str,
+        writes: &[Write],
+    ) -> Result<Vec<u64>> {
         let state = unlocked.vault(vault_id)?;
         let (key, generation) = (&state.key, state.generation);
-        let previous = state.items.get(item_id).copied();
-        let version = previous.map_or(1, |(v, _, _)| v + 1);
-        let sealed_overview = seal_item(
-            key,
-            generation,
-            &item_ad(vault_id, generation, item_id, "overview", version),
-            overview,
-        );
-        let sealed_details = seal_item(
-            key,
-            generation,
-            &item_ad(vault_id, generation, item_id, "details", version),
-            details,
-        );
+        let mut items = state.items.clone();
+        let mut history = state.history.clone();
         let tx = self.conn.transaction()?;
-        let mut moved = None;
-        if let Some((old_version, _, old_hash)) = previous {
-            let old: Vec<u8> = tx.query_row(
-                "SELECT details FROM item WHERE vault_id = ?1 AND item_id = ?2 AND item_version = ?3",
-                params![vault_id, item_id, old_version],
-                |r| r.get(0),
-            ).map_err(|_| tampered("item being replaced"))?;
-            if h(&old) != old_hash {
-                return Err(tampered("item being replaced"));
+        let mut versions = Vec::with_capacity(writes.len());
+        for write in writes {
+            let item_id = write.item_id;
+            let previous = items.get(item_id).copied();
+            let version = previous.map_or(1, |(v, _, _)| v + 1);
+            let sealed_overview = seal_item(
+                key,
+                generation,
+                &item_ad(vault_id, generation, item_id, "overview", version),
+                write.overview,
+            );
+            let sealed_details = seal_item(
+                key,
+                generation,
+                &item_ad(vault_id, generation, item_id, "details", version),
+                write.details,
+            );
+            if let Some((old_version, _, old_hash)) = previous {
+                let old: Vec<u8> = tx
+                    .query_row(
+                        "SELECT details FROM item WHERE vault_id = ?1 AND item_id = ?2 AND item_version = ?3",
+                        params![vault_id, item_id, old_version],
+                        |r| r.get(0),
+                    )
+                    .map_err(|_| tampered("item being replaced"))?;
+                if h(&old) != old_hash {
+                    return Err(tampered("item being replaced"));
+                }
+                tx.execute(
+                    "INSERT INTO history VALUES (?1, ?2, ?3, ?4)",
+                    params![vault_id, item_id, old_version, old],
+                )?;
+                history.insert((item_id.to_string(), old_version), old_hash);
             }
             tx.execute(
-                "INSERT INTO history VALUES (?1, ?2, ?3, ?4)",
-                params![vault_id, item_id, old_version, old],
+                "INSERT OR REPLACE INTO item VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![vault_id, item_id, version, sealed_overview, sealed_details],
             )?;
-            moved = Some((old_version, old_hash));
+            items.insert(
+                item_id.to_string(),
+                (version, h(&sealed_overview), h(&sealed_details)),
+            );
+            versions.push(version);
         }
-        tx.execute(
-            "INSERT OR REPLACE INTO item VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![vault_id, item_id, version, sealed_overview, sealed_details],
-        )?;
         let state = unlocked.vaults.get_mut(vault_id).expect("checked above");
-        let before_items = state.items.clone();
-        let before_history = state.history.clone();
-        if let Some((old_version, old_hash)) = moved {
-            state
-                .history
-                .insert((item_id.to_string(), old_version), old_hash);
-        }
-        state.items.insert(
-            item_id.to_string(),
-            (version, h(&sealed_overview), h(&sealed_details)),
-        );
+        let before_items = std::mem::replace(&mut state.items, items);
+        let before_history = std::mem::replace(&mut state.history, history);
+        let before_sequences = (state.sequence, unlocked.sequence);
         match Self::commit_with(&self.sequence_file, unlocked, vault_id, tx) {
-            Ok(()) => Ok(version),
+            Ok(()) => Ok(versions),
             Err(e) => {
+                unlocked.sequence = before_sequences.1;
                 let state = unlocked.vaults.get_mut(vault_id).expect("checked above");
                 state.items = before_items;
                 state.history = before_history;
+                state.sequence = before_sequences.0;
                 Err(e)
             }
         }
     }
+}
+
+/// One item write for [`Store::put_items`].
+pub struct Write<'a> {
+    pub item_id: &'a str,
+    pub overview: &'a [u8],
+    pub details: &'a [u8],
 }
 
 /// The highest account sequence seen, kept outside the database. Written after

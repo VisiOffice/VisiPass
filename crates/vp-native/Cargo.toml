@@ -1,7 +1,18 @@
 [package]
 name = "vp-native"
+description = "VisiPass's own vault as a backend: items encrypted by vp-store."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+vp-core.workspace = true
+vp-crypto.workspace = true
+vp-store.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
