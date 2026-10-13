@@ -796,7 +796,10 @@ fn browser_lists_logins_for_the_site_and_fills_only_there() {
         !replies[0].to_string().contains(LOGIN),
         "matching never returns values"
     );
-    assert_eq!(replies[1]["ok"], false, "a fill without an item is an error");
+    assert_eq!(
+        replies[1]["ok"], false,
+        "a fill without an item is an error"
+    );
 
     let (wrong, _) = native(
         &world,
