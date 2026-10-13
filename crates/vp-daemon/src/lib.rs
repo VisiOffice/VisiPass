@@ -751,7 +751,19 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                     ))
                 }
             }
-            Request::BrowserMatch { url } => {
+            Request::BrowserMatch { url, unlock } => {
+                if !unlock
+                    && self
+                        .backend
+                        .native_status()
+                        .is_some_and(|s| s.exists && !s.unlocked)
+                {
+                    return Ok(json!({
+                        "host": find::page_host(&url),
+                        "logins": [],
+                        "locked": true,
+                    }));
+                }
                 let listed = self.backend.list(&vp_core::model::Scope::default()).await?;
                 let mut scored: Vec<(u32, vp_core::model::ItemSummary)> = listed
                     .into_iter()

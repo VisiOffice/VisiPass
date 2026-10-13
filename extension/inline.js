@@ -34,6 +34,7 @@
   let root = null;
   let field = null;
   let logins = null;
+  let locked = false;
   let selected = 0;
   let menuOpen = false;
   let dismissed = new WeakSet();
@@ -113,7 +114,19 @@
     const menu = root.querySelector(".menu");
     const head = el("div", "head");
     head.innerHTML = MARK;
-    head.append("Log in as…");
+    head.append(locked ? "VisiPass is locked" : "Log in as…");
+    if (locked) {
+      const row = el("div", "item selected");
+      row.setAttribute("role", "option");
+      row.append(el("div", "title", "Unlock VisiPass"), el("div", "sub", "Then pick a login for this site"));
+      row.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        unlock();
+      });
+      menu.replaceChildren(head, row);
+      if (status) menu.append(el("div", `status${isError ? " error" : ""}`, status));
+      return;
+    }
     const rows = (logins || []).map((login, i) => {
       const row = el("div", `item${i === selected ? " selected" : ""}`);
       row.setAttribute("role", "option");
@@ -130,7 +143,7 @@
   }
 
   function openMenu() {
-    if (!logins || !logins.length) return;
+    if (!locked && (!logins || !logins.length)) return;
     menuOpen = true;
     root.querySelector(".menu").style.display = "block";
     renderMenu();
@@ -142,7 +155,33 @@
     if (root) root.querySelector(".menu").style.display = "none";
   }
 
+  async function unlock() {
+    renderMenu("Unlock in the VisiPass window…");
+    try {
+      const result = await send({ kind: "page-logins", unlock: true });
+      locked = Boolean(result.locked);
+      logins = result.logins || [];
+      selected = 0;
+      if (!logins.length) return renderMenu("No saved logins for this site.");
+      updateMark();
+      renderMenu();
+    } catch (error) {
+      renderMenu(error.message, true);
+    }
+  }
+
+  function updateMark() {
+    const mark = root.querySelector(".mark");
+    mark.style.display = "block";
+    mark.title = locked ? "VisiPass is locked: click to unlock" : "VisiPass";
+    mark.style.opacity = locked ? "0.55" : "1";
+    const count = mark.querySelector(".count");
+    count.textContent = !locked && logins.length > 1 ? String(logins.length) : "";
+    count.style.display = !locked && logins.length > 1 ? "block" : "none";
+  }
+
   async function choose(i) {
+    if (locked) return unlock();
     const login = logins[i];
     if (!login) return;
     selected = i;
@@ -168,17 +207,16 @@
       return; // VisiPass not running: stay out of the way
     }
     if (field !== target) return;
+    locked = Boolean(result.locked);
     logins = result.logins || [];
-    if (!logins.length) return hide();
+    if (!locked && !logins.length) return hide();
     ensureUi();
     selected = 0;
-    const mark = root.querySelector(".mark");
-    mark.style.display = "block";
-    mark.querySelector(".count").textContent = logins.length > 1 ? String(logins.length) : "";
-    mark.querySelector(".count").style.display = logins.length > 1 ? "block" : "none";
+    updateMark();
     place();
     // Open on first focus, as other managers do; not again after Esc or a fill.
-    if (!dismissed.has(target)) openMenu();
+    // While locked only the mark shows: unlocking waits for a click.
+    if (!locked && !dismissed.has(target)) openMenu();
   }
 
   document.addEventListener(
@@ -197,12 +235,13 @@
     (e) => {
       if (!field || e.composedPath()[0] !== field) return;
       if (!menuOpen) {
-        if (e.key === "ArrowDown" && logins && logins.length) {
+        if (e.key === "ArrowDown" && (locked || (logins && logins.length))) {
           openMenu();
           e.preventDefault();
         }
         return;
       }
+      if (locked && e.key !== "Enter" && e.key !== "Escape") return;
       if (e.key === "ArrowDown") selected = Math.min(selected + 1, logins.length - 1);
       else if (e.key === "ArrowUp") selected = Math.max(selected - 1, 0);
       else if (e.key === "Enter") choose(selected);

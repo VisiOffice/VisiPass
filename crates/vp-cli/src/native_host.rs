@@ -81,6 +81,10 @@ fn handle(message: &Value) -> Result<Value, Failure> {
         "theme" => Ok(theme()),
         "match" => client::call(Request::BrowserMatch {
             url: required("url")?,
+            unlock: message
+                .get("unlock")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         }),
         "search" => client::call(Request::BrowserSearch {
             query: required("query")?,

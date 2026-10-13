@@ -83,7 +83,7 @@ document.getElementById("open").addEventListener("click", (e) => {
 async function load() {
   const query = search.value.trim();
   try {
-    const result = query ? await ask({ type: "search", query }) : await ask({ type: "match", url: tab.url });
+    const result = query ? await ask({ type: "search", query }) : await ask({ type: "match", url: tab.url, unlock: true });
     logins = result.logins;
     selected = 0;
     site.textContent = query ? `Search results for “${query}”` : logins.length ? `Logins for ${result.host}` : `No saved logins for ${result.host || "this page"}. Search above.`;

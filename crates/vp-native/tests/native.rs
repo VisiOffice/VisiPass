@@ -402,12 +402,25 @@ async fn a_dismissed_check_cancels_and_an_unavailable_one_asks_for_the_password(
         Presence::Confirmed,
         Presence::Unavailable,
     ]);
-    let backend = NativeBackend::with_params(paths(&dir), unlock.clone(), CHEAP);
+    let backend = NativeBackend::with_quiet_after_cancel(
+        paths(&dir),
+        unlock.clone(),
+        CHEAP,
+        Duration::from_millis(200),
+    );
     backend.set_quick_unlock(Some(HOURS_8)).await.unwrap();
     backend.lock();
 
     let error = backend.list(&Scope::default()).await.unwrap_err();
     assert!(error.0.contains("cancelled"), "{}", error.0);
+    let quiet = backend.list(&Scope::default()).await.unwrap_err();
+    assert!(quiet.0.contains("just cancelled"), "{}", quiet.0);
+    assert_eq!(
+        unlock.checked(),
+        1,
+        "no second prompt straight after a cancel"
+    );
+    tokio::time::sleep(Duration::from_millis(250)).await;
     backend.list(&Scope::default()).await.unwrap();
     assert_eq!(
         (unlock.asked(), unlock.checked()),
@@ -460,4 +473,22 @@ async fn a_cancelled_password_leaves_quick_unlock_as_it_was() {
     assert!(backend.set_quick_unlock(Some(HOURS_8)).await.is_err());
     assert_eq!(backend.quick_unlock(), None);
     assert!(!paths(&dir).settings.exists());
+}
+
+#[tokio::test]
+async fn requests_waiting_on_a_cancelled_unlock_do_not_each_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    drop(created(&dir).await);
+    let unlock = Scripted::new(vec![None, Some(PASSWORD)]);
+    let backend = NativeBackend::with_params(paths(&dir), unlock.clone(), CHEAP);
+    let waiting: Vec<_> = (0..5)
+        .map(|_| {
+            let backend = backend.clone();
+            tokio::spawn(async move { backend.list(&Scope::default()).await })
+        })
+        .collect();
+    for request in waiting {
+        assert!(request.await.unwrap().is_err());
+    }
+    assert_eq!(unlock.asked(), 1, "one prompt, not five");
 }

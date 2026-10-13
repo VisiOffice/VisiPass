@@ -46,6 +46,10 @@ pub enum Presence {
 }
 
 const UNLOCK_ATTEMPTS: usize = 3;
+/// After the human cancels an unlock, requests that were waiting for it (and new
+/// ones) fail at once for this long instead of each opening another prompt.
+pub const QUIET_AFTER_CANCEL: Duration = Duration::from_secs(15);
+const QUIET: &str = "VisiPass is locked: unlocking was just cancelled. Try again in a few seconds";
 pub const IDLE_LOCK: Duration = Duration::from_secs(10 * 60);
 pub const QUICK_UNLOCK_DEFAULT: Duration = Duration::from_secs(8 * 60 * 60);
 pub const QUICK_UNLOCK_MAX: Duration = Duration::from_secs(24 * 60 * 60);
@@ -226,6 +230,8 @@ struct State {
     window_end: Option<Instant>,
     /// Bumped by every full lock, so a quick unlock that raced one is dropped.
     epoch: u64,
+    /// No unlock prompts until then; set when the human cancels one.
+    quiet_until: Option<Instant>,
 }
 
 impl State {
@@ -280,6 +286,7 @@ struct Inner<U> {
     state: Mutex<State>,
     /// One unlock at a time.
     gate: tokio::sync::Mutex<()>,
+    quiet_after_cancel: Duration,
 }
 
 impl<U> Inner<U> {
@@ -319,6 +326,20 @@ impl<U: Unlock> NativeBackend<U> {
     /// `params` applies to a vault created by [`NativeBackend::init`]; an existing
     /// vault keeps the parameters stored with it.
     pub fn with_params(paths: Paths, unlock: U, params: KdfParams) -> Self {
+        Self::build(paths, unlock, params, QUIET_AFTER_CANCEL)
+    }
+
+    /// For tests: how long a cancelled unlock keeps further prompts away.
+    pub fn with_quiet_after_cancel(
+        paths: Paths,
+        unlock: U,
+        params: KdfParams,
+        quiet: Duration,
+    ) -> Self {
+        Self::build(paths, unlock, params, quiet)
+    }
+
+    fn build(paths: Paths, unlock: U, params: KdfParams, quiet_after_cancel: Duration) -> Self {
         let quick_unlock = load_settings(&paths.settings)
             .quick_unlock_secs
             .map(|secs| Duration::from_secs(secs).min(QUICK_UNLOCK_MAX));
@@ -334,8 +355,10 @@ impl<U: Unlock> NativeBackend<U> {
                 kept: None,
                 window_end: None,
                 epoch: 0,
+                quiet_until: None,
             }),
             gate: tokio::sync::Mutex::new(()),
+            quiet_after_cancel,
         });
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let weak: Weak<Inner<U>> = Arc::downgrade(&inner);
@@ -377,8 +400,7 @@ impl<U: Unlock> NativeBackend<U> {
         let window = state.quick_unlock?;
         let remaining = state
             .window_end
-            .and_then(|end| end.checked_duration_since(Instant::now()))
-            .filter(|_| state.opened.is_some() || state.kept.is_some());
+            .and_then(|end| end.checked_duration_since(Instant::now()));
         Some(QuickUnlock { window, remaining })
     }
 
@@ -485,6 +507,14 @@ impl<U: Unlock> NativeBackend<U> {
                 state.store = Some(Store::open(&paths.vault, &paths.sequence).map_err(failure)?);
             }
         }
+        if self
+            .inner
+            .state()
+            .quiet_until
+            .is_some_and(|until| Instant::now() < until)
+        {
+            return Err(Failure::new(QUIET));
+        }
         if self.quick_unlock_with_kept_key().await? {
             return Ok(());
         }
@@ -500,6 +530,7 @@ impl<U: Unlock> NativeBackend<U> {
         let secret = Arc::new(secret);
         for attempt in 0..UNLOCK_ATTEMPTS {
             let Some(password) = self.inner.unlock.password(attempt > 0).await? else {
+                self.quiet();
                 return Err(Failure::new("Unlocking VisiPass was cancelled"));
             };
             let inner = self.inner.clone();
@@ -520,7 +551,12 @@ impl<U: Unlock> NativeBackend<U> {
                 Err(e) => return Err(e),
             }
         }
+        self.quiet();
         Err(Failure::new("Wrong master password; VisiPass stays locked"))
+    }
+
+    fn quiet(&self) {
+        self.inner.state().quiet_until = Some(Instant::now() + self.inner.quiet_after_cancel);
     }
 
     /// Reopens the vault with the kept Account Key once the system confirms the
@@ -544,9 +580,14 @@ impl<U: Unlock> NativeBackend<U> {
                 if state.epoch == epoch && state.window_open() {
                     state.kept = Some(key);
                 }
+                state.quiet_until = Some(Instant::now() + self.inner.quiet_after_cancel);
                 return Err(Failure::new("Unlocking VisiPass was cancelled"));
             }
-            Presence::Unavailable => return Ok(false),
+            // The key is gone, so the window is over; the master password starts a new one.
+            Presence::Unavailable => {
+                self.inner.state().window_end = None;
+                return Ok(false);
+            }
         }
         let inner = self.inner.clone();
         tokio::task::spawn_blocking(move || {

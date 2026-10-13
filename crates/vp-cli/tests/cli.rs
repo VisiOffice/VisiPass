@@ -1032,3 +1032,40 @@ fn quick_unlock_needs_presence_after_a_lock_and_the_password_after_a_full_one() 
     assert!(!bad.status.success());
     world.assert_contained();
 }
+
+#[test]
+fn a_page_load_never_prompts_to_unlock_the_native_vault() {
+    let world = World::native(&[
+        // init: password, confirmation, Secret Key window
+        Decision::Once,
+        Decision::Once,
+        Decision::Deny,
+        // the explicit unlock from the extension
+        Decision::Once,
+    ]);
+    clean(&world.vp(&["init"], None));
+    clean(&world.vp(&["import", "op"], None));
+    world.vp(&["lock"], None);
+    let asked = world.approver.asked();
+
+    let url = "https://dashboard.stripe.com/login";
+    let (passive, _) = native(
+        &world,
+        ORIGIN,
+        &[serde_json::json!({"id": 1, "type": "match", "url": url})],
+    );
+    assert_eq!(passive[0]["result"]["locked"], true);
+    assert_eq!(passive[0]["result"]["logins"], serde_json::json!([]));
+    assert_eq!(world.approver.asked(), asked, "no prompt for a page load");
+
+    let (clicked, _) = native(
+        &world,
+        ORIGIN,
+        &[serde_json::json!({"id": 2, "type": "match", "url": url, "unlock": true})],
+    );
+    assert_eq!(
+        clicked[0]["result"]["logins"][0]["title"],
+        "Stripe Dashboard"
+    );
+    assert_eq!(world.approver.asked(), asked + 1);
+}

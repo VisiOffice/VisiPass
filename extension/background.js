@@ -8,12 +8,15 @@ import { ask, fill } from "./native.js";
 const matches = new Map();
 const MATCH_TTL = 30_000;
 
-async function matchFor(url) {
+// `unlock` only when the human asked (a click, Ctrl+Shift+L): a page load never
+// opens an unlock prompt, and gets `locked: true` while VisiPass is locked.
+async function matchFor(url, unlock = false) {
   const host = new URL(url).host;
   const cached = matches.get(host);
-  if (cached && Date.now() - cached.at < MATCH_TTL) return cached.result;
-  const result = await ask({ type: "match", url });
-  matches.set(host, { at: Date.now(), result });
+  if (cached && Date.now() - cached.at < MATCH_TTL && !(unlock && cached.result.locked)) return cached.result;
+  const result = await ask({ type: "match", url, unlock });
+  if (result.locked) matches.delete(host);
+  else matches.set(host, { at: Date.now(), result });
   return result;
 }
 
@@ -34,8 +37,8 @@ async function handle(message, sender) {
     // from the message, and the fill goes only into the frame that asked.
     case "page-logins": {
       if (!fromPage) throw new Error("Not a page");
-      const result = await matchFor(sender.url);
-      return { logins: result.logins };
+      const result = await matchFor(sender.url, Boolean(message.unlock));
+      return { logins: result.logins, locked: Boolean(result.locked) };
     }
     case "page-fill": {
       if (!fromPage) throw new Error("Not a page");
@@ -60,7 +63,7 @@ async function handle(message, sender) {
 chrome.commands.onCommand.addListener(async (command, tab) => {
   if (command !== "fill-login" || !tab || !/^https?:/.test(tab.url || "")) return;
   try {
-    const { logins } = await matchFor(tab.url);
+    const { logins } = await matchFor(tab.url, true);
     if (!logins.length) {
       chrome.action.setBadgeText({ tabId: tab.id, text: "0" });
       return;

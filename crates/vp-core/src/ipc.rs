@@ -318,6 +318,10 @@ pub enum Request {
     /// Logins whose website matches the page, best first. Metadata only.
     BrowserMatch {
         url: String,
+        /// Unlock VisiPass's own vault if it is locked. Page loads leave this off and
+        /// get `"locked": true` instead, so browsing never opens an unlock prompt.
+        #[serde(default)]
+        unlock: bool,
     },
     /// Logins matching a search, for the popup. Metadata only.
     BrowserSearch {
