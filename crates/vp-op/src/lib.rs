@@ -94,22 +94,19 @@ impl OpBackend {
         let mut child = command
             .spawn()
             .map_err(|_| fixed("Failed to run 1Password's op; run vp doctor"))?;
-        if let Some(input) = call.input {
-            // op accepts piped input only from a real pipe, which this is.
-            let mut stdin = child
-                .stdin
-                .take()
-                .ok_or_else(|| fixed("Failed to run 1Password's op"))?;
-            stdin
-                .write_all(input.as_bytes())
-                .await
-                .map_err(|_| fixed("Failed to run 1Password's op"))?;
-            drop(stdin);
-        }
-        let output = child
-            .wait_with_output()
-            .await
-            .map_err(|_| fixed("Failed to run 1Password's op"))?;
+        // op accepts piped input only from a real pipe, which this is. It is
+        // written while the output is read: op starts printing before it has read
+        // everything, and a full output pipe would otherwise stall both sides.
+        let stdin = child.stdin.take();
+        let write = async {
+            if let (Some(input), Some(mut stdin)) = (call.input, stdin) {
+                stdin.write_all(input.as_bytes()).await?;
+            }
+            Ok::<_, std::io::Error>(())
+        };
+        let (written, output) = tokio::join!(write, child.wait_with_output());
+        let output = output.map_err(|_| fixed("Failed to run 1Password's op"))?;
+        written.map_err(|_| fixed("Failed to run 1Password's op"))?;
         if output.status.success() {
             return String::from_utf8(output.stdout)
                 .map_err(|_| fixed("1Password returned invalid output"));
@@ -620,6 +617,27 @@ pub fn dump_secrets(count: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stand-in for op that, like op, prints while it is still reading.
+    #[tokio::test]
+    async fn large_input_and_output_do_not_stall() {
+        let backend = OpBackend::with_program("cat", vec![]);
+        let input = "x".repeat(1 << 20);
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            backend.op(
+                &[],
+                Call {
+                    input: Some(&input),
+                    ..Call::default()
+                },
+            ),
+        )
+        .await
+        .expect("stalled")
+        .unwrap();
+        assert_eq!(output.len(), input.len());
+    }
 
     #[test]
     fn splits_concatenated_documents() {

@@ -449,6 +449,11 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                     .paste(&window(PasteMode::NewPassword { confirm: false }))
                     .await?
                     .ok_or_else(cancelled)?;
+                if first.expose().chars().count() < 10 {
+                    return Err(Failure::new(
+                        "Choose a master password of at least 10 characters; nothing was created. Run vp init again",
+                    ));
+                }
                 let second = self
                     .approver
                     .paste(&window(PasteMode::NewPassword { confirm: true }))
