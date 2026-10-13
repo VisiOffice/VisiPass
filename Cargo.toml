@@ -2,7 +2,15 @@
 resolver = "3"
 members = ["crates/*"]
 # The prompt pulls in GPUI; build it explicitly with `cargo build -p vp-gui`.
-default-members = ["crates/vp-core", "crates/vp-op", "crates/vp-daemon", "crates/vp-cli"]
+default-members = [
+    "crates/vp-core",
+    "crates/vp-crypto",
+    "crates/vp-store",
+    "crates/vp-native",
+    "crates/vp-op",
+    "crates/vp-daemon",
+    "crates/vp-cli",
+]
 
 [workspace.package]
 version = "0.5.1"
@@ -14,8 +22,17 @@ rust-version = "1.85"
 [workspace.dependencies]
 vp-core = { path = "crates/vp-core" }
 vp-op = { path = "crates/vp-op" }
+vp-crypto = { path = "crates/vp-crypto" }
+vp-store = { path = "crates/vp-store" }
+vp-native = { path = "crates/vp-native" }
 vp-daemon = { path = "crates/vp-daemon" }
 aho-corasick = "1.1"
+argon2 = { version = "0.5.3", features = ["zeroize"] }
+chacha20poly1305 = "0.10.1"
+ed25519-dalek = { version = "2.2", features = ["zeroize"] }
+hkdf = "0.12.4"
+rusqlite = { version = "0.32", features = ["bundled"] }
+unicode-normalization = "0.1.25"
 base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }
 getrandom = "0.3"
@@ -31,3 +48,9 @@ zeroize = { version = "1", features = ["derive"] }
 
 [profile.release]
 strip = true
+
+# Argon2 at the test parameters (64 MiB) takes seconds unoptimised.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3

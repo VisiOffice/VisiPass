@@ -1,0 +1,16 @@
+[package]
+name = "vp-crypto"
+description = "VisiPass cryptography: key derivation, sealing, signing and encodings, as in docs/crypto-design.md. No I/O."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+argon2.workspace = true
+chacha20poly1305.workspace = true
+ed25519-dalek.workspace = true
+getrandom.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
+unicode-normalization.workspace = true
+zeroize.workspace = true
