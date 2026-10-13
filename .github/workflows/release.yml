@@ -44,7 +44,7 @@ jobs:
           cp target/release/vp target/release/visipassd target/release/visipass-prompt target/release/visipass-app "dist/$name/"
           cp LICENSE README.md SECURITY.md "dist/$name/"
           cp skills/visipass/SKILL.md "dist/$name/SKILL.md"
-          cp packaging/linux/visipass.desktop assets/brand/visipass.svg "dist/$name/"
+          cp packaging/linux/visipass.desktop packaging/linux/com.visioffice.visipass.policy assets/brand/visipass.svg "dist/$name/"
           mkdir -p "dist/$name/icons" && cp assets/icons/visipass-*.png "dist/$name/icons/"
           cp -r extension "dist/$name/extension"
           tar -C dist -czf "dist/$name.tar.gz" "$name"

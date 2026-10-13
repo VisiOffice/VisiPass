@@ -72,6 +72,18 @@ struct SourceArgs {
 }
 
 #[derive(Subcommand)]
+enum QuickUnlockCommands {
+    /// Turn it on. Asks for the master password, which starts the first window
+    On {
+        /// How long each window lasts, from 1 to 24
+        #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u64).range(1..=24))]
+        hours: u64,
+    },
+    /// Turn it off; the vault locks and the next unlock needs the master password
+    Off,
+}
+
+#[derive(Subcommand)]
 enum ImportCommands {
     /// From 1Password, through `op`: every vault, or one. Items keep their IDs, so
     /// op:// references keep working; items already imported are skipped
@@ -195,7 +207,15 @@ enum Commands {
     /// Create your VisiPass vault. The master password is typed in the VisiPass window, never here
     Init,
     /// Lock the VisiPass vault now: its keys are erased from memory
-    Lock,
+    Lock {
+        /// Also end quick unlock's window, so the next unlock needs the master password
+        #[arg(long)]
+        full: bool,
+    },
+    /// Unlock with your fingerprint or login password after a lock, for some hours
+    /// after each master-password unlock
+    #[command(subcommand)]
+    QuickUnlock(QuickUnlockCommands),
     /// Copy items into your VisiPass vault from another password manager
     #[command(subcommand)]
     Import(ImportCommands),
@@ -760,10 +780,17 @@ fn execute(command: Commands) -> Result<i32, Failure> {
             Err(_) => print(&serde_json::json!({ "running": false })),
         },
         Commands::Init => print(&client::call(Request::InitVault)?),
-        Commands::Lock => match client::connect(false) {
-            Ok(stream) => print(&client::call_with(stream, Request::LockVault)?),
-            Err(_) => print(&serde_json::json!({ "locked": true })),
+        Commands::Lock { full } => match client::connect(false) {
+            Ok(stream) => print(&client::call_with(stream, Request::LockVault { full })?),
+            Err(_) => print(&serde_json::json!({ "locked": true, "full": true })),
         },
+        Commands::QuickUnlock(command) => {
+            let hours = match command {
+                QuickUnlockCommands::On { hours } => Some(hours),
+                QuickUnlockCommands::Off => None,
+            };
+            print(&client::call(Request::QuickUnlock { hours })?)
+        }
         Commands::Import(ImportCommands::Op { vault }) => {
             print(&client::call(Request::ImportOp { vault })?)
         }

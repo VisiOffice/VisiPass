@@ -16,7 +16,10 @@ use tokio::net::UnixStream;
 /// The vault, as far as the watcher cares.
 pub trait Lockable: Send + Sync + 'static {
     fn is_unlocked(&self) -> bool;
+    /// Keeps the Account Key within a quick-unlock window.
     fn lock(&self);
+    /// Erases the Account Key too.
+    fn lock_fully(&self);
 }
 
 impl<U: vp_native::Unlock + Send + Sync + 'static> Lockable for vp_native::NativeBackend<U> {
@@ -25,6 +28,9 @@ impl<U: vp_native::Unlock + Send + Sync + 'static> Lockable for vp_native::Nativ
     }
     fn lock(&self) {
         vp_native::NativeBackend::lock(self)
+    }
+    fn lock_fully(&self) {
+        vp_native::NativeBackend::lock_fully(self)
     }
 }
 
@@ -142,7 +148,8 @@ mod logind {
                 Some(signal) = sleeps.next() => {
                     let Ok(args) = signal.args() else { continue };
                     if *args.start() {
-                        vault.lock();
+                        // Quick unlock does not survive sleep (§4.3, §6.2).
+                        vault.lock_fully();
                         // Closing the inhibitor lets the sleep go ahead.
                         inhibitor = None;
                     } else if inhibitor.is_none() {
@@ -202,6 +209,9 @@ mod tests {
         }
         fn lock(&self) {
             self.0.store(false, Ordering::SeqCst)
+        }
+        fn lock_fully(&self) {
+            self.lock()
         }
     }
 

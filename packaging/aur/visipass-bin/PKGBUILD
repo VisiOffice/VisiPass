@@ -26,6 +26,7 @@ package() {
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 README.md SECURITY.md SKILL.md -t "$pkgdir/usr/share/doc/visipass/"
   install -Dm644 visipass.desktop -t "$pkgdir/usr/share/applications/"
+  install -Dm644 com.visioffice.visipass.policy -t "$pkgdir/usr/share/polkit-1/actions/"
   install -Dm644 visipass.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/visipass.svg"
   install -d "$pkgdir/usr/share/visipass"
   cp -r --no-preserve=ownership extension "$pkgdir/usr/share/visipass/"

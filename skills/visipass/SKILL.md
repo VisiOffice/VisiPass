@@ -119,7 +119,7 @@ You may list grants and read the log. Revoke a grant only when the human asks.
 
 The human may move from 1Password to VisiPass's own encrypted vault (`vp status` shows `"vault": {"exists": true}`). Nothing changes for you: the same commands work, and `op://` references keep resolving because imported items keep their IDs. When it is locked, your request waits while the human unlocks it.
 
-Never run `vp init` or `vp import`; they are the human's to run. You may run `vp lock` when the human asks.
+Never run `vp init`, `vp import` or `vp quick-unlock`; they are the human's to run. You may run `vp lock` when the human asks. With quick unlock on, a locked vault may ask the human for their fingerprint or login password instead of the master password; your request waits the same way.
 
 ## Item conventions
 

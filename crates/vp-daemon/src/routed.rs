@@ -5,7 +5,7 @@
 use crate::approval::{self, Approver, Prompt};
 use serde_json::{Value, json};
 use vp_core::Failure;
-use vp_core::backend::Backend;
+use vp_core::backend::{Backend, NativeStatus};
 use vp_core::ipc::{PasteMode, PasteSpec};
 use vp_core::model::{
     Destination, Item, ItemDetail, Listed, PasswordOutcome, PasswordRequest, Receipt, Scope,
@@ -34,6 +34,10 @@ impl<A: Approver> Unlock for WindowUnlock<A> {
             }),
         };
         self.0.paste(&prompt).await
+    }
+
+    async fn confirm_presence(&self) -> vp_native::Presence {
+        self.0.confirm_presence().await
     }
 }
 
@@ -109,8 +113,14 @@ impl<U: Unlock> Backend for Routed<U> {
         route!(self, password(request, value))
     }
 
-    fn native_status(&self) -> Option<(bool, bool)> {
-        Some((self.native.exists(), self.native.is_unlocked()))
+    fn native_status(&self) -> Option<NativeStatus> {
+        let quick = self.native.quick_unlock();
+        Some(NativeStatus {
+            exists: self.native.exists(),
+            unlocked: self.native.is_unlocked(),
+            quick_unlock: quick.as_ref().map(|q| q.window),
+            quick_unlock_remaining: quick.and_then(|q| q.remaining),
+        })
     }
 
     async fn native_init(&self, password: Secret) -> Result<Secret, Failure> {
@@ -118,8 +128,24 @@ impl<U: Unlock> Backend for Routed<U> {
         Ok(Secret::new(shown.to_string()))
     }
 
-    fn native_lock(&self) {
-        self.native.lock();
+    fn native_lock(&self, full: bool) {
+        if full {
+            self.native.lock_fully();
+        } else {
+            self.native.lock();
+        }
+    }
+
+    async fn native_quick_unlock(
+        &self,
+        window: Option<std::time::Duration>,
+    ) -> Result<(), Failure> {
+        if !self.native.exists() {
+            return Err(Failure::new(
+                "Create your VisiPass vault first with `vp init`",
+            ));
+        }
+        self.native.set_quick_unlock(window).await
     }
 
     async fn native_import(&self, vault: Option<String>) -> Result<Value, Failure> {

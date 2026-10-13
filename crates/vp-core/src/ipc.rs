@@ -263,8 +263,18 @@ pub enum Request {
     // ---- The native vault ----
     /// Creates VisiPass's own vault; the master password is typed in the VisiPass window.
     InitVault,
-    /// Erases the native vault's keys from memory.
-    LockVault,
+    /// Erases the native vault's keys from memory. Without `full`, an open
+    /// quick-unlock window keeps the Account Key.
+    LockVault {
+        #[serde(default)]
+        full: bool,
+    },
+    /// Turns quick unlock on (the master password is asked for in the VisiPass
+    /// window) or off. `hours` is the window; none turns it off.
+    QuickUnlock {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hours: Option<u64>,
+    },
     /// Copies items from 1Password into the native vault, keeping their IDs.
     ImportOp {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -385,7 +395,8 @@ impl Request {
             Request::Revoke { .. } => "revoke",
             Request::Log { .. } => "log",
             Request::InitVault => "vault-init",
-            Request::LockVault => "vault-lock",
+            Request::LockVault { .. } => "vault-lock",
+            Request::QuickUnlock { .. } => "vault-quick-unlock",
             Request::ImportOp { .. } => "vault-import",
         }
     }

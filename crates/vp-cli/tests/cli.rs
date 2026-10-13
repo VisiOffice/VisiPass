@@ -103,6 +103,16 @@ impl Approver for Scripted {
             Some(_) => Some(vp_core::secret::Secret::new(NEW_KEY.to_string())),
         })
     }
+    // Quick unlock's presence check: allowed, dismissed when denied, unavailable when unscripted.
+    async fn confirm_presence(&self) -> vp_native::Presence {
+        let mut state = self.0.lock().unwrap();
+        state.1 += 1;
+        match state.0.pop_front() {
+            Some(Decision::Deny) => vp_native::Presence::Dismissed,
+            Some(_) => vp_native::Presence::Confirmed,
+            None => vp_native::Presence::Unavailable,
+        }
+    }
 }
 
 struct World {
@@ -152,6 +162,7 @@ impl World {
                         vault: data.join("vault.vpdb"),
                         secret_key: data.join("secret-key"),
                         sequence: state.join("sequence"),
+                        settings: state.join("vault-settings.json"),
                     };
                     let backend = Routed {
                         op,
@@ -972,4 +983,52 @@ fn the_native_vault_takes_over_after_init_and_import() {
     world.assert_contained();
     let refused = world.vp(&["init"], None);
     assert!(text(&refused.stderr).contains("already have"));
+}
+
+#[test]
+fn quick_unlock_needs_presence_after_a_lock_and_the_password_after_a_full_one() {
+    let world = World::native(&[
+        // init: password, confirmation, Secret Key window
+        Decision::Once,
+        Decision::Once,
+        Decision::Deny,
+        // quick-unlock on: the master password
+        Decision::Once,
+        // after `vp lock`: the read's approval, then the presence check
+        Decision::Once,
+        Decision::Once,
+        // after `vp lock --full`: the read's approval, then the master password
+        Decision::Once,
+        Decision::Once,
+    ]);
+    clean(&world.vp(&["init"], None));
+    clean(&world.vp(&["import", "op"], None));
+
+    let on = world.vp(&["quick-unlock", "on"], None);
+    clean(&on);
+    assert_eq!(json(&on)["quickUnlock"], true);
+    let status = json(&world.vp(&["status"], None));
+    assert_eq!(status["vault"]["quickUnlock"]["hours"], 8.0);
+    assert!(
+        status["vault"]["quickUnlock"]["minutesLeft"]
+            .as_u64()
+            .unwrap()
+            > 470
+    );
+
+    world.vp(&["lock"], None);
+    let read = world.vp(&["read", "op://Dev/Stripe Dashboard/password"], None);
+    assert_eq!(text(&read.stdout), LOGIN);
+    assert_eq!(world.approver.asked(), 6);
+
+    assert_eq!(json(&world.vp(&["lock", "--full"], None))["full"], true);
+    let status = json(&world.vp(&["status"], None));
+    assert!(status["vault"]["quickUnlock"]["minutesLeft"].is_null());
+    let read = world.vp(&["read", "op://Dev/Stripe Dashboard/password"], None);
+    assert_eq!(text(&read.stdout), LOGIN);
+    assert_eq!(world.approver.asked(), 8);
+
+    let bad = world.vp(&["quick-unlock", "on", "--hours", "48"], None);
+    assert!(!bad.status.success());
+    world.assert_contained();
 }

@@ -141,6 +141,17 @@ long auto-lock times. Quick unlock persists nothing:
   password), after which the daemon re-derives everything from AK.
 - The window ends on reboot, on hibernation, when it expires, and on `vp lock --full`.
 
+As built: `vp quick-unlock on [--hours N]` (1 to 24, default 8) turns it on and asks for the
+master password, so an agent cannot turn it on unseen; the window starts at each master-password
+unlock and quick unlocks do not extend it. The setting, not any key, is kept in
+`vault-settings.json` in the state directory. The polkit action is
+`com.visioffice.visipass.unlock` with `auth_self` (never `auth_self_keep`), asked by the daemon
+over the system bus with the daemon's own bus name as subject. A dismissed check cancels the
+unlock and keeps AK; no policy, no agent, a failed check or a timeout falls back to the master
+password. Opening with a kept AK runs every check a password unlock does (§7.4), and is refused
+once `ak_generation` has moved on. Every sleep, not just hibernation, erases AK: logind does not
+say which kind of sleep is starting.
+
 Because nothing is written to disk, goal 2 is unaffected. What it does weaken: during the window,
 an attacker who can make the daemon believe a polkit check passed, or who can read its memory as
 root, gets AK. That is inside the non-goals, but the setting says so.
@@ -500,12 +511,13 @@ Implemented (2026-10-12), with tests that attack it (`crates/vp-store/tests`, `c
   every details read, and the sequence file against rollback.
 - §6.2 idle lock after 10 minutes, `vp lock`, screen lock (logind and Hyprland), and sleep
   (logind delay inhibitor, released once the keys are erased).
+- §4.3 quick unlock through polkit, off by default; `vp lock --full` ends its window.
 - Unlock prompts in the VisiPass window, three tries; `vp init` asks for the password twice and
   shows the Secret Key once; neither ever reaches the caller.
 - `vp import op`: copies 1Password vaults, keeping item and vault IDs so `op://` references resolve
   against either backend; never overwrites.
 
-Not yet: §4.3 quick unlock; §5 Emergency Kit printout and Recovery Key; §6.1 `PR_SET_DUMPABLE`,
+Not yet: §5 Emergency Kit printout and Recovery Key; §6.1 `PR_SET_DUMPABLE`,
 `memfd_secret`/`mlock`; §6.3 password change and full
 rotation; §7.5 files; §9 fingerprints; §10 log signing; Proton Pass import; §11 everything.
 
@@ -514,4 +526,5 @@ rotation; §7.5 files; §9 fingerprints; §10 log signing; Proton Pass import; �
 - 2026-10-12: first draft; revised the same day after the internal review (§13); first
   implementation for the author's own use (§14).
 - 2026-10-13: §6.2 screen lock on Omarchy by asking Hyprland, since Omarchy has no lock hook;
-  sleep and screen lock implemented.
+  sleep and screen lock implemented. §4.3 quick unlock implemented; it is turned on with the
+  master password, and every sleep ends its window.

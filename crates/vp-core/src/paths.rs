@@ -43,6 +43,9 @@ pub fn data_dir() -> PathBuf {
     })
 }
 
+/// Where packages install the polkit action quick unlock asks for.
+pub const POLKIT_POLICY: &str = "/usr/share/polkit-1/actions/com.visioffice.visipass.policy";
+
 /// The native vault's database.
 pub fn vault_file() -> PathBuf {
     data_dir().join("vault.vpdb")

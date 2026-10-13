@@ -46,6 +46,11 @@ fn native_vault() -> Value {
     json!({
         "present": true,
         "secretKeyOnDevice": vp_core::paths::secret_key_file().is_file(),
+        "quickUnlockPolicy": if std::path::Path::new(vp_core::paths::POLKIT_POLICY).is_file() {
+            "installed"
+        } else {
+            "missing: quick unlock falls back to the master password. Install the package, or copy packaging/linux/com.visioffice.visipass.policy to /usr/share/polkit-1/actions/"
+        },
         "externallyReviewed": false,
         "note": "VisiPass's own vault follows docs/crypto-design.md but has not been reviewed by an outside cryptographer yet. Keep 1Password as your backup until it has.",
     })

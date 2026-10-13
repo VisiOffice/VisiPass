@@ -70,8 +70,8 @@ pub trait Backend: Send + Sync + 'static {
 
     // ---- VisiPass's own vault, for backends that have one ----
 
-    /// `Some((exists, unlocked))` when this backend has a native vault.
-    fn native_status(&self) -> Option<(bool, bool)> {
+    /// `Some` when this backend has a native vault.
+    fn native_status(&self) -> Option<NativeStatus> {
         None
     }
 
@@ -84,8 +84,17 @@ pub trait Backend: Send + Sync + 'static {
         async { Err(Failure::new(NO_NATIVE)) }
     }
 
-    /// Erases the native vault's keys from memory.
-    fn native_lock(&self) {}
+    /// Erases the native vault's keys from memory. Without `full`, a quick-unlock
+    /// window keeps the Account Key.
+    fn native_lock(&self, _full: bool) {}
+
+    /// Turns quick unlock on for `window` (after the master password) or off.
+    fn native_quick_unlock(
+        &self,
+        _window: Option<std::time::Duration>,
+    ) -> impl Future<Output = Result<(), Failure>> + Send {
+        async { Err(Failure::new(NO_NATIVE)) }
+    }
 
     /// Copies 1Password vaults (all, or the one named) into the native vault.
     fn native_import(
@@ -94,6 +103,17 @@ pub trait Backend: Send + Sync + 'static {
     ) -> impl Future<Output = Result<serde_json::Value, Failure>> + Send {
         async { Err(Failure::new(NO_NATIVE)) }
     }
+}
+
+/// The native vault, for `vp status`.
+#[derive(Clone, Debug, Default)]
+pub struct NativeStatus {
+    pub exists: bool,
+    pub unlocked: bool,
+    /// Quick unlock's window, when it is on.
+    pub quick_unlock: Option<std::time::Duration>,
+    /// Time left in the open quick-unlock window.
+    pub quick_unlock_remaining: Option<std::time::Duration>,
 }
 
 const NO_NATIVE: &str = "This visipassd has no native vault";

@@ -10,6 +10,7 @@ pub mod approval;
 pub mod grants;
 pub mod log;
 pub mod paths;
+pub mod presence;
 pub mod procinfo;
 pub mod routed;
 pub mod session;
@@ -404,18 +405,27 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 "approvals": self.approver.method(),
                 "socket": self.socket,
                 "grants": self.grants().list().len(),
-                "vault": self.backend.native_status().map(|(exists, unlocked)| json!({
-                    "exists": exists,
-                    "unlocked": unlocked,
-                })),
+                "vault": self.backend.native_status().map(|status| {
+                    let mut vault = json!({
+                        "exists": status.exists,
+                        "unlocked": status.unlocked,
+                    });
+                    if let Some(window) = status.quick_unlock {
+                        vault["quickUnlock"] = json!({
+                            "hours": window.as_secs_f64() / 3600.0,
+                            "minutesLeft": status.quick_unlock_remaining.map(|r| r.as_secs() / 60),
+                        });
+                    }
+                    vault
+                }),
             })),
             Request::InitVault => {
                 match self.backend.native_status() {
                     None => return Err(Failure::new("This visipassd has no native vault")),
-                    Some((true, _)) => {
+                    Some(status) if status.exists => {
                         return Err(Failure::new("You already have a VisiPass vault"));
                     }
-                    Some((false, _)) => {}
+                    Some(_) => {}
                 }
                 let window = |mode| Prompt {
                     who: "VisiPass".into(),
@@ -460,9 +470,22 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                     "next": "Run `vp import op` to copy your 1Password items in. Until then VisiPass serves an empty vault",
                 }))
             }
-            Request::LockVault => {
-                self.backend.native_lock();
-                Ok(json!({ "locked": true }))
+            Request::LockVault { full } => {
+                self.backend.native_lock(full);
+                Ok(json!({ "locked": true, "full": full }))
+            }
+            Request::QuickUnlock { hours } => {
+                let window = hours.map(|h| std::time::Duration::from_secs(h.saturating_mul(3600)));
+                let _turn = self.approvals.lock().await;
+                self.backend.native_quick_unlock(window).await?;
+                Ok(match hours {
+                    Some(hours) => json!({
+                        "quickUnlock": true,
+                        "hours": hours,
+                        "note": "After a lock, unlocking within the window asks for your fingerprint or login password. Sleep, `vp lock --full` and the window's end need the master password again",
+                    }),
+                    None => json!({ "quickUnlock": false }),
+                })
             }
             Request::ImportOp { vault } => self.backend.native_import(vault).await,
             Request::Find { queries, scope } => {

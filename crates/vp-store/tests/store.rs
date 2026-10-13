@@ -190,3 +190,36 @@ fn tampering_with_the_password_parameters_is_refused() {
     g.sql("UPDATE account SET t = 2;");
     assert!(g.unlock_error().contains("Wrong master password"));
 }
+
+#[test]
+fn a_kept_account_key_reopens_the_vault_with_the_same_checks() {
+    let f = Fixture::new();
+    f.populated();
+    let store = f.store();
+    let key = store
+        .unlock("hunter2!", &f.secret())
+        .unwrap()
+        .into_account_key();
+    let unlocked = store.unlock_with_key(key).unwrap();
+    assert_eq!(unlocked.vault_ids(), vec!["V1".to_string()]);
+    let key = unlocked.into_account_key();
+
+    f.sql("DELETE FROM item WHERE item_id = 'B'");
+    match f.store().unlock_with_key(key) {
+        Ok(_) => panic!("a deleted row must still be caught"),
+        Err(e) => assert!(e.0.contains("integrity check"), "{}", e.0),
+    }
+}
+
+#[test]
+fn an_account_key_from_another_vault_is_refused() {
+    let (a, b) = (Fixture::new(), Fixture::new());
+    a.populated();
+    b.populated();
+    let key = a
+        .store()
+        .unlock("hunter2!", &a.secret())
+        .unwrap()
+        .into_account_key();
+    assert!(b.store().unlock_with_key(key).is_err());
+}

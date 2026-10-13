@@ -20,17 +20,35 @@ use vp_core::model::{
 use vp_core::refs::SecretRef;
 use vp_core::secret::Secret;
 use vp_crypto::{KdfParams, SecretKey};
-use vp_store::{Store, Unlocked, Write};
+use vp_store::{AccountKey, Store, Unlocked, Write};
 use zeroize::Zeroizing;
 
 /// Asks the human for the master password. `None` if they cancel.
 pub trait Unlock: Send + Sync + 'static {
     fn password(&self, retry: bool)
     -> impl Future<Output = Result<Option<Secret>, Failure>> + Send;
+
+    /// Quick unlock (§4.3): asks the system to confirm the human is present, by
+    /// fingerprint or login password.
+    fn confirm_presence(&self) -> impl Future<Output = Presence> + Send {
+        async { Presence::Unavailable }
+    }
+}
+
+/// The answer to [`Unlock::confirm_presence`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Presence {
+    Confirmed,
+    /// The human dismissed the check: the unlock is cancelled.
+    Dismissed,
+    /// No check could be made, or it failed: ask for the master password instead.
+    Unavailable,
 }
 
 const UNLOCK_ATTEMPTS: usize = 3;
 pub const IDLE_LOCK: Duration = Duration::from_secs(10 * 60);
+pub const QUICK_UNLOCK_DEFAULT: Duration = Duration::from_secs(8 * 60 * 60);
+pub const QUICK_UNLOCK_MAX: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Where the vault, its Secret Key and its sequence number live.
 #[derive(Clone, Debug)]
@@ -38,6 +56,8 @@ pub struct Paths {
     pub vault: PathBuf,
     pub secret_key: PathBuf,
     pub sequence: PathBuf,
+    /// This device's settings for the vault, such as the quick-unlock window.
+    pub settings: PathBuf,
 }
 
 impl Paths {
@@ -46,6 +66,7 @@ impl Paths {
             vault: vp_core::paths::vault_file(),
             secret_key: vp_core::paths::secret_key_file(),
             sequence: vp_core::paths::state_dir().join("sequence"),
+            settings: vp_core::paths::state_dir().join("vault-settings.json"),
         }
     }
 
@@ -197,6 +218,59 @@ struct State {
     store: Option<Store>,
     opened: Option<Opened>,
     last_use: Instant,
+    /// How long the Account Key outlives a lock after a master-password unlock.
+    quick_unlock: Option<Duration>,
+    /// The Account Key, kept for quick unlock while the vault is otherwise locked.
+    kept: Option<AccountKey>,
+    /// When the current quick-unlock window ends; set by a master-password unlock.
+    window_end: Option<Instant>,
+    /// Bumped by every full lock, so a quick unlock that raced one is dropped.
+    epoch: u64,
+}
+
+impl State {
+    fn window_open(&self) -> bool {
+        self.window_end.is_some_and(|end| Instant::now() < end)
+    }
+
+    /// Erases every key and decrypted overview, except the Account Key when a
+    /// quick-unlock window is open and `fully` is false.
+    fn lock(&mut self, fully: bool) {
+        let keep = !fully && self.window_open();
+        if let Some(opened) = self.opened.take()
+            && keep
+        {
+            self.kept = Some(opened.unlocked.into_account_key());
+        }
+        if !keep {
+            self.kept = None;
+            self.window_end = None;
+            self.epoch += 1;
+        }
+    }
+
+    /// After a master-password unlock.
+    fn opened_with_password(&mut self, opened: Opened) {
+        self.opened = Some(opened);
+        self.kept = None;
+        self.last_use = Instant::now();
+        self.window_end = self.quick_unlock.map(|window| Instant::now() + window);
+    }
+}
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Settings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    quick_unlock_secs: Option<u64>,
+}
+
+/// Quick unlock's state, for `vp status`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuickUnlock {
+    pub window: Duration,
+    /// Time left in the current window, if one is open.
+    pub remaining: Option<Duration>,
 }
 
 struct Inner<U> {
@@ -216,7 +290,10 @@ impl<U> Inner<U> {
     fn expire_if_idle(&self) {
         let mut state = self.state();
         if state.opened.is_some() && state.last_use.elapsed() >= IDLE_LOCK {
-            state.opened = None;
+            state.lock(false);
+        }
+        if state.opened.is_none() && state.kept.is_some() && !state.window_open() {
+            state.lock(true);
         }
     }
 }
@@ -242,6 +319,9 @@ impl<U: Unlock> NativeBackend<U> {
     /// `params` applies to a vault created by [`NativeBackend::init`]; an existing
     /// vault keeps the parameters stored with it.
     pub fn with_params(paths: Paths, unlock: U, params: KdfParams) -> Self {
+        let quick_unlock = load_settings(&paths.settings)
+            .quick_unlock_secs
+            .map(|secs| Duration::from_secs(secs).min(QUICK_UNLOCK_MAX));
         let inner = Arc::new(Inner {
             paths,
             params,
@@ -250,6 +330,10 @@ impl<U: Unlock> NativeBackend<U> {
                 store: None,
                 opened: None,
                 last_use: Instant::now(),
+                quick_unlock,
+                kept: None,
+                window_end: None,
+                epoch: 0,
             }),
             gate: tokio::sync::Mutex::new(()),
         });
@@ -276,9 +360,59 @@ impl<U: Unlock> NativeBackend<U> {
         self.inner.state().opened.is_some()
     }
 
-    /// Erases every key and decrypted overview.
+    /// Locks. Within a quick-unlock window the Account Key stays, so the next
+    /// unlock needs only the system's presence check.
     pub fn lock(&self) {
-        self.inner.state().opened = None;
+        self.inner.state().lock(false);
+    }
+
+    /// Erases every key, the Account Key included, and closes any quick-unlock
+    /// window: for sleep and `vp lock --full`.
+    pub fn lock_fully(&self) {
+        self.inner.state().lock(true);
+    }
+
+    pub fn quick_unlock(&self) -> Option<QuickUnlock> {
+        let state = self.inner.state();
+        let window = state.quick_unlock?;
+        let remaining = state
+            .window_end
+            .and_then(|end| end.checked_duration_since(Instant::now()))
+            .filter(|_| state.opened.is_some() || state.kept.is_some());
+        Some(QuickUnlock { window, remaining })
+    }
+
+    /// Turns quick unlock on (asking for the master password, which also starts
+    /// the first window) or off.
+    pub async fn set_quick_unlock(&self, window: Option<Duration>) -> Result<(), Failure> {
+        if let Some(window) = window
+            && !(Duration::from_secs(60)..=QUICK_UNLOCK_MAX).contains(&window)
+        {
+            return Err(Failure::new(
+                "Choose a quick-unlock window of 1 to 24 hours",
+            ));
+        }
+        let previous = {
+            let mut state = self.inner.state();
+            let previous = state.quick_unlock;
+            state.lock(true);
+            state.quick_unlock = window;
+            previous
+        };
+        if window.is_some()
+            && let Err(e) = self.open().await
+        {
+            self.inner.state().quick_unlock = previous;
+            return Err(e);
+        }
+        let settings = Settings {
+            quick_unlock_secs: window.map(|w| w.as_secs()),
+        };
+        let json = serde_json::to_vec_pretty(&settings).map_err(|e| Failure::new(e.to_string()))?;
+        if let Some(dir) = self.inner.paths.settings.parent() {
+            private_dir(dir)?;
+        }
+        replace_private(&self.inner.paths.settings, &json)
     }
 
     /// Creates the vault and its Secret Key. Returns the Secret Key in its
@@ -319,12 +453,11 @@ impl<U: Unlock> NativeBackend<U> {
             .map_err(failure)?;
             let mut state = inner.state();
             state.store = Some(store);
-            state.opened = Some(Opened {
+            state.opened_with_password(Opened {
                 unlocked,
                 vaults: Vec::new(),
                 entries: Vec::new(),
             });
-            state.last_use = Instant::now();
             Ok::<_, Failure>(())
         })
         .await
@@ -352,6 +485,9 @@ impl<U: Unlock> NativeBackend<U> {
                 state.store = Some(Store::open(&paths.vault, &paths.sequence).map_err(failure)?);
             }
         }
+        if self.quick_unlock_with_kept_key().await? {
+            return Ok(());
+        }
         let secret_text = Zeroizing::new(
             std::fs::read_to_string(&self.inner.paths.secret_key).map_err(|_| {
                 Failure::new(format!(
@@ -373,8 +509,7 @@ impl<U: Unlock> NativeBackend<U> {
                 let store = state.store.as_ref().expect("opened above");
                 let unlocked = store.unlock(password.expose(), &secret).map_err(failure)?;
                 let opened = load(store, unlocked)?;
-                state.opened = Some(opened);
-                state.last_use = Instant::now();
+                state.opened_with_password(opened);
                 Ok::<_, Failure>(())
             })
             .await
@@ -386,6 +521,52 @@ impl<U: Unlock> NativeBackend<U> {
             }
         }
         Err(Failure::new("Wrong master password; VisiPass stays locked"))
+    }
+
+    /// Reopens the vault with the kept Account Key once the system confirms the
+    /// human is present. `false` when the master password is needed instead.
+    async fn quick_unlock_with_kept_key(&self) -> Result<bool, Failure> {
+        let (key, epoch) = {
+            let mut state = self.inner.state();
+            if !state.window_open() {
+                state.kept = None;
+                return Ok(false);
+            }
+            match state.kept.take() {
+                Some(key) => (key, state.epoch),
+                None => return Ok(false),
+            }
+        };
+        match self.inner.unlock.confirm_presence().await {
+            Presence::Confirmed => {}
+            Presence::Dismissed => {
+                let mut state = self.inner.state();
+                if state.epoch == epoch && state.window_open() {
+                    state.kept = Some(key);
+                }
+                return Err(Failure::new("Unlocking VisiPass was cancelled"));
+            }
+            Presence::Unavailable => return Ok(false),
+        }
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut state = inner.state();
+            if state.epoch != epoch {
+                return false;
+            }
+            let store = state.store.as_ref().expect("opened before");
+            let Ok(unlocked) = store.unlock_with_key(key) else {
+                return false;
+            };
+            let Ok(opened) = load(store, unlocked) else {
+                return false;
+            };
+            state.opened = Some(opened);
+            state.last_use = Instant::now();
+            true
+        })
+        .await
+        .map_err(|_| Failure::new("Unlocking failed"))
     }
 
     /// Runs `f` against the unlocked vault.
@@ -610,6 +791,23 @@ fn write_private(path: &std::path::Path, contents: &[u8]) -> Result<(), Failure>
     file.write_all(contents)
         .and_then(|_| file.sync_all())
         .map_err(|_| Failure::new(format!("Could not write {}", path.display())))
+}
+
+/// Writes beside `path` and renames over it, so a crash leaves the old file or the new one.
+fn replace_private(path: &std::path::Path, contents: &[u8]) -> Result<(), Failure> {
+    let temporary = path.with_extension("new");
+    let _ = std::fs::remove_file(&temporary);
+    write_private(&temporary, contents)?;
+    std::fs::rename(&temporary, path)
+        .map_err(|_| Failure::new(format!("Could not write {}", path.display())))
+}
+
+/// Missing or unreadable settings mean the defaults: quick unlock off.
+fn load_settings(path: &std::path::Path) -> Settings {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
 }
 
 fn in_scope(scope: &Scope, vault: &VaultRef) -> bool {

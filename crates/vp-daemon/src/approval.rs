@@ -27,6 +27,10 @@ pub trait Approver: Send + Sync + 'static {
         &self,
         prompt: &Prompt,
     ) -> impl Future<Output = Result<Option<Secret>, Failure>> + Send;
+    /// Quick unlock: has the system confirm the human is present.
+    fn confirm_presence(&self) -> impl Future<Output = vp_native::Presence> + Send {
+        async { vp_native::Presence::Unavailable }
+    }
 }
 
 const ONCE: &str = "Allow once";
@@ -422,6 +426,13 @@ impl Desktop {
 }
 
 impl Approver for Desktop {
+    async fn confirm_presence(&self) -> vp_native::Presence {
+        match self {
+            Desktop::Unavailable => vp_native::Presence::Unavailable,
+            _ => crate::presence::check(TIMEOUT).await,
+        }
+    }
+
     fn method(&self) -> &'static str {
         match self {
             Desktop::Native(_) => "VisiPass window",

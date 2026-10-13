@@ -1,12 +1,14 @@
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 use vp_core::Failure;
 use vp_core::backend::Backend;
 use vp_core::model::{Destination, Field, Item, PasswordRequest, Scope, UrlEntry, VaultRef};
 use vp_core::refs::SecretRef;
 use vp_core::secret::Secret;
 use vp_crypto::KdfParams;
-use vp_native::{NativeBackend, Paths, Unlock};
+use vp_native::{NativeBackend, Paths, Presence, Unlock};
 
 const CHEAP: KdfParams = KdfParams {
     m_kib: 65_536,
@@ -21,6 +23,8 @@ const SENTINEL: &str = "sentinel-secret-9f3a";
 struct Scripted {
     answers: Arc<Vec<Option<&'static str>>>,
     asked: Arc<AtomicUsize>,
+    presence: Arc<Mutex<Vec<Presence>>>,
+    checked: Arc<AtomicUsize>,
 }
 
 impl Scripted {
@@ -28,7 +32,17 @@ impl Scripted {
         Self {
             answers: Arc::new(answers),
             asked: Arc::new(AtomicUsize::new(0)),
+            presence: Arc::new(Mutex::new(Vec::new())),
+            checked: Arc::new(AtomicUsize::new(0)),
         }
+    }
+    /// The presence checks' answers, in order.
+    fn presence(self, answers: Vec<Presence>) -> Self {
+        *self.presence.lock().unwrap() = answers.into_iter().rev().collect();
+        self
+    }
+    fn checked(&self) -> usize {
+        self.checked.load(Ordering::SeqCst)
     }
     fn asked(&self) -> usize {
         self.asked.load(Ordering::SeqCst)
@@ -45,6 +59,15 @@ impl Unlock for Scripted {
             .flatten()
             .map(|p| Secret::new(p.into())))
     }
+
+    async fn confirm_presence(&self) -> Presence {
+        self.checked.fetch_add(1, Ordering::SeqCst);
+        self.presence
+            .lock()
+            .unwrap()
+            .pop()
+            .unwrap_or(Presence::Unavailable)
+    }
 }
 
 fn paths(dir: &tempfile::TempDir) -> Paths {
@@ -52,6 +75,7 @@ fn paths(dir: &tempfile::TempDir) -> Paths {
         vault: dir.path().join("data/vault.vpdb"),
         secret_key: dir.path().join("data/secret-key"),
         sequence: dir.path().join("state/sequence"),
+        settings: dir.path().join("state/vault-settings.json"),
     }
 }
 
@@ -318,4 +342,122 @@ async fn init_refuses_an_existing_vault_and_short_passwords() {
     assert!(fresh.init(Secret::new("short".into())).await.is_err());
     let nothing = fresh.list(&Scope::default()).await.unwrap_err();
     assert!(nothing.0.contains("vp init"));
+}
+
+const HOURS_8: Duration = Duration::from_secs(8 * 3600);
+
+#[tokio::test]
+async fn without_quick_unlock_every_lock_needs_the_master_password() {
+    let dir = tempfile::tempdir().unwrap();
+    drop(created(&dir).await);
+    let unlock =
+        Scripted::new(vec![Some(PASSWORD), Some(PASSWORD)]).presence(vec![Presence::Confirmed]);
+    let backend = NativeBackend::with_params(paths(&dir), unlock.clone(), CHEAP);
+    backend.list(&Scope::default()).await.unwrap();
+    backend.lock();
+    backend.list(&Scope::default()).await.unwrap();
+    assert_eq!((unlock.asked(), unlock.checked()), (2, 0));
+    assert_eq!(backend.quick_unlock(), None);
+}
+
+#[tokio::test]
+async fn quick_unlock_keeps_the_account_key_through_a_lock_but_not_a_full_one() {
+    let dir = tempfile::tempdir().unwrap();
+    drop(created(&dir).await);
+    let unlock = Scripted::new(vec![Some(PASSWORD), Some(PASSWORD)])
+        .presence(vec![Presence::Confirmed, Presence::Confirmed]);
+    let backend = NativeBackend::with_params(paths(&dir), unlock.clone(), CHEAP);
+
+    backend.set_quick_unlock(Some(HOURS_8)).await.unwrap();
+    assert_eq!(unlock.asked(), 1, "turning it on takes the master password");
+    let status = backend.quick_unlock().unwrap();
+    assert_eq!(status.window, HOURS_8);
+    assert!(status.remaining.unwrap() > Duration::from_secs(7 * 3600));
+
+    backend.lock();
+    assert!(!backend.is_unlocked());
+    assert_eq!(backend.list(&Scope::default()).await.unwrap().len(), 1);
+    assert_eq!(
+        (unlock.asked(), unlock.checked()),
+        (1, 1),
+        "presence, not password"
+    );
+
+    backend.lock_fully();
+    assert_eq!(backend.quick_unlock().unwrap().remaining, None);
+    backend.list(&Scope::default()).await.unwrap();
+    assert_eq!(
+        (unlock.asked(), unlock.checked()),
+        (2, 1),
+        "a full lock ends the window"
+    );
+}
+
+#[tokio::test]
+async fn a_dismissed_check_cancels_and_an_unavailable_one_asks_for_the_password() {
+    let dir = tempfile::tempdir().unwrap();
+    drop(created(&dir).await);
+    let unlock = Scripted::new(vec![Some(PASSWORD), Some(PASSWORD)]).presence(vec![
+        Presence::Dismissed,
+        Presence::Confirmed,
+        Presence::Unavailable,
+    ]);
+    let backend = NativeBackend::with_params(paths(&dir), unlock.clone(), CHEAP);
+    backend.set_quick_unlock(Some(HOURS_8)).await.unwrap();
+    backend.lock();
+
+    let error = backend.list(&Scope::default()).await.unwrap_err();
+    assert!(error.0.contains("cancelled"), "{}", error.0);
+    backend.list(&Scope::default()).await.unwrap();
+    assert_eq!(
+        (unlock.asked(), unlock.checked()),
+        (1, 2),
+        "dismissing kept the key"
+    );
+
+    backend.lock();
+    backend.list(&Scope::default()).await.unwrap();
+    assert_eq!((unlock.asked(), unlock.checked()), (2, 3));
+}
+
+#[tokio::test]
+async fn the_setting_survives_a_restart_and_turns_off() {
+    let dir = tempfile::tempdir().unwrap();
+    drop(created(&dir).await);
+    let backend =
+        NativeBackend::with_params(paths(&dir), Scripted::new(vec![Some(PASSWORD)]), CHEAP);
+    assert!(
+        backend
+            .set_quick_unlock(Some(Duration::from_secs(25 * 3600)))
+            .await
+            .is_err()
+    );
+    backend.set_quick_unlock(Some(HOURS_8)).await.unwrap();
+    drop(backend);
+
+    let unlock = Scripted::new(vec![Some(PASSWORD)]).presence(vec![Presence::Confirmed]);
+    let backend = NativeBackend::with_params(paths(&dir), unlock.clone(), CHEAP);
+    let status = backend.quick_unlock().unwrap();
+    assert_eq!((status.window, status.remaining), (HOURS_8, None));
+    backend.list(&Scope::default()).await.unwrap();
+    assert_eq!(
+        (unlock.asked(), unlock.checked()),
+        (1, 0),
+        "a restarted daemon has no key to keep, so the window starts with the password"
+    );
+
+    backend.set_quick_unlock(None).await.unwrap();
+    drop(backend);
+    let backend = NativeBackend::with_params(paths(&dir), Scripted::new(vec![]), CHEAP);
+    assert_eq!(backend.quick_unlock(), None);
+}
+
+#[tokio::test]
+async fn a_cancelled_password_leaves_quick_unlock_as_it_was() {
+    let dir = tempfile::tempdir().unwrap();
+    drop(created(&dir).await);
+    let backend = NativeBackend::with_params(paths(&dir), Scripted::new(vec![None]), CHEAP);
+    assert!(backend.set_quick_unlock(Some(HOURS_8)).await.is_err());
+    assert_eq!(backend.quick_unlock(), None);
+    assert!(!paths(&dir).settings.exists());
 }

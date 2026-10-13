@@ -83,7 +83,24 @@ pub struct Unlocked {
     vaults: BTreeMap<String, VaultState>,
 }
 
+/// The Account Key alone, kept for quick unlock (§4.3) after everything else is
+/// erased. Opening the vault with it still checks every manifest.
+pub struct AccountKey {
+    account_id: [u8; 16],
+    ak_generation: u64,
+    ak: Key,
+}
+
 impl Unlocked {
+    /// Keeps the Account Key and erases the rest.
+    pub fn into_account_key(self) -> AccountKey {
+        AccountKey {
+            account_id: self.account_id,
+            ak_generation: self.ak_generation,
+            ak: self.ak,
+        }
+    }
+
     pub fn vault_ids(&self) -> Vec<String> {
         self.vaults.keys().cloned().collect()
     }
@@ -298,6 +315,18 @@ fn open_item(key: &Key, generation: u64, ad: &[u8], sealed: &[u8]) -> Result<Zer
 /// vault_id, vk_generation, wrapped_vk, attrs, sequence, manifest, signature
 type VaultRow = (String, u64, Vec<u8>, Vec<u8>, u64, Vec<u8>, Vec<u8>);
 
+struct AccountRow {
+    account_id: [u8; 16],
+    ak_generation: u64,
+    salt: [u8; 16],
+    params: KdfParams,
+    wrapped_ak: Vec<u8>,
+    keyset: Vec<u8>,
+    sequence: u64,
+    manifest: Vec<u8>,
+    signature: Vec<u8>,
+}
+
 pub struct Store {
     conn: Connection,
     sequence_file: PathBuf,
@@ -398,7 +427,37 @@ impl Store {
 
     /// Unwraps every key and checks every manifest against every row (§7.4).
     pub fn unlock(&self, password: &str, secret_key: &SecretKey) -> Result<Unlocked> {
-        type AccountRow = (
+        let row = self.account_row()?;
+        row.params.check()?;
+        let auk = vp_crypto::account_unlock_key(
+            &vp_crypto::password_key(password, &row.salt, &row.params)?,
+            secret_key,
+            &row.account_id,
+        );
+        let ak = vp_crypto::unwrap(
+            &auk,
+            &ak_ad(&row.account_id, row.ak_generation, &row.params, &row.salt),
+            &row.wrapped_ak,
+        )
+        .map_err(|_| Error("Wrong master password or Secret Key".into()))?;
+        self.open_with(row, ak)
+    }
+
+    /// Opens the vault with an Account Key kept from an earlier unlock (§4.3),
+    /// with the same checks as [`Store::unlock`]. Fails once the Account Key has
+    /// been rotated, so the master password is needed again.
+    pub fn unlock_with_key(&self, key: AccountKey) -> Result<Unlocked> {
+        let row = self.account_row()?;
+        if row.account_id != key.account_id || row.ak_generation != key.ak_generation {
+            return Err(Error(
+                "The vault's keys changed; unlock it with the master password".into(),
+            ));
+        }
+        self.open_with(row, key.ak)
+    }
+
+    fn account_row(&self) -> Result<AccountRow> {
+        type Row = (
             [u8; 16],
             u64,
             u64,
@@ -410,7 +469,7 @@ impl Store {
             Vec<u8>,
             Vec<u8>,
         );
-        let row: AccountRow = self
+        let row: Row = self
             .conn
             .query_row(
                 "SELECT account_id, format_version, ak_generation, salt, m_kib, t, p, wrapped_ak, keyset, sequence, manifest, signature FROM account",
@@ -457,19 +516,32 @@ impl Store {
         if sequence < self.recorded_sequence() {
             return Err(tampered("its sequence number went backwards"));
         }
-        params.check()?;
         let salt: [u8; 16] = salt.as_slice().try_into().map_err(|_| tampered("salt"))?;
-        let auk = vp_crypto::account_unlock_key(
-            &vp_crypto::password_key(password, &salt, &params)?,
-            secret_key,
-            &account_id,
-        );
-        let ak = vp_crypto::unwrap(
-            &auk,
-            &ak_ad(&account_id, ak_generation, &params, &salt),
-            &wrapped_ak,
-        )
-        .map_err(|_| Error("Wrong master password or Secret Key".into()))?;
+        Ok(AccountRow {
+            account_id,
+            ak_generation,
+            salt,
+            params,
+            wrapped_ak,
+            keyset,
+            sequence,
+            manifest,
+            signature,
+        })
+    }
+
+    fn open_with(&self, row: AccountRow, ak: Key) -> Result<Unlocked> {
+        let AccountRow {
+            account_id,
+            ak_generation,
+            salt,
+            params,
+            wrapped_ak,
+            keyset,
+            sequence,
+            manifest,
+            signature,
+        } = row;
         let mut unlocked = Unlocked {
             account_id,
             ak_generation,

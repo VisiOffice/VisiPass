@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
+<!-- Quick unlock: within its window, unlocking VisiPass asks for the user's own
+     fingerprint or login password. auth_self, never auth_self_keep, so every
+     unlock asks. auth_self everywhere: visipassd usually runs outside a login
+     session (started from a terminal or a user service), where polkit applies
+     allow_any. -->
+<policyconfig>
+  <vendor>VisiOffice</vendor>
+  <vendor_url>https://github.com/VisiOffice/VisiPass</vendor_url>
+  <action id="com.visioffice.visipass.unlock">
+    <description>Unlock VisiPass</description>
+    <message>Authenticate to unlock VisiPass</message>
+    <icon_name>visipass</icon_name>
+    <defaults>
+      <allow_any>auth_self</allow_any>
+      <allow_inactive>auth_self</allow_inactive>
+      <allow_active>auth_self</allow_active>
+    </defaults>
+  </action>
+</policyconfig>

@@ -60,6 +60,9 @@ vp init          # choose a master password in the VisiPass window; it shows you
 vp import op     # copy your 1Password vaults in; op:// references keep working
 vp lock          # erase the keys from memory; it also locks after 10 idle minutes,
                  # when the screen locks, and before the machine sleeps
+vp quick-unlock on   # optional: for 8 hours after you type the master password, unlocking
+                     # again takes your fingerprint or login password (polkit)
+vp lock --full   # lock and end that window
 ```
 
 After `vp init`, VisiPass serves your own encrypted vault instead of 1Password. The design is in [docs/crypto-design.md](docs/crypto-design.md). It has had an internal review but **not yet an outside one**, so keep 1Password as your backup for now.
