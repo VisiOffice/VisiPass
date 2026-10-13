@@ -217,8 +217,12 @@ overviews; grants are kept but unusable) on:
   keys are gone before the hibernation image is written;
 - **screen lock**: logind's `Lock` signal and `LockedHint` property. Some desktops lock without
   telling logind. Omarchy's `omarchy-system-lock`, for one, calls its own locker and then locks
-  1Password directly with `1password --lock`; on Omarchy, VisiPass installs a lock hook running
-  `vp lock`, and we will propose the same line upstream;
+  1Password directly with `1password --lock`, and it has no lock hook; its shell keeps the lock
+  service out of reach of user plugins. So on Hyprland, while the vault is unlocked, the daemon
+  also asks Hyprland's IPC socket (`j/locked`) every 2 seconds, which reports any
+  `ext-session-lock` locker. Every Hyprland instance under `$XDG_RUNTIME_DIR/hypr` is asked,
+  since the daemon can outlive a Hyprland restart. All sources can only lock, so a spoofed or
+  mistaken signal costs a master password, never a key;
 - `vp lock`, and quitting the app if the user chose that.
 
 The approval rules (grants, per-agent scopes) are unchanged: a locked vault first asks the human
@@ -494,17 +498,20 @@ Implemented (2026-10-12), with tests that attack it (`crates/vp-store/tests`, `c
   inside; §7.3 history (items are archived, never deleted, so no tombstones yet); §7.4 vault and
   account manifests covering items, history, attributes and wrapped keys, checked at unlock and on
   every details read, and the sequence file against rollback.
-- §6.2 idle lock after 10 minutes, and `vp lock`.
+- §6.2 idle lock after 10 minutes, `vp lock`, screen lock (logind and Hyprland), and sleep
+  (logind delay inhibitor, released once the keys are erased).
 - Unlock prompts in the VisiPass window, three tries; `vp init` asks for the password twice and
   shows the Secret Key once; neither ever reaches the caller.
 - `vp import op`: copies 1Password vaults, keeping item and vault IDs so `op://` references resolve
   against either backend; never overwrites.
 
 Not yet: §4.3 quick unlock; §5 Emergency Kit printout and Recovery Key; §6.1 `PR_SET_DUMPABLE`,
-`memfd_secret`/`mlock`; §6.2 sleep inhibitor and screen-lock hooks; §6.3 password change and full
+`memfd_secret`/`mlock`; §6.3 password change and full
 rotation; §7.5 files; §9 fingerprints; §10 log signing; Proton Pass import; §11 everything.
 
 ## Changelog
 
 - 2026-10-12: first draft; revised the same day after the internal review (§13); first
   implementation for the author's own use (§14).
+- 2026-10-13: §6.2 screen lock on Omarchy by asking Hyprland, since Omarchy has no lock hook;
+  sleep and screen lock implemented.

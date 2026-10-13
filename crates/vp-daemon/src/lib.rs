@@ -12,6 +12,7 @@ pub mod log;
 pub mod paths;
 pub mod procinfo;
 pub mod routed;
+pub mod session;
 pub mod tokens;
 
 use approval::{Approver, Prompt};

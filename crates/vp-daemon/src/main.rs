@@ -63,9 +63,11 @@ async fn run(foreground: bool) {
         std::env::current_exe().unwrap_or_else(|_| fail("could not locate its own executable"));
     let approver = Desktop::detect(foreground);
     // VisiPass's own vault once `vp init` has made one; 1Password until then.
+    let native = NativeBackend::new(Paths::standard(), WindowUnlock(approver.clone()));
+    tokio::spawn(vp_daemon::session::watch(native.clone()));
     let backend = Routed {
         op: OpBackend::new(vec![exe.into_os_string(), DUMP_SECRETS.into()]),
-        native: NativeBackend::new(Paths::standard(), WindowUnlock(approver.clone())),
+        native,
     };
     eprintln!(
         "visipassd {} listening on {} (approvals: {})",

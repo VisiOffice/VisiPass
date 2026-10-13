@@ -225,6 +225,15 @@ pub struct NativeBackend<U> {
     inner: Arc<Inner<U>>,
 }
 
+/// Another handle on the same vault: locking one locks both.
+impl<U> Clone for NativeBackend<U> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
 impl<U: Unlock> NativeBackend<U> {
     pub fn new(paths: Paths, unlock: U) -> Self {
         Self::with_params(paths, unlock, KdfParams::DEFAULT)
