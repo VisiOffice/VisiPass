@@ -16,7 +16,7 @@ use vp_core::Failure;
 pub const TIMEOUT: Duration = Duration::from_secs(120);
 
 pub use vp_core::ipc::ApprovalPrompt as Prompt;
-use vp_core::ipc::{Answer, PasteAnswer};
+use vp_core::ipc::{Answer, PasteAnswer, PasteMode};
 use vp_core::secret::Secret;
 
 pub trait Approver: Send + Sync + 'static {
@@ -104,6 +104,7 @@ fn plain(prompt: &Prompt) -> String {
     text
 }
 
+#[derive(Clone)]
 pub enum Desktop {
     /// `visipass-prompt`, found next to visipassd or on PATH.
     Native(PathBuf),
@@ -287,14 +288,48 @@ impl Desktop {
         }
     }
 
+    async fn zenity_show_key(key: &Secret) -> Result<Option<Secret>, Failure> {
+        use tokio::io::AsyncWriteExt;
+        // The key goes in on stdin, never in argv.
+        let mut child = tokio::process::Command::new("zenity")
+            .args([
+                "--text-info",
+                "--title",
+                "VisiPass: your Secret Key",
+                "--width",
+                "560",
+                "--height",
+                "260",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|_| Failure::new("Could not show the Secret Key"))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            let text = Secret::new(format!(
+                "{}\n\n{}\n",
+                vp_core::ipc::KEY_INSTRUCTIONS,
+                key.expose()
+            ));
+            let _ = stdin.write_all(text.expose().as_bytes()).await;
+        }
+        let _ = child.wait().await;
+        Ok(None)
+    }
+
     async fn zenity_paste(prompt: &Prompt) -> Result<Option<Secret>, Failure> {
         let spec = prompt.paste.clone().unwrap_or_default();
-        let text = format!(
-            "{}\n\nPaste the secret to save as \"{}\" in the vault \"{}\".",
-            plain(prompt).trim_end(),
-            spec.title,
-            spec.vault
-        );
+        if let PasteMode::ShowKey { key } = &spec.mode {
+            return Self::zenity_show_key(key).await;
+        }
+        let (instruction, ok_label) = spec.instruction();
+        let text = if matches!(spec.mode, PasteMode::Secret) {
+            format!("{}\n\n{instruction}", plain(prompt).trim_end())
+        } else {
+            instruction
+        };
         let output = tokio::process::Command::new("zenity")
             .args([
                 "--entry",
@@ -306,7 +341,7 @@ impl Desktop {
                 "--text",
             ])
             .arg(text)
-            .args(["--ok-label", "Save", "--cancel-label", "Cancel"])
+            .args(["--ok-label", ok_label, "--cancel-label", "Cancel"])
             .args(["--timeout", &TIMEOUT.as_secs().to_string()])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -332,9 +367,33 @@ impl Desktop {
         tokio::task::spawn_blocking(move || {
             use std::io::{BufRead, Write};
             use std::os::fd::AsRawFd;
-            let tty = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty").ok()?;
+            let tty = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/tty")
+                .ok()?;
             let mut out = &tty;
-            write!(out, "\n{text}  Paste the secret for \"{}\" in \"{}\" (Enter on an empty line cancels): ", spec.title, spec.vault).ok()?;
+            if let PasteMode::ShowKey { key } = &spec.mode {
+                writeln!(
+                    out,
+                    "\n{}\n\n    {}\n",
+                    vp_core::ipc::KEY_INSTRUCTIONS,
+                    key.expose()
+                )
+                .ok()?;
+                return Some(None);
+            }
+            let (instruction, _) = spec.instruction();
+            let lead = if matches!(spec.mode, PasteMode::Secret) {
+                text
+            } else {
+                String::new()
+            };
+            write!(
+                out,
+                "\n{lead}  {instruction} (Enter on an empty line cancels): "
+            )
+            .ok()?;
             out.flush().ok()?;
             // Turn echo off while the secret is typed or pasted.
             let fd = tty.as_raw_fd();

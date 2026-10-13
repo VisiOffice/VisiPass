@@ -12,6 +12,7 @@ use vp_core::Failure;
 use vp_daemon::Daemon;
 use vp_daemon::approval::{Approver, Prompt};
 use vp_daemon::grants::Decision;
+use vp_daemon::routed::{Routed, WindowUnlock};
 use vp_op::OpBackend;
 
 const OPENAI: &str = "sentinel-openai-1234567890";
@@ -47,6 +48,8 @@ if args[:2] == ["item", "list"]:
         c = json.load(open(store))
         listed.append({k: c[k] for k in ("id", "title", "category", "vault")})
     print(json.dumps(listed))
+elif args[:2] == ["vault", "list"]:
+    print(json.dumps([V]))
 elif args[:3] == ["item", "get", "-"]:
     wanted = {e["id"] for e in json.loads(stdin)}
     for it in ITEMS:
@@ -109,6 +112,15 @@ struct World {
 
 impl World {
     fn new(decisions: &[Decision]) -> Self {
+        Self::start(decisions, false)
+    }
+
+    /// With VisiPass's own vault in front of the fake 1Password.
+    fn native(decisions: &[Decision]) -> Self {
+        Self::start(decisions, true)
+    }
+
+    fn start(decisions: &[Decision], native: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let op = dir.path().join("op");
         let script = FAKE_OP
@@ -129,14 +141,38 @@ impl World {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let state = dir.path().join("state");
         let daemon_approver = approver.clone();
+        let data = dir.path().join("data");
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().unwrap();
             runtime.block_on(async move {
                 let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-                let backend = OpBackend::with_program(op, vec!["helper".into()]);
-                let daemon = Arc::new(Daemon::new(backend, daemon_approver, &state, socket));
-                ready_tx.send(()).unwrap();
-                daemon.serve(listener).await;
+                let op = OpBackend::with_program(op, vec!["helper".into()]);
+                if native {
+                    let paths = vp_native::Paths {
+                        vault: data.join("vault.vpdb"),
+                        secret_key: data.join("secret-key"),
+                        sequence: state.join("sequence"),
+                    };
+                    let backend = Routed {
+                        op,
+                        native: vp_native::NativeBackend::with_params(
+                            paths,
+                            WindowUnlock(daemon_approver.clone()),
+                            vp_crypto::KdfParams {
+                                m_kib: 65_536,
+                                t: 1,
+                                p: 1,
+                            },
+                        ),
+                    };
+                    let daemon = Arc::new(Daemon::new(backend, daemon_approver, &state, socket));
+                    ready_tx.send(()).unwrap();
+                    daemon.serve(listener).await;
+                } else {
+                    let daemon = Arc::new(Daemon::new(op, daemon_approver, &state, socket));
+                    ready_tx.send(()).unwrap();
+                    daemon.serve(listener).await;
+                }
             });
         });
         ready_rx.recv().unwrap();
@@ -877,4 +913,63 @@ fn doctor_never_prompts() {
     assert!(out.status.success());
     assert_eq!(world.approver.asked(), 0);
     assert!(world.calls().is_empty());
+}
+
+#[test]
+fn the_native_vault_takes_over_after_init_and_import() {
+    // init: the password, its confirmation, the Secret Key window; then a read
+    // approval; after `vp lock`, a read approval and the unlock password.
+    let world = World::native(&[
+        Decision::Once,
+        Decision::Once,
+        Decision::Deny,
+        Decision::Once,
+        Decision::Once,
+        Decision::Once,
+    ]);
+    let created = world.vp(&["init"], None);
+    clean(&created);
+    assert_eq!(json(&created)["created"], true);
+    assert!(
+        !text(&created.stdout).contains("VP1-"),
+        "the Secret Key never reaches the caller"
+    );
+    assert_eq!(json(&world.vp(&["status"], None))["vault"]["exists"], true);
+
+    let imported = json(&world.vp(&["import", "op"], None));
+    assert_eq!(imported["imported"][0]["created"], 3);
+    let again = json(&world.vp(&["import", "op"], None));
+    assert_eq!(
+        again["imported"][0]["skipped"], 3,
+        "a second import changes nothing"
+    );
+
+    let op_calls = world.calls().len();
+    let read = world.vp(&["read", "op://Dev/OpenAI API Key/credential"], None);
+    assert_eq!(text(&read.stdout), OPENAI);
+    assert_eq!(
+        world.calls().len(),
+        op_calls,
+        "1Password is no longer asked"
+    );
+
+    assert_eq!(json(&world.vp(&["lock"], None))["locked"], true);
+    assert_eq!(
+        json(&world.vp(&["status"], None))["vault"]["unlocked"],
+        false
+    );
+    let read = world.vp(&["read", "op://Dev/Stripe Dashboard/password"], None);
+    assert_eq!(text(&read.stdout), LOGIN);
+    assert_eq!(world.approver.asked(), 6);
+
+    let vault = std::fs::read(world.path("data/vault.vpdb")).unwrap();
+    for s in SENTINELS {
+        assert!(
+            !vault.windows(s.len()).any(|w| w == s.as_bytes()),
+            "{s} in the vault file"
+        );
+    }
+    world.assert_contained();
+    let refused = world.vp(&["init"], None);
+    assert!(text(&refused.stderr).contains("already have"));
 }

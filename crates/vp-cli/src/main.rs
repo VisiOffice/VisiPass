@@ -72,6 +72,17 @@ struct SourceArgs {
 }
 
 #[derive(Subcommand)]
+enum ImportCommands {
+    /// From 1Password, through `op`: every vault, or one. Items keep their IDs, so
+    /// op:// references keep working; items already imported are skipped
+    Op {
+        /// Only this vault (name or ID)
+        #[arg(long)]
+        vault: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum Commands {
     /// Find secret references without revealing values; many queries, one approval
     Find {
@@ -181,6 +192,13 @@ enum Commands {
     Quick,
     /// Show whether visipassd is running and how it asks for approval
     Status,
+    /// Create your VisiPass vault. The master password is typed in the VisiPass window, never here
+    Init,
+    /// Lock the VisiPass vault now: its keys are erased from memory
+    Lock,
+    /// Copy items into your VisiPass vault from another password manager
+    #[command(subcommand)]
+    Import(ImportCommands),
     /// Check the setup without authenticating or prompting; safe to paste into an issue
     Doctor,
     /// Serve VisiPass to an agent over MCP (stdio). No tool ever returns a secret value
@@ -741,6 +759,14 @@ fn execute(command: Commands) -> Result<i32, Failure> {
             Ok(stream) => print(&client::call_with(stream, Request::Status)?),
             Err(_) => print(&serde_json::json!({ "running": false })),
         },
+        Commands::Init => print(&client::call(Request::InitVault)?),
+        Commands::Lock => match client::connect(false) {
+            Ok(stream) => print(&client::call_with(stream, Request::LockVault)?),
+            Err(_) => print(&serde_json::json!({ "locked": true })),
+        },
+        Commands::Import(ImportCommands::Op { vault }) => {
+            print(&client::call(Request::ImportOp { vault })?)
+        }
         Commands::Doctor => print(&doctor::doctor()),
         Commands::Mcp => mcp::serve(),
         Commands::Browser(BrowserCommands::Install) => print(&native_host::install()?),

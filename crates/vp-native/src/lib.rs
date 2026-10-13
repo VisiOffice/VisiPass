@@ -42,10 +42,9 @@ pub struct Paths {
 
 impl Paths {
     pub fn standard() -> Self {
-        let data = vp_core::paths::data_dir();
         Self {
-            vault: data.join("vault.vpdb"),
-            secret_key: data.join("secret-key"),
+            vault: vp_core::paths::vault_file(),
+            secret_key: vp_core::paths::secret_key_file(),
             sequence: vp_core::paths::state_dir().join("sequence"),
         }
     }

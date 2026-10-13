@@ -8,7 +8,8 @@
 //! full-screen overlay with exclusive keyboard focus, like Omarchy's polkit
 //! prompt. Elsewhere it is an ordinary window.
 //!
-//! `visipass-prompt --demo` shows a sample request, for checking the styling.
+//! `visipass-prompt --demo` shows a sample request, for checking the styling;
+//! `--demo-paste`, `--demo-unlock`, `--demo-new` and `--demo-key` show the paste window's modes.
 
 mod paste;
 mod view;
@@ -106,8 +107,28 @@ fn main() {
             secrets: vec![],
             purpose: Some("deploy the billing service".into()),
             paste: Some(vp_core::ipc::PasteSpec {
+                mode: Default::default(),
                 title: "Stripe Live Key".into(),
                 vault: "Dev".into(),
+            }),
+            ..demo()
+        }
+    } else if let Some(mode) = std::env::args().find_map(|a| match a.as_str() {
+        "--demo-unlock" => Some(vp_core::ipc::PasteMode::Unlock { retry: false }),
+        "--demo-new" => Some(vp_core::ipc::PasteMode::NewPassword { confirm: false }),
+        "--demo-key" => Some(vp_core::ipc::PasteMode::ShowKey {
+            key: vp_core::secret::Secret::new("VP1-3ABCDE-FGHJK-MNPQR-STVWX-YZ012-7Q".into()),
+        }),
+        _ => None,
+    }) {
+        ApprovalPrompt {
+            who: "VisiPass".into(),
+            details: vec![],
+            secrets: vec![],
+            purpose: None,
+            paste: Some(vp_core::ipc::PasteSpec {
+                mode,
+                ..Default::default()
             }),
             ..demo()
         }

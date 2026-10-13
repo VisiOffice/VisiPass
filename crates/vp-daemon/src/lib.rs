@@ -11,6 +11,7 @@ pub mod grants;
 pub mod log;
 pub mod paths;
 pub mod procinfo;
+pub mod routed;
 pub mod tokens;
 
 use approval::{Approver, Prompt};
@@ -24,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use vp_core::backend::Backend;
-use vp_core::ipc::{Envelope, Operation, PROTOCOL_VERSION, Request, Response, Usage};
+use vp_core::ipc::{Envelope, Operation, PROTOCOL_VERSION, PasteMode, Request, Response, Usage};
 use vp_core::{Failure, audit, find, time};
 
 const MAX_REQUEST_BYTES: u64 = 4 * 1024 * 1024;
@@ -402,7 +403,67 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 "approvals": self.approver.method(),
                 "socket": self.socket,
                 "grants": self.grants().list().len(),
+                "vault": self.backend.native_status().map(|(exists, unlocked)| json!({
+                    "exists": exists,
+                    "unlocked": unlocked,
+                })),
             })),
+            Request::InitVault => {
+                match self.backend.native_status() {
+                    None => return Err(Failure::new("This visipassd has no native vault")),
+                    Some((true, _)) => {
+                        return Err(Failure::new("You already have a VisiPass vault"));
+                    }
+                    Some((false, _)) => {}
+                }
+                let window = |mode| Prompt {
+                    who: "VisiPass".into(),
+                    action: "create your vault".into(),
+                    details: vec![],
+                    secrets: vec![],
+                    purpose: None,
+                    timeout_secs: approval::TIMEOUT.as_secs(),
+                    paste: Some(vp_core::ipc::PasteSpec {
+                        mode,
+                        ..Default::default()
+                    }),
+                };
+                let cancelled =
+                    || Failure::new("Creating the vault was cancelled; nothing was created");
+                // The master password and the Secret Key go between the window and
+                // visipassd only, never to the caller.
+                let _turn = self.approvals.lock().await;
+                let first = self
+                    .approver
+                    .paste(&window(PasteMode::NewPassword { confirm: false }))
+                    .await?
+                    .ok_or_else(cancelled)?;
+                let second = self
+                    .approver
+                    .paste(&window(PasteMode::NewPassword { confirm: true }))
+                    .await?
+                    .ok_or_else(cancelled)?;
+                if first.expose() != second.expose() {
+                    return Err(Failure::new(
+                        "The two passwords did not match; nothing was created. Run vp init again",
+                    ));
+                }
+                let key = self.backend.native_init(first).await?;
+                let _ = self
+                    .approver
+                    .paste(&window(PasteMode::ShowKey { key }))
+                    .await;
+                Ok(json!({
+                    "created": true,
+                    "secretKey": "saved on this device, next to the vault, and shown once in the VisiPass window",
+                    "next": "Run `vp import op` to copy your 1Password items in. Until then VisiPass serves an empty vault",
+                }))
+            }
+            Request::LockVault => {
+                self.backend.native_lock();
+                Ok(json!({ "locked": true }))
+            }
+            Request::ImportOp { vault } => self.backend.native_import(vault).await,
             Request::Find { queries, scope } => {
                 if queries.is_empty() {
                     return Err(Failure::new("Give at least one query"));
@@ -510,6 +571,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                     paste: Some(vp_core::ipc::PasteSpec {
                         title: destination.title.clone(),
                         vault: destination.vault.clone(),
+                        mode: Default::default(),
                     }),
                 };
                 // The paste window is the approval; one prompt at a time.

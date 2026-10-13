@@ -97,6 +97,38 @@ impl OpBackend {
         serde_json::from_str(raw.expose()).map_err(|_| Failure::new(failure))
     }
 
+    /// Many items with their values, in one `op` call, for importing into the
+    /// native vault. The output never reaches an error message.
+    pub async fn items_with_values(
+        &self,
+        entries: &[vp_core::model::Listed],
+    ) -> Result<Vec<Item>, Failure> {
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        let failure = "Could not read items from 1Password (1Password details suppressed)";
+        let input = format!(
+            "{}\n",
+            serde_json::Value::Array(entries.iter().map(|e| e.raw.clone()).collect())
+        );
+        let output = Secret::new(
+            self.op(
+                &["item", "get", "-", "--format", "json", "--reveal"],
+                Call {
+                    input: Some(&input),
+                    failure: Some(failure),
+                    ..Call::default()
+                },
+            )
+            .await?,
+        );
+        crate::json_documents(output.expose())
+            .map_err(|_| Failure::new(failure))?
+            .into_iter()
+            .map(|v| serde_json::from_value(v).map_err(|_| Failure::new(failure)))
+            .collect()
+    }
+
     pub(crate) async fn put_item(&self, item: &Item) -> Result<Item, Failure> {
         if item.title.trim().is_empty()
             || item.vault.name.trim().is_empty() && item.vault.id.is_empty()

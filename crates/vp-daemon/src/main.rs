@@ -2,7 +2,9 @@ use std::io::IsTerminal;
 use std::sync::Arc;
 use tokio::net::UnixListener;
 use vp_daemon::approval::Desktop;
+use vp_daemon::routed::{Routed, WindowUnlock};
 use vp_daemon::{Daemon, paths};
+use vp_native::{NativeBackend, Paths};
 use vp_op::OpBackend;
 
 const DUMP_SECRETS: &str = "__dump-secrets";
@@ -59,8 +61,12 @@ async fn run(foreground: bool) {
 
     let exe =
         std::env::current_exe().unwrap_or_else(|_| fail("could not locate its own executable"));
-    let backend = OpBackend::new(vec![exe.into_os_string(), DUMP_SECRETS.into()]);
     let approver = Desktop::detect(foreground);
+    // VisiPass's own vault once `vp init` has made one; 1Password until then.
+    let backend = Routed {
+        op: OpBackend::new(vec![exe.into_os_string(), DUMP_SECRETS.into()]),
+        native: NativeBackend::new(Paths::standard(), WindowUnlock(approver.clone())),
+    };
     eprintln!(
         "visipassd {} listening on {} (approvals: {})",
         env!("CARGO_PKG_VERSION"),

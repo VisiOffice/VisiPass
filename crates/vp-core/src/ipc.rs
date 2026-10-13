@@ -81,7 +81,60 @@ pub struct ApprovalPrompt {
 pub struct PasteSpec {
     pub title: String,
     pub vault: String,
+    #[serde(default)]
+    pub mode: PasteMode,
 }
+
+/// What the paste window is for. Every mode returns its answer on the pipe
+/// only visipassd holds.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum PasteMode {
+    /// A new secret an agent asked for (`vp request`).
+    #[default]
+    Secret,
+    /// The master password, to unlock the native vault.
+    Unlock { retry: bool },
+    /// A new master password (`vp init`); `confirm` is the second entry.
+    NewPassword { confirm: bool },
+    /// Shows the new Secret Key once, for the Emergency Kit. Answers Cancel.
+    ShowKey { key: Secret },
+}
+
+impl PasteSpec {
+    /// What the paste window asks for, and its confirm button. Shared by every
+    /// way of asking: the VisiPass window, zenity and the terminal.
+    pub fn instruction(&self) -> (String, &'static str) {
+        match &self.mode {
+            PasteMode::Secret => (
+                format!(
+                    "Paste the secret to save as \"{}\" in the vault \"{}\".",
+                    self.title, self.vault
+                ),
+                "Save",
+            ),
+            PasteMode::Unlock { retry: false } => (
+                "Enter your master password to unlock VisiPass.".into(),
+                "Unlock",
+            ),
+            PasteMode::Unlock { retry: true } => (
+                "That password was wrong. Enter your master password to unlock VisiPass.".into(),
+                "Unlock",
+            ),
+            PasteMode::NewPassword { confirm: false } => (
+                "Choose a master password for your new VisiPass vault: at least 10 characters. Nobody can recover it for you, so pick one you will remember.".into(),
+                "Continue",
+            ),
+            PasteMode::NewPassword { confirm: true } => (
+                "Type the same master password again.".into(),
+                "Create vault",
+            ),
+            PasteMode::ShowKey { .. } => (KEY_INSTRUCTIONS.into(), "Done"),
+        }
+    }
+}
+
+pub const KEY_INSTRUCTIONS: &str = "This is your Secret Key. It is saved on this device, and you need it with your master password to open your vault anywhere else or after a reinstall. Write it down or print it, keep it somewhere safe, and keep it apart from your password.";
 
 /// A paste prompt's answer, as one JSON line on stdout.
 #[derive(Debug, Serialize, Deserialize)]
@@ -207,6 +260,16 @@ pub enum Request {
         favorite: bool,
     },
     // ---- end of app-only requests ----
+    // ---- The native vault ----
+    /// Creates VisiPass's own vault; the master password is typed in the VisiPass window.
+    InitVault,
+    /// Erases the native vault's keys from memory.
+    LockVault,
+    /// Copies items from 1Password into the native vault, keeping their IDs.
+    ImportOp {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        vault: Option<String>,
+    },
     /// Ask the human to paste a secret that does not exist yet. The agent
     /// gets back only the reference.
     RequestSecret {
@@ -321,6 +384,9 @@ impl Request {
             Request::Grants => "grants",
             Request::Revoke { .. } => "revoke",
             Request::Log { .. } => "log",
+            Request::InitVault => "vault-init",
+            Request::LockVault => "vault-lock",
+            Request::ImportOp { .. } => "vault-import",
         }
     }
 }

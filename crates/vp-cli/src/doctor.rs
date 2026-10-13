@@ -37,6 +37,20 @@ fn local(args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// The native vault: whether it and this device's Secret Key exist, and that
+/// its cryptography is not yet externally reviewed. Booleans only, no paths.
+fn native_vault() -> Value {
+    if !vp_core::paths::vault_file().is_file() {
+        return json!({ "present": false });
+    }
+    json!({
+        "present": true,
+        "secretKeyOnDevice": vp_core::paths::secret_key_file().is_file(),
+        "externallyReviewed": false,
+        "note": "VisiPass's own vault follows docs/crypto-design.md but has not been reviewed by an outside cryptographer yet. Keep 1Password as your backup until it has.",
+    })
+}
+
 pub fn doctor() -> Value {
     let op = local(&["--version"]);
     let accounts = op.as_ref().map(|_| {
@@ -78,6 +92,7 @@ pub fn doctor() -> Value {
         "daemon": daemon.as_ref().map(|d| d.get("visipassd").cloned().unwrap_or(Value::Null)),
         "approvals": approvals,
         "grants": daemon.as_ref().and_then(|d| d.get("grants").cloned()),
+        "vault": native_vault(),
     });
     if !notes.is_empty() {
         report["notes"] = json!(notes);

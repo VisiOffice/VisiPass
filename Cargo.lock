@@ -6228,7 +6228,9 @@ dependencies = [
  "tempfile",
  "tokio",
  "vp-core",
+ "vp-crypto",
  "vp-daemon",
+ "vp-native",
  "vp-op",
 ]
 
@@ -6272,6 +6274,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "vp-core",
+ "vp-native",
  "vp-op",
 ]
 

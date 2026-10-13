@@ -43,6 +43,16 @@ pub fn data_dir() -> PathBuf {
     })
 }
 
+/// The native vault's database.
+pub fn vault_file() -> PathBuf {
+    data_dir().join("vault.vpdb")
+}
+
+/// This device's copy of the Secret Key.
+pub fn secret_key_file() -> PathBuf {
+    data_dir().join("secret-key")
+}
+
 /// Brings an already-open VisiPass window to the front, where the desktop
 /// allows it. On Hyprland this asks the compositor to focus the window by class;
 /// elsewhere it does nothing.

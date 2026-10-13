@@ -67,4 +67,33 @@ pub trait Backend: Send + Sync + 'static {
         request: &PasswordRequest,
         value: Secret,
     ) -> impl Future<Output = Result<PasswordOutcome, Failure>> + Send;
+
+    // ---- VisiPass's own vault, for backends that have one ----
+
+    /// `Some((exists, unlocked))` when this backend has a native vault.
+    fn native_status(&self) -> Option<(bool, bool)> {
+        None
+    }
+
+    /// Creates the native vault. Returns the Secret Key's display form, which
+    /// only ever goes to the human's window.
+    fn native_init(
+        &self,
+        _password: Secret,
+    ) -> impl Future<Output = Result<Secret, Failure>> + Send {
+        async { Err(Failure::new(NO_NATIVE)) }
+    }
+
+    /// Erases the native vault's keys from memory.
+    fn native_lock(&self) {}
+
+    /// Copies 1Password vaults (all, or the one named) into the native vault.
+    fn native_import(
+        &self,
+        _vault: Option<String>,
+    ) -> impl Future<Output = Result<serde_json::Value, Failure>> + Send {
+        async { Err(Failure::new(NO_NATIVE)) }
+    }
 }
+
+const NO_NATIVE: &str = "This visipassd has no native vault";

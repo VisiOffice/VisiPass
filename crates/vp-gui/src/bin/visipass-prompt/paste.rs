@@ -1,8 +1,9 @@
-//! The paste window: a human adds a secret an agent asked for (`vp request`).
+//! The paste window: a human adds a secret an agent asked for (`vp request`),
+//! types the master password (unlock, `vp init`), or reads the new Secret Key.
 //!
-//! The secret is typed or pasted here and written, as one JSON line, to stdout:
-//! a pipe only visipassd holds. It never passes through the agent's shell,
-//! clipboard history or transcript. Esc, closing or a crash cancel.
+//! What is typed is written, as one JSON line, to stdout: a pipe only visipassd
+//! holds. It never passes through the agent's shell, clipboard history or
+//! transcript. Esc, closing or a crash cancel.
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -11,7 +12,7 @@ use gpui::{
 };
 use std::io::Write;
 use std::time::{Duration, Instant};
-use vp_core::ipc::{ApprovalPrompt, PasteAnswer};
+use vp_core::ipc::{ApprovalPrompt, PasteAnswer, PasteMode};
 use vp_core::secret::Secret;
 use vp_gui::text_input::{InputEvent, TextInput};
 use vp_gui::theme::{Theme, alpha};
@@ -39,8 +40,14 @@ impl PasteView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let placeholder = match prompt.paste.as_ref().map(|p| &p.mode) {
+            Some(PasteMode::Unlock { .. }) | Some(PasteMode::NewPassword { .. }) => {
+                "Master password"
+            }
+            _ => "Paste the secret here (Ctrl+V)",
+        };
         let field = cx.new(|cx| {
-            let mut input = TextInput::new(theme.clone(), "Paste the secret here (Ctrl+V)", cx);
+            let mut input = TextInput::new(theme.clone(), placeholder, cx);
             input.set_masked(true, cx);
             input
         });
@@ -71,13 +78,22 @@ impl PasteView {
         })
         .detach();
         let now = Instant::now();
+        let show_key = matches!(
+            prompt.paste.as_ref().map(|p| &p.mode),
+            Some(PasteMode::ShowKey { .. })
+        );
+        let stops = [cx.focus_handle(), cx.focus_handle(), cx.focus_handle()];
+        if show_key {
+            // No field to type in: start on Done.
+            window.focus(&stops[1], cx);
+        }
         Self {
             prompt,
             theme,
             overlay,
             field,
             focus: cx.focus_handle(),
-            stops: [cx.focus_handle(), cx.focus_handle(), cx.focus_handle()],
+            stops,
             opened: now,
             deadline: now + timeout,
             answered: false,
@@ -88,7 +104,18 @@ impl PasteView {
         self.opened.elapsed() >= ARM_DELAY
     }
 
+    fn mode(&self) -> PasteMode {
+        self.prompt
+            .paste
+            .as_ref()
+            .map(|p| p.mode.clone())
+            .unwrap_or_default()
+    }
+
     fn save(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.mode(), PasteMode::ShowKey { .. }) {
+            return self.finish(PasteAnswer::Cancel, cx);
+        }
         let value = self.field.read(cx).text().to_string();
         if !self.armed() || value.trim().is_empty() {
             return;
@@ -128,10 +155,7 @@ impl PasteView {
 
     fn activate(&mut self, stop: usize, cx: &mut Context<Self>) {
         match stop {
-            1 => self.field.update(cx, |f, cx| {
-                let masked = f.masked();
-                f.set_masked(!masked, cx)
-            }),
+            1 => self.toggle_or_copy(cx),
             2 => self.save(cx),
             3 => self.finish(PasteAnswer::Cancel, cx),
             _ => {}
@@ -162,6 +186,18 @@ impl PasteView {
             }
             "escape" => self.finish(PasteAnswer::Cancel, cx),
             _ => {}
+        }
+    }
+
+    /// The first button: Show/Hide for a typed value, Copy for the Secret Key.
+    fn toggle_or_copy(&mut self, cx: &mut Context<Self>) {
+        if let PasteMode::ShowKey { key } = self.mode() {
+            vp_gui::clipboard::copy(key.expose(), true, cx);
+        } else {
+            self.field.update(cx, |f, cx| {
+                let masked = f.masked();
+                f.set_masked(!masked, cx)
+            });
         }
     }
 
@@ -216,6 +252,19 @@ impl Render for PasteView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme.clone();
         let spec = self.prompt.paste.clone().unwrap_or_default();
+        let (instruction, ok_label) = spec.instruction();
+        let mode = spec.mode.clone();
+        let heading = match &mode {
+            PasteMode::Secret => format!("{} asks you to add a secret.", self.prompt.who),
+            PasteMode::Unlock { .. } => "Unlock VisiPass".to_string(),
+            PasteMode::NewPassword { .. } => "Create your VisiPass vault".to_string(),
+            PasteMode::ShowKey { .. } => "Your Secret Key".to_string(),
+        };
+        let highlight = if matches!(mode, PasteMode::Secret) {
+            self.prompt.who.len()
+        } else {
+            0
+        };
         let focused = self.focused_stop(window, cx);
         let remaining = self
             .deadline
@@ -278,12 +327,9 @@ impl Render for PasteView {
                     )
                     .child(
                         div().flex_1().text_size(px(t.size(1.167))).child(
-                            gpui::StyledText::new(format!(
-                                "{} asks you to add a secret.",
-                                self.prompt.who
-                            ))
+                            gpui::StyledText::new(heading)
                             .with_highlights([(
-                                0..self.prompt.who.len(),
+                                0..highlight,
                                 gpui::HighlightStyle {
                                     color: Some(t.accent.into()),
                                     font_weight: Some(FontWeight::BOLD),
@@ -296,7 +342,10 @@ impl Render for PasteView {
             .child(
                 div()
                     .text_color(t.muted)
-                    .child("Paste the value to save it in your vault. The agent gets a reference to it, never the value itself."),
+                    .child(match &mode {
+                        PasteMode::Secret => "Paste the value to save it in your vault. The agent gets a reference to it, never the value itself.".to_string(),
+                        _ => instruction.clone(),
+                    }),
             )
             .child(details)
             .child(
@@ -304,29 +353,41 @@ impl Render for PasteView {
                     .flex()
                     .flex_col()
                     .gap(px(6.))
-                    .child(label(&format!(
-                        "Saved as \"{}\" in the vault \"{}\"",
-                        spec.title, spec.vault
-                    )))
+                    .when(matches!(mode, PasteMode::Secret), |d| {
+                        d.child(label(&format!(
+                            "Saved as \"{}\" in the vault \"{}\"",
+                            spec.title, spec.vault
+                        )))
+                    })
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap(px(8.))
-                            .child(div().flex_1().child(self.field.clone()))
+                            .child(div().flex_1().child(match &mode {
+                                PasteMode::ShowKey { key } => div()
+                                    .px(px(10.))
+                                    .py(px(8.))
+                                    .rounded(px(t.radius))
+                                    .bg(alpha(t.foreground, 0.06))
+                                    .text_size(px(t.size(1.25)))
+                                    .text_color(t.accent)
+                                    .child(key.expose().to_string())
+                                    .into_any_element(),
+                                _ => self.field.clone().into_any_element(),
+                            }))
                             .child(self.button(
                                 "show",
-                                if masked { "Show" } else { "Hide" },
+                                match (&mode, masked) {
+                                    (PasteMode::ShowKey { .. }, _) => "Copy",
+                                    (_, true) => "Show",
+                                    (_, false) => "Hide",
+                                },
                                 false,
                                 1,
                                 focused == 1,
                                 cx,
-                                |this, cx| {
-                                    this.field.update(cx, |f, cx| {
-                                        let masked = f.masked();
-                                        f.set_masked(!masked, cx)
-                                    });
-                                },
+                                |this, cx| this.toggle_or_copy(cx),
                             )),
                     ),
             )
@@ -336,7 +397,7 @@ impl Render for PasteView {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .child(self.button("save", "Save to vault", true, 2, focused == 2, cx, |this, cx| this.save(cx)))
+                    .child(self.button("save", match &mode { PasteMode::Secret => "Save to vault", _ => ok_label }, true, 2, focused == 2, cx, |this, cx| this.save(cx)))
                     .child(self.button("cancel", "Cancel", false, 3, focused == 3, cx, |this, cx| {
                         this.finish(PasteAnswer::Cancel, cx)
                     }))
@@ -346,7 +407,8 @@ impl Render for PasteView {
                             .text_size(px(t.size(0.833)))
                             .text_color(t.muted)
                             .child(format!(
-                                "Enter saves · Esc cancels · {}:{:02}",
+                                "Enter: {} · Esc cancels · {}:{:02}",
+                                ok_label.to_lowercase(),
                                 remaining / 60,
                                 remaining % 60
                             )),
@@ -356,7 +418,7 @@ impl Render for PasteView {
                 div()
                     .text_size(px(t.size(0.833)))
                     .text_color(t.muted)
-                    .child("Tab moves between the field and buttons; Enter saves; Esc cancels."),
+                    .child("Tab moves between the field and buttons."),
             );
 
         div()
@@ -380,7 +442,11 @@ impl Render for PasteView {
                         .bg(t.background)
                         .rounded(px(t.radius))
                         .text_size(px(t.size(0.917)))
-                        .child("VisiPass · new secret requested"),
+                        .child(match &mode {
+                            PasteMode::Secret => "VisiPass · new secret requested",
+                            PasteMode::Unlock { .. } => "VisiPass · locked",
+                            _ => "VisiPass · new vault",
+                        }),
                 )
             })
             .when(!self.overlay, |d| d.bg(t.background))

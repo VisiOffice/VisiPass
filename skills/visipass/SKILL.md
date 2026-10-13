@@ -115,6 +115,12 @@ vp doctor            # versions and setup; never prompts; safe to paste into an 
 
 You may list grants and read the log. Revoke a grant only when the human asks.
 
+## VisiPass's own vault
+
+The human may move from 1Password to VisiPass's own encrypted vault (`vp status` shows `"vault": {"exists": true}`). Nothing changes for you: the same commands work, and `op://` references keep resolving because imported items keep their IDs. When it is locked, your request waits while the human unlocks it.
+
+Never run `vp init` or `vp import`; they are the human's to run. You may run `vp lock` when the human asks.
+
 ## Item conventions
 
 - API keys: API Credential category, the built-in `credential` field, titled `<Provider> API Key` or `<Provider> <Purpose> API Key`.

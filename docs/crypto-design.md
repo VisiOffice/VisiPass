@@ -1,8 +1,9 @@
 # VisiPass cryptographic design
 
-Status: **draft for review**, not implemented. Nothing in `vp-crypto` or `vp-store` is written
-until this document has been through an outside review. Today VisiPass stores no secrets of its
-own: every value lives in 1Password and VisiPass reaches it through `op`.
+Status: **draft for review; implemented for the author's own use, not yet externally reviewed.**
+`vp-crypto`, `vp-store` and `vp-native` implement §2–§8 for a single user on one device. Until the
+outside review (§13) is done, VisiPass's own vault is for its author's data only, with 1Password
+kept as the backup, and `vp doctor` says so. §14 lists what is implemented and what is not.
 
 This document covers the native vault (milestone M3): how a vault is encrypted on disk, how it is
 unlocked, what the daemon holds in memory, and what an attacker gets in each case. Sync, sharing
@@ -338,17 +339,19 @@ attachments are built.
 
 ### 8.1 Layout
 
-One SQLite database per account: `~/.local/share/visipass/<account_id>.vpdb`. Clear columns hold
-only what is needed to find ciphertexts: random IDs, generations, versions, sequence numbers and
-dates. Vault names, item titles and everything else a human typed are inside ciphertexts.
+One SQLite database per device: `~/.local/share/visipass/vault.vpdb`, with the Secret Key beside
+it in `secret-key` (§4.4). Clear columns hold only what is needed to find ciphertexts: random
+IDs, generations, versions and sequence numbers. No dates are stored in the clear; they live
+inside the overview. Vault names, item titles and everything else a human typed are inside
+ciphertexts.
 
 ```
 account(account_id, format_version, ak_generation, salt, params, wrapped_AK,
         wrapped_AK_recovery?, keyset_ciphertext, account_manifest, manifest_signature)
 vault(vault_id, vk_generation, wrapped_VK, attrs_ciphertext, manifest, manifest_signature)
-item(vault_id, item_id, item_version, overview_ciphertext, details_ciphertext, updated_on)
-history(vault_id, item_id, item_version, details_ciphertext, created_on)
-tombstone(vault_id, item_id, final_version, deleted_on)
+item(vault_id, item_id, item_version, overview_ciphertext, details_ciphertext)
+history(vault_id, item_id, item_version, details_ciphertext)
+tombstone(vault_id, item_id, final_version)
 file(vault_id, file_id, file_version, ciphertext)
 ```
 
@@ -362,8 +365,7 @@ then look the same. Cheap locally, and the same ciphertexts are what a sync serv
 ### 8.3 What the file reveals
 
 Without keys: the number of vaults, items, history rows, tombstones and files; padded sizes;
-version counters and sequence numbers; and dates (day granularity; times of day are not stored in
-the clear). Decrypted overviews in daemon memory may reach swap; `vp doctor` reports whether swap
+version counters and sequence numbers. No dates. Decrypted overviews in daemon memory may reach swap; `vp doctor` reports whether swap
 is encrypted or absent.
 
 ## 9. Fingerprints for reuse and breach checks
@@ -482,6 +484,27 @@ measured, mobile Safari especially, before the web app is promised.
 4. **Code audit** of `vp-crypto`, `vp-store`, sync and the server before anyone else's data,
    published in full.
 
+## 14. Implementation status
+
+Implemented (2026-10-12), with tests that attack it (`crates/vp-store/tests`, `crates/vp-native/tests`):
+
+- §2.1 encodings; §3 Secret Key format; §4.1 unlock with parameter bounds; §4.2 Account Key, derived
+  keys and keyset; §4.4 Secret Key in a 0600 file.
+- §7.1 vault keys and commitments; §7.2 items as padded overview and details ciphertexts, both JSON
+  inside; §7.3 history (items are archived, never deleted, so no tombstones yet); §7.4 vault and
+  account manifests covering items, history, attributes and wrapped keys, checked at unlock and on
+  every details read, and the sequence file against rollback.
+- §6.2 idle lock after 10 minutes, and `vp lock`.
+- Unlock prompts in the VisiPass window, three tries; `vp init` asks for the password twice and
+  shows the Secret Key once; neither ever reaches the caller.
+- `vp import op`: copies 1Password vaults, keeping item and vault IDs so `op://` references resolve
+  against either backend; never overwrites.
+
+Not yet: §4.3 quick unlock; §5 Emergency Kit printout and Recovery Key; §6.1 `PR_SET_DUMPABLE`,
+`memfd_secret`/`mlock`; §6.2 sleep inhibitor and screen-lock hooks; §6.3 password change and full
+rotation; §7.5 files; §9 fingerprints; §10 log signing; Proton Pass import; §11 everything.
+
 ## Changelog
 
-- 2026-10-12: first draft; revised the same day after the internal review (§13).
+- 2026-10-12: first draft; revised the same day after the internal review (§13); first
+  implementation for the author's own use (§14).

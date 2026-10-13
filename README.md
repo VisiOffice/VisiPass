@@ -53,6 +53,16 @@ vp log                                    # what was asked for, by whom
 
 Give your agent `skills/visipass/SKILL.md`.
 
+## VisiPass's own vault (early)
+
+```sh
+vp init          # choose a master password in the VisiPass window; it shows your Secret Key once
+vp import op     # copy your 1Password vaults in; op:// references keep working
+vp lock          # erase the keys from memory (it also locks after 10 idle minutes)
+```
+
+After `vp init`, VisiPass serves your own encrypted vault instead of 1Password. The design is in [docs/crypto-design.md](docs/crypto-design.md). It has had an internal review but **not yet an outside one**, so keep 1Password as your backup for now.
+
 ## Approvals
 
 When an agent asks for a secret no grant covers, a dialog names the agent (Claude Code, Codex, ...), the project and git remote, the command, the references, and the agent's stated purpose. Answer *Deny*, *Allow once*, *This task* (until the agent exits), *This project, 8 hours*, or *Always for this project*. Grants cover exactly the references and operation approved; anything new asks again.

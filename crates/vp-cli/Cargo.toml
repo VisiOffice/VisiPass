@@ -21,3 +21,5 @@ tempfile.workspace = true
 tokio.workspace = true
 vp-daemon.workspace = true
 vp-op.workspace = true
+vp-native.workspace = true
+vp-crypto.workspace = true

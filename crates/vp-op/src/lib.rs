@@ -173,7 +173,7 @@ impl OpBackend {
 }
 
 /// `op item get -` prints one JSON document per item, concatenated.
-fn json_documents(input: &str) -> Result<Vec<Value>, Failure> {
+pub(crate) fn json_documents(input: &str) -> Result<Vec<Value>, Failure> {
     let mut out = Vec::new();
     for document in serde_json::Deserializer::from_str(input).into_iter::<Value>() {
         match document.map_err(|_| Failure::new("1Password returned invalid JSON"))? {
