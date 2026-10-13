@@ -68,6 +68,25 @@ vp emergency-kit # print your Secret Key and account ID (asks for the master pas
 
 After `vp init`, VisiPass serves your own encrypted vault instead of 1Password. The design is in [docs/crypto-design.md](docs/crypto-design.md). It has had an internal review but **not yet an outside one**, so keep 1Password as your backup for now.
 
+## Kamal
+
+In `.kamal/secrets`, fetch everything a deploy needs in one request (one approval, or none inside a
+grant), then let Kamal hand each one out:
+
+```sh
+SECRETS=$(vp kamal-fetch --from "op://Domus/Production Secrets" RAILS_MASTER_KEY POSTGRES_PASSWORD \
+  KAMAL_REGISTRY_PASSWORD=op://Varda/Production/GITHUB_TOKEN)
+RAILS_MASTER_KEY=$(kamal secrets extract RAILS_MASTER_KEY $SECRETS)
+POSTGRES_PASSWORD=$(kamal secrets extract POSTGRES_PASSWORD $SECRETS)
+KAMAL_REGISTRY_PASSWORD=$(kamal secrets extract KAMAL_REGISTRY_PASSWORD $SECRETS)
+```
+
+A bare name is a field of the `--from` item; `NAME=op://…` takes any other reference. If anything
+is missing or refused, `vp` prints nothing and `kamal secrets extract` stops the deploy, instead
+of Kamal shipping a blank secret as it does when a `$(op read …)` line fails. Values containing
+`$` arrive intact (Kamal expands `$NAME` inside a plain `$(op read …)` result). Kamal itself drops
+a trailing newline from any value.
+
 ## Approvals
 
 When an agent asks for a secret no grant covers, a dialog names the agent (Claude Code, Codex, ...), the project and git remote, the command, the references, and the agent's stated purpose. Answer *Deny*, *Allow once*, *This task* (until the agent exits), *This project, 8 hours*, or *Always for this project*. Grants cover exactly the references and operation approved; anything new asks again.

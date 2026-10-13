@@ -1111,3 +1111,41 @@ fn the_emergency_kit_needs_the_password_and_never_reaches_the_caller() {
     let log = std::fs::read_to_string(world.path("state/access.log")).unwrap_or_default();
     assert!(!log.contains(key));
 }
+
+#[test]
+fn kamal_fetch_is_one_approval_in_kamals_format_and_fails_closed() {
+    let world = World::new(&[Decision::Once, Decision::Once]);
+    let fetched = world.vp(
+        &[
+            "kamal-fetch",
+            "--from",
+            "op://Dev/Stripe Dashboard",
+            "password",
+            "OPENAI_API_KEY=op://Dev/OpenAI API Key/credential",
+        ],
+        None,
+    );
+    assert!(fetched.status.success(), "{}", text(&fetched.stderr));
+    assert_eq!(
+        text(&fetched.stdout).trim_end(),
+        vp_core::kamal::fetch_output(&[("password", LOGIN), ("OPENAI_API_KEY", OPENAI)]).as_str()
+    );
+    assert_eq!(
+        world.approver.asked(),
+        1,
+        "one approval for the whole deploy"
+    );
+
+    let missing = world.vp(
+        &["kamal-fetch", "--from", "op://Dev/Stripe Dashboard", "NOPE"],
+        None,
+    );
+    assert!(!missing.status.success());
+    assert!(
+        text(&missing.stdout).is_empty(),
+        "nothing for extract to read, so the deploy stops"
+    );
+    let bare = world.vp(&["kamal-fetch", "password"], None);
+    assert!(text(&bare.stderr).contains("--from"));
+    world.assert_contained();
+}

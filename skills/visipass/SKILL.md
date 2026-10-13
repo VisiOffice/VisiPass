@@ -50,6 +50,19 @@ vp request --title "Stripe Live Key" --vault Work --purpose "configure billing"
 
 The human gets a VisiPass window and pastes the value; you get back only `{ ref, verified }`. Never ask the human to paste a secret into the chat or a file. If they cancel, do not ask again; ask how to proceed.
 
+## Kamal deploys
+
+In `.kamal/secrets`, use one `vp kamal-fetch` and `kamal secrets extract` per secret, never a
+`$(op read …)` or `$(vp read …)` per line:
+
+```sh
+SECRETS=$(vp kamal-fetch --from "op://Vault/Item" RAILS_MASTER_KEY POSTGRES_PASSWORD OTHER=op://Vault2/Item2/field)
+RAILS_MASTER_KEY=$(kamal secrets extract RAILS_MASTER_KEY $SECRETS)
+```
+
+Then run `kamal deploy` as usual: the human approves once. Never run `vp kamal-fetch` yourself
+outside a deploy, and never `kamal secrets print`: both put the values in your context.
+
 ## Plaintext .env files
 
 ```bash

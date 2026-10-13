@@ -212,6 +212,20 @@ enum Commands {
         #[arg(long)]
         full: bool,
     },
+    /// Secrets for a Kamal deploy, as `kamal secrets fetch` prints them. In .kamal/secrets:
+    ///   SECRETS=$(vp kamal-fetch --from "op://Vault/Item" RAILS_MASTER_KEY POSTGRES_PASSWORD)
+    ///   RAILS_MASTER_KEY=$(kamal secrets extract RAILS_MASTER_KEY $SECRETS)
+    /// One approval per deploy; a missing secret stops the deploy
+    KamalFetch {
+        /// The item whose fields the bare names are, e.g. "op://Vault/Item"
+        #[arg(long)]
+        from: Option<String>,
+        /// NAME (a field of --from) or NAME=op://vault/item/field
+        #[arg(required = true)]
+        secrets: Vec<String>,
+        #[command(flatten)]
+        purpose: Purpose,
+    },
     /// Open your printable Emergency Kit (Secret Key and account ID) in the browser.
     /// Asks for the master password; the kit is never printed here
     EmergencyKit,
@@ -788,6 +802,30 @@ fn execute(command: Commands) -> Result<i32, Failure> {
             Err(_) => print(&serde_json::json!({ "locked": true, "full": true })),
         },
         Commands::EmergencyKit => print(&client::call(Request::EmergencyKit)?),
+        Commands::KamalFetch {
+            from,
+            secrets,
+            purpose,
+        } => {
+            let planned = vp_core::kamal::plan(from.as_deref(), &secrets)?;
+            let refs: Vec<SecretRef> = planned.iter().map(|(_, r)| r.clone()).collect();
+            let values = resolve(
+                &refs,
+                Usage::Reveal,
+                Some(purpose.purpose.unwrap_or_else(|| "Kamal deploy".into())),
+            )?;
+            let pairs: Vec<(&str, &str)> = planned
+                .iter()
+                .map(|(name, reference)| (name.as_str(), values[reference].expose()))
+                .collect();
+            let output = vp_core::kamal::fetch_output(&pairs);
+            let mut stdout = std::io::stdout().lock();
+            let _ = stdout
+                .write_all(output.as_bytes())
+                .and_then(|_| stdout.write_all(b"\n"))
+                .and_then(|_| stdout.flush());
+            Ok(0)
+        }
         Commands::QuickUnlock(command) => {
             let hours = match command {
                 QuickUnlockCommands::On { hours } => Some(hours),

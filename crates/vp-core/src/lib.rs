@@ -10,6 +10,7 @@ pub mod env;
 pub mod find;
 pub mod generate;
 pub mod ipc;
+pub mod kamal;
 pub mod mask;
 pub mod model;
 pub mod paths;
