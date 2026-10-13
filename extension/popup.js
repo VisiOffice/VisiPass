@@ -1,4 +1,4 @@
-import { ask, fill } from "./native.js";
+import { ask } from "./native.js";
 
 const list = document.getElementById("logins");
 const search = document.getElementById("search");
@@ -43,7 +43,11 @@ async function choose(i, force = false) {
   if (!login || !tab) return;
   say(force ? "Waiting for your approval in VisiPass…" : "Filling… approve in VisiPass if it asks.");
   try {
-    const filled = await fill(tab, login, force);
+    // The background worker fills: it outlives this popup, which closes when the
+    // approval window takes focus.
+    const reply = await chrome.runtime.sendMessage({ kind: "popup-fill", tabId: tab.id, login, force });
+    if (!reply.ok) throw new Error(reply.error);
+    const { filled } = reply.result;
     if (filled === 0) {
       say("No login fields found on this page.", true);
       return;

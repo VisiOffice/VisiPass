@@ -4,18 +4,53 @@
   "version": "0.5.0",
   "description": "Fill logins from VisiPass. Fills only on the login's own site, after you approve each site once.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA1xlndh0FPLvMqwav5sm5QmNL8dMguZlwRd/vcE2ZTzE3H0GRqTJLGU2uQi3S1wz1x5xjdvixnmDZzfbZ5o+dWeXq+lwzgA9cLg6WVvFrqEexQzV1Aehqw86eWkXvCNrwB0LrLl0wf7pxjYpsN4oQsMr7lhIbuz8DtAV4yrDJtCn1RZr6rgspOBF4QrdqeCuNLvKj/AID7NuXnJV37GHmNoJHzTbNGI9TONWwzD6sKhf4rEq/zcPS5hx6SmMkWKUe2RII6uKDpiRZMdXwPCMSpjb7dlQ/5qlWx85iaRKhyaSKJm5wovIiFGUs71yLclaNUWKNnJk6wkty9xJL+VTzDwIDAQAB",
-  "permissions": ["nativeMessaging", "activeTab", "scripting"],
-  "background": { "service_worker": "background.js", "type": "module" },
+  "permissions": [
+    "nativeMessaging",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "inline.js"
+      ],
+      "all_frames": true,
+      "run_at": "document_idle"
+    }
+  ],
   "action": {
     "default_title": "VisiPass",
     "default_popup": "popup.html",
-    "default_icon": { "16": "icons/visipass-16.png", "32": "icons/visipass-32.png", "48": "icons/visipass-48.png" }
+    "default_icon": {
+      "16": "icons/visipass-16.png",
+      "32": "icons/visipass-32.png",
+      "48": "icons/visipass-48.png"
+    }
   },
   "commands": {
     "fill-login": {
-      "suggested_key": { "default": "Ctrl+Shift+L" },
+      "suggested_key": {
+        "default": "Ctrl+Shift+L"
+      },
       "description": "Fill the best login for this page"
     }
   },
-  "icons": { "16": "icons/visipass-16.png", "32": "icons/visipass-32.png", "48": "icons/visipass-48.png", "128": "icons/visipass-128.png" }
+  "icons": {
+    "16": "icons/visipass-16.png",
+    "32": "icons/visipass-32.png",
+    "48": "icons/visipass-48.png",
+    "128": "icons/visipass-128.png"
+  }
 }

@@ -49,11 +49,12 @@ export function fillPage(username, password, totp) {
   return filled;
 }
 
-// Asks VisiPass for one login's values and fills them into the tab's frames.
-export async function fill(tab, login, force = false) {
+// Asks VisiPass for one login's values and fills them into the tab's frames
+// (or only `target`'s). `tab.url` is the page VisiPass checks the login against.
+export async function fill(tab, login, force = false, target = { tabId: tab.id, allFrames: true }) {
   const values = await ask({ type: "fill", url: tab.url, item: login.id, vault: login.vault, force });
   const results = await chrome.scripting.executeScript({
-    target: { tabId: tab.id, allFrames: true },
+    target,
     func: fillPage,
     args: [values.username || "", values.password || "", values.totp || ""],
   });
