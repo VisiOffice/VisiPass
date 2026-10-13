@@ -761,7 +761,9 @@ fn native(
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(&input).unwrap();
+    // A host that refuses the origin exits without reading, so the write may
+    // hit a closed pipe; its exit code is what the test checks.
+    let _ = child.stdin.take().unwrap().write_all(&input);
     let out = child.wait_with_output().unwrap();
     let mut replies = Vec::new();
     let mut rest = out.stdout.as_slice();
