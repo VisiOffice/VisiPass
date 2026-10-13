@@ -88,6 +88,14 @@ pub trait Backend: Send + Sync + 'static {
     /// window keeps the Account Key.
     fn native_lock(&self, _full: bool) {}
 
+    /// Checks the master password afresh and returns the Emergency Kit's contents.
+    fn native_emergency_kit(
+        &self,
+        _password: Secret,
+    ) -> impl Future<Output = Result<EmergencyKit, Failure>> + Send {
+        async { Err(Failure::new(NO_NATIVE)) }
+    }
+
     /// Turns quick unlock on for `window` (after the master password) or off.
     fn native_quick_unlock(
         &self,
@@ -103,6 +111,13 @@ pub trait Backend: Send + Sync + 'static {
     ) -> impl Future<Output = Result<serde_json::Value, Failure>> + Send {
         async { Err(Failure::new(NO_NATIVE)) }
     }
+}
+
+/// What the Emergency Kit page shows. The Secret Key goes only to that page.
+pub struct EmergencyKit {
+    pub account_id: String,
+    pub secret_key: Secret,
+    pub vault_file: std::path::PathBuf,
 }
 
 /// The native vault, for `vp status`.

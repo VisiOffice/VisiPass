@@ -101,6 +101,11 @@ impl Unlocked {
         }
     }
 
+    /// The account's random ID, for the Emergency Kit. Not secret.
+    pub fn account_id(&self) -> [u8; 16] {
+        self.account_id
+    }
+
     pub fn vault_ids(&self) -> Vec<String> {
         self.vaults.keys().cloned().collect()
     }

@@ -271,6 +271,14 @@ struct Settings {
     quick_unlock_secs: Option<u64>,
 }
 
+/// What the Emergency Kit prints (§5.1).
+pub struct EmergencyKit {
+    /// The account ID, grouped for reading aloud.
+    pub account_id: String,
+    pub secret_key: Zeroizing<String>,
+    pub vault_file: PathBuf,
+}
+
 /// Quick unlock's state, for `vp status`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuickUnlock {
@@ -557,6 +565,49 @@ impl<U: Unlock> NativeBackend<U> {
 
     fn quiet(&self) {
         self.inner.state().quiet_until = Some(Instant::now() + self.inner.quiet_after_cancel);
+    }
+
+    /// Checks the master password afresh, without changing whether the vault is
+    /// unlocked, and returns what the Emergency Kit shows.
+    pub async fn emergency_kit(&self, password: Secret) -> Result<EmergencyKit, Failure> {
+        if !self.inner.paths.exists() {
+            return Err(Failure::new(
+                "There is no VisiPass vault yet. Run `vp init` to create one",
+            ));
+        }
+        let secret = self.secret_key()?;
+        let paths = self.inner.paths.clone();
+        let account_id = tokio::task::spawn_blocking(move || {
+            let store = Store::open(&paths.vault, &paths.sequence).map_err(failure)?;
+            let unlocked = store.unlock(password.expose(), &secret).map_err(failure)?;
+            Ok::<_, Failure>(unlocked.account_id())
+        })
+        .await
+        .map_err(|_| Failure::new("Checking the password failed"))??;
+        let hex: String = account_id.iter().map(|b| format!("{b:02X}")).collect();
+        let grouped = hex
+            .as_bytes()
+            .chunks(4)
+            .map(|c| std::str::from_utf8(c).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("-");
+        Ok(EmergencyKit {
+            account_id: grouped,
+            secret_key: self.secret_key()?.display(),
+            vault_file: self.inner.paths.vault.clone(),
+        })
+    }
+
+    fn secret_key(&self) -> Result<SecretKey, Failure> {
+        let text = Zeroizing::new(
+            std::fs::read_to_string(&self.inner.paths.secret_key).map_err(|_| {
+                Failure::new(format!(
+                    "This device has no Secret Key at {}. Restore it from your Emergency Kit",
+                    self.inner.paths.secret_key.display()
+                ))
+            })?,
+        );
+        SecretKey::parse(&text).map_err(|e| Failure::new(e.0))
     }
 
     /// Reopens the vault with the kept Account Key once the system confirms the

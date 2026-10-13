@@ -75,9 +75,12 @@ else:
     sys.exit(2)
 "#;
 
-/// Answers prompts from a script and counts them.
+/// Answers prompts from a script and counts them; keeps the pages it was asked to show.
 #[derive(Clone)]
-struct Scripted(Arc<Mutex<(VecDeque<Decision>, usize)>>);
+struct Scripted(
+    Arc<Mutex<(VecDeque<Decision>, usize)>>,
+    Arc<Mutex<Vec<String>>>,
+);
 
 impl Scripted {
     fn asked(&self) -> usize {
@@ -102,6 +105,10 @@ impl Approver for Scripted {
             Some(Decision::Deny) | None => None,
             Some(_) => Some(vp_core::secret::Secret::new(NEW_KEY.to_string())),
         })
+    }
+    async fn show_page(&self, html: &str) -> Result<(), Failure> {
+        self.1.lock().unwrap().push(html.to_string());
+        Ok(())
     }
     // Quick unlock's presence check: allowed, dismissed when denied, unavailable when unscripted.
     async fn confirm_presence(&self) -> vp_native::Presence {
@@ -143,10 +150,10 @@ impl World {
         std::fs::set_permissions(&op, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::create_dir(dir.path().join("state")).unwrap();
 
-        let approver = Scripted(Arc::new(Mutex::new((
-            decisions.iter().copied().collect(),
-            0,
-        ))));
+        let approver = Scripted(
+            Arc::new(Mutex::new((decisions.iter().copied().collect(), 0))),
+            Arc::default(),
+        );
         let socket = dir.path().join("vp.sock");
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let state = dir.path().join("state");
@@ -1068,4 +1075,39 @@ fn a_page_load_never_prompts_to_unlock_the_native_vault() {
         "Stripe Dashboard"
     );
     assert_eq!(world.approver.asked(), asked + 1);
+}
+
+#[test]
+fn the_emergency_kit_needs_the_password_and_never_reaches_the_caller() {
+    let world = World::native(&[
+        // init: password, confirmation, Secret Key window
+        Decision::Once,
+        Decision::Once,
+        Decision::Deny,
+        // emergency-kit: cancelled, then the password
+        Decision::Deny,
+        Decision::Once,
+    ]);
+    clean(&world.vp(&["init"], None));
+    let key = std::fs::read_to_string(world.path("data/secret-key")).unwrap();
+    let key = key.trim();
+
+    let cancelled = world.vp(&["emergency-kit"], None);
+    assert!(text(&cancelled.stderr).contains("cancelled"));
+    assert!(world.approver.1.lock().unwrap().is_empty());
+
+    let shown = world.vp(&["emergency-kit"], None);
+    clean(&shown);
+    assert_eq!(json(&shown)["opened"], true);
+    for stream in [&shown.stdout, &shown.stderr] {
+        assert!(
+            !text(stream).contains(key),
+            "the Secret Key never reaches the caller"
+        );
+    }
+    let pages = world.approver.1.lock().unwrap().clone();
+    assert_eq!(pages.len(), 1);
+    assert!(pages[0].contains(key));
+    let log = std::fs::read_to_string(world.path("state/access.log")).unwrap_or_default();
+    assert!(!log.contains(key));
 }

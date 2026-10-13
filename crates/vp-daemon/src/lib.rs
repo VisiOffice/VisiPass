@@ -8,6 +8,7 @@
 
 pub mod approval;
 pub mod grants;
+pub mod kit;
 pub mod log;
 pub mod paths;
 pub mod presence;
@@ -478,6 +479,43 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
             Request::LockVault { full } => {
                 self.backend.native_lock(full);
                 Ok(json!({ "locked": true, "full": full }))
+            }
+            Request::EmergencyKit => {
+                if !self.backend.native_status().is_some_and(|s| s.exists) {
+                    return Err(Failure::new(
+                        "There is no VisiPass vault yet. Run `vp init` to create one",
+                    ));
+                }
+                let _turn = self.approvals.lock().await;
+                let prompt = Prompt {
+                    who: "VisiPass".into(),
+                    action: "show your Emergency Kit".into(),
+                    details: vec![],
+                    secrets: vec![],
+                    purpose: None,
+                    timeout_secs: approval::TIMEOUT.as_secs(),
+                    paste: Some(vp_core::ipc::PasteSpec {
+                        mode: PasteMode::Unlock {
+                            retry: false,
+                            purpose: Some("show your Emergency Kit".into()),
+                        },
+                        ..Default::default()
+                    }),
+                };
+                let password = self
+                    .approver
+                    .paste(&prompt)
+                    .await?
+                    .ok_or_else(|| Failure::new("Showing the Emergency Kit was cancelled"))?;
+                let details = self.backend.native_emergency_kit(password).await?;
+                let date = vp_core::time::now_rfc3339();
+                let page = kit::page(&details, date.get(..10).unwrap_or(&date));
+                self.approver.show_page(&page).await?;
+                Ok(json!({
+                    "opened": true,
+                    "where": "your browser, from a file in memory that is deleted in 10 minutes",
+                    "next": "Print it or write the Secret Key down, and keep it apart from your master password",
+                }))
             }
             Request::QuickUnlock { hours } => {
                 let window = hours.map(|h| std::time::Duration::from_secs(h.saturating_mul(3600)));

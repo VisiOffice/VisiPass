@@ -31,7 +31,15 @@ pub trait Approver: Send + Sync + 'static {
     fn confirm_presence(&self) -> impl Future<Output = vp_native::Presence> + Send {
         async { vp_native::Presence::Unavailable }
     }
+    /// Shows the human a page that holds a secret (the Emergency Kit), in a way
+    /// that leaves nothing on disk.
+    fn show_page(&self, _html: &str) -> impl Future<Output = Result<(), Failure>> + Send {
+        async { Err(Failure::new("This visipassd cannot show pages")) }
+    }
 }
+
+/// How long a shown page stays in memory before it is deleted.
+pub const PAGE_LIFETIME: Duration = Duration::from_secs(10 * 60);
 
 const ONCE: &str = "Allow once";
 const TASK: &str = "This task";
@@ -426,6 +434,57 @@ impl Desktop {
 }
 
 impl Approver for Desktop {
+    /// Writes the page under `$XDG_RUNTIME_DIR` (memory, never disk), opens it
+    /// with `xdg-open` and deletes it after [`PAGE_LIFETIME`].
+    async fn show_page(&self, html: &str) -> Result<(), Failure> {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt;
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| {
+                Failure::new("No XDG_RUNTIME_DIR, so there is nowhere in memory to put the page")
+            })?;
+        let dir = PathBuf::from(runtime).join("visipass");
+        crate::paths::private_dir(&dir)
+            .map_err(|_| Failure::new("Could not prepare a place for the page"))?;
+        let path = dir.join(format!("emergency-kit-{}.html", vp_native::new_id()));
+        let written = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .and_then(|mut file| file.write_all(html.as_bytes()));
+        if written.is_err() {
+            let _ = std::fs::remove_file(&path);
+            return Err(Failure::new("Could not write the page"));
+        }
+        let opened = on_path("xdg-open").and_then(|program| {
+            let mut child = tokio::process::Command::new(program)
+                .arg(&path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .ok()?;
+            tokio::spawn(async move { child.wait().await });
+            Some(())
+        });
+        let cleanup = path.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(PAGE_LIFETIME).await;
+            let _ = std::fs::remove_file(cleanup);
+        });
+        match opened {
+            Some(_) => Ok(()),
+            None => {
+                let _ = std::fs::remove_file(&path);
+                Err(Failure::new(
+                    "Could not open a browser (xdg-open is missing)",
+                ))
+            }
+        }
+    }
+
     async fn confirm_presence(&self) -> vp_native::Presence {
         match self {
             Desktop::Unavailable => vp_native::Presence::Unavailable,

@@ -256,6 +256,9 @@ impl Render for PasteView {
         let mode = spec.mode.clone();
         let heading = match &mode {
             PasteMode::Secret => format!("{} asks you to add a secret.", self.prompt.who),
+            PasteMode::Unlock {
+                purpose: Some(_), ..
+            } => "Confirm it's you".to_string(),
             PasteMode::Unlock { .. } => "Unlock VisiPass".to_string(),
             PasteMode::NewPassword { .. } => "Create your VisiPass vault".to_string(),
             PasteMode::ShowKey { .. } => "Your Secret Key".to_string(),

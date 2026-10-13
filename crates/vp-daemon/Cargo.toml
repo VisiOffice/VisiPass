@@ -19,6 +19,7 @@ tokio.workspace = true
 vp-core.workspace = true
 vp-native.workspace = true
 vp-op.workspace = true
+zeroize.workspace = true
 zbus.workspace = true
 
 [dev-dependencies]

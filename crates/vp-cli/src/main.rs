@@ -212,6 +212,9 @@ enum Commands {
         #[arg(long)]
         full: bool,
     },
+    /// Open your printable Emergency Kit (Secret Key and account ID) in the browser.
+    /// Asks for the master password; the kit is never printed here
+    EmergencyKit,
     /// Unlock with your fingerprint or login password after a lock, for some hours
     /// after each master-password unlock
     #[command(subcommand)]
@@ -784,6 +787,7 @@ fn execute(command: Commands) -> Result<i32, Failure> {
             Ok(stream) => print(&client::call_with(stream, Request::LockVault { full })?),
             Err(_) => print(&serde_json::json!({ "locked": true, "full": true })),
         },
+        Commands::EmergencyKit => print(&client::call(Request::EmergencyKit)?),
         Commands::QuickUnlock(command) => {
             let hours = match command {
                 QuickUnlockCommands::On { hours } => Some(hours),

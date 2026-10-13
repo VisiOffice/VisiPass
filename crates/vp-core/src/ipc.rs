@@ -93,8 +93,13 @@ pub enum PasteMode {
     /// A new secret an agent asked for (`vp request`).
     #[default]
     Secret,
-    /// The master password, to unlock the native vault.
-    Unlock { retry: bool },
+    /// The master password, to unlock the native vault, or with `purpose` to
+    /// confirm it is the human before something sensitive ("show your Emergency Kit").
+    Unlock {
+        retry: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        purpose: Option<String>,
+    },
     /// A new master password (`vp init`); `confirm` is the second entry.
     NewPassword { confirm: bool },
     /// Shows the new Secret Key once, for the Emergency Kit. Answers Cancel.
@@ -113,11 +118,18 @@ impl PasteSpec {
                 ),
                 "Save",
             ),
-            PasteMode::Unlock { retry: false } => (
+            PasteMode::Unlock {
+                purpose: Some(purpose),
+                ..
+            } => (
+                format!("Enter your master password to {purpose}."),
+                "Continue",
+            ),
+            PasteMode::Unlock { retry: false, .. } => (
                 "Enter your master password to unlock VisiPass.".into(),
                 "Unlock",
             ),
-            PasteMode::Unlock { retry: true } => (
+            PasteMode::Unlock { retry: true, .. } => (
                 "That password was wrong. Enter your master password to unlock VisiPass.".into(),
                 "Unlock",
             ),
@@ -134,7 +146,7 @@ impl PasteSpec {
     }
 }
 
-pub const KEY_INSTRUCTIONS: &str = "This is your Secret Key. It is saved on this device, and you need it with your master password to open your vault anywhere else or after a reinstall. Write it down or print it, keep it somewhere safe, and keep it apart from your password.";
+pub const KEY_INSTRUCTIONS: &str = "This is your Secret Key. It is saved on this device, and you need it with your master password to open your vault anywhere else or after a reinstall. Write it down, or print your Emergency Kit any time with `vp emergency-kit`, and keep it apart from your password.";
 
 /// A paste prompt's answer, as one JSON line on stdout.
 #[derive(Debug, Serialize, Deserialize)]
@@ -269,6 +281,9 @@ pub enum Request {
         #[serde(default)]
         full: bool,
     },
+    /// Opens the printable Emergency Kit in the browser after the master password
+    /// is entered in the VisiPass window. Nothing secret comes back to the caller.
+    EmergencyKit,
     /// Turns quick unlock on (the master password is asked for in the VisiPass
     /// window) or off. `hours` is the window; none turns it off.
     QuickUnlock {
@@ -401,6 +416,7 @@ impl Request {
             Request::InitVault => "vault-init",
             Request::LockVault { .. } => "vault-lock",
             Request::QuickUnlock { .. } => "vault-quick-unlock",
+            Request::EmergencyKit => "vault-emergency-kit",
             Request::ImportOp { .. } => "vault-import",
         }
     }

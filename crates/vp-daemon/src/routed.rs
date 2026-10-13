@@ -5,7 +5,7 @@
 use crate::approval::{self, Approver, Prompt};
 use serde_json::{Value, json};
 use vp_core::Failure;
-use vp_core::backend::{Backend, NativeStatus};
+use vp_core::backend::{Backend, EmergencyKit, NativeStatus};
 use vp_core::ipc::{PasteMode, PasteSpec};
 use vp_core::model::{
     Destination, Item, ItemDetail, Listed, PasswordOutcome, PasswordRequest, Receipt, Scope,
@@ -29,7 +29,10 @@ impl<A: Approver> Unlock for WindowUnlock<A> {
             purpose: None,
             timeout_secs: approval::TIMEOUT.as_secs(),
             paste: Some(PasteSpec {
-                mode: PasteMode::Unlock { retry },
+                mode: PasteMode::Unlock {
+                    retry,
+                    purpose: None,
+                },
                 ..PasteSpec::default()
             }),
         };
@@ -134,6 +137,15 @@ impl<U: Unlock> Backend for Routed<U> {
         } else {
             self.native.lock();
         }
+    }
+
+    async fn native_emergency_kit(&self, password: Secret) -> Result<EmergencyKit, Failure> {
+        let kit = self.native.emergency_kit(password).await?;
+        Ok(EmergencyKit {
+            account_id: kit.account_id,
+            secret_key: Secret::new(kit.secret_key.to_string()),
+            vault_file: kit.vault_file,
+        })
     }
 
     async fn native_quick_unlock(

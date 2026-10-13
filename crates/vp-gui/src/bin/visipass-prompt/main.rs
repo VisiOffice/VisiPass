@@ -114,7 +114,10 @@ fn main() {
             ..demo()
         }
     } else if let Some(mode) = std::env::args().find_map(|a| match a.as_str() {
-        "--demo-unlock" => Some(vp_core::ipc::PasteMode::Unlock { retry: false }),
+        "--demo-unlock" => Some(vp_core::ipc::PasteMode::Unlock {
+            retry: false,
+            purpose: None,
+        }),
         "--demo-new" => Some(vp_core::ipc::PasteMode::NewPassword { confirm: false }),
         "--demo-key" => Some(vp_core::ipc::PasteMode::ShowKey {
             key: vp_core::secret::Secret::new("VP1-3ABCDE-FGHJK-MNPQR-STVWX-YZ012-7Q".into()),

@@ -178,6 +178,12 @@ changed outside PAM. Optional TPM2 sealing of the Secret Key may come with §4.3
 A printable page with the account ID, the Secret Key and a space to write the master password by
 hand. Generated at creation and after every Secret Key change.
 
+As built: `vp emergency-kit` asks for the master password (checked by a full unwrap, which leaves
+the lock state alone), writes a self-contained HTML page under `$XDG_RUNTIME_DIR` (tmpfs, mode
+0600), opens it with `xdg-open` and deletes it after 10 minutes. The caller gets only "opened".
+The page also says where the vault file is and how to restore on a new machine, since without
+sync the vault file is the other half of a recovery.
+
 ### 5.2 Recovery Key
 
 Losing the master password and every copy of the Secret Key loses the vault. Opt-in at creation,
@@ -517,7 +523,9 @@ Implemented (2026-10-12), with tests that attack it (`crates/vp-store/tests`, `c
 - `vp import op`: copies 1Password vaults, keeping item and vault IDs so `op://` references resolve
   against either backend; never overwrites.
 
-Not yet: §5 Emergency Kit printout and Recovery Key; §6.1 `PR_SET_DUMPABLE`,
+- §5.1 Emergency Kit (`vp emergency-kit`).
+
+Not yet: §5.2 Recovery Key; §6.1 `PR_SET_DUMPABLE`,
 `memfd_secret`/`mlock`; §6.3 password change and full
 rotation; §7.5 files; §9 fingerprints; §10 log signing; Proton Pass import; §11 everything.
 
