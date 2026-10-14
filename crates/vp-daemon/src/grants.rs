@@ -204,6 +204,7 @@ mod tests {
         Requester {
             pid: std::process::id(),
             agent: Some(agent.into()),
+            origin: None,
             task: None,
             project: Project {
                 root: root.into(),

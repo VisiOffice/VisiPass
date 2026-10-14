@@ -80,6 +80,25 @@ fn describe_ref(reference: &str) -> (String, String, String) {
     }
 }
 
+/// The references by item, in the order each item first appears: (item, vault, fields).
+fn group_refs(references: &[String]) -> Vec<(String, String, Vec<String>)> {
+    let mut groups: Vec<(String, String, Vec<String>)> = Vec::new();
+    for reference in references {
+        let (item, field, vault) = describe_ref(reference);
+        match groups
+            .iter_mut()
+            .find(|(i, v, _)| *i == item && *v == vault)
+        {
+            Some((_, _, fields)) => fields.push(field),
+            None => groups.push((item, vault, vec![field])),
+        }
+    }
+    groups
+}
+
+/// Past this the list scrolls, so the buttons stay on screen.
+const SECRETS_MAX_HEIGHT: f32 = 260.;
+
 impl ApprovalView {
     pub fn new(
         prompt: ApprovalPrompt,
@@ -235,10 +254,16 @@ impl ApprovalView {
             .child(div().text_color(text).child(choice.label))
     }
 
-    fn secret_row(&self, reference: &str) -> impl IntoElement {
+    /// One item: its fields beside it, or wrapped underneath when there are several.
+    fn secret_group(&self, item: &str, vault: &str, fields: &[String]) -> impl IntoElement {
         let t = &self.theme;
-        let (item, field, vault) = describe_ref(reference);
-        div()
+        let fields: Vec<&str> = fields
+            .iter()
+            .map(String::as_str)
+            .filter(|f| !f.is_empty())
+            .collect();
+        let several = fields.len() > 1;
+        let top = div()
             .flex()
             .items_baseline()
             .gap(px(8.))
@@ -246,10 +271,18 @@ impl ApprovalView {
                 div()
                     .text_color(t.foreground)
                     .font_weight(FontWeight::MEDIUM)
-                    .child(item),
+                    .child(item.to_string()),
             )
-            .when(!field.is_empty(), |d| {
-                d.child(div().text_color(t.muted).child(field))
+            .when(fields.len() == 1, |d| {
+                d.child(div().text_color(t.muted).child(fields[0].to_string()))
+            })
+            .when(several, |d| {
+                d.child(
+                    div()
+                        .text_size(px(t.size(0.917)))
+                        .text_color(t.muted)
+                        .child(format!("{} fields", fields.len())),
+                )
             })
             .child(div().flex_1())
             .when(!vault.is_empty(), |d| {
@@ -257,7 +290,20 @@ impl ApprovalView {
                     div()
                         .text_size(px(t.size(0.917)))
                         .text_color(t.muted)
-                        .child(vault),
+                        .child(vault.to_string()),
+                )
+            });
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .child(top)
+            .when(several, |d| {
+                d.child(
+                    div()
+                        .text_size(px(t.size(0.917)))
+                        .text_color(t.muted)
+                        .child(fields.join(" · ")),
                 )
             })
     }
@@ -293,21 +339,28 @@ impl Render for ApprovalView {
             );
         }
         if !self.prompt.secrets.is_empty() {
-            let mut rows = div().flex().flex_col().gap(px(4.));
-            for reference in &self.prompt.secrets {
-                rows = rows.child(self.secret_row(reference));
+            let mut rows = div()
+                .id("secrets")
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .max_h(px(SECRETS_MAX_HEIGHT))
+                .overflow_y_scroll();
+            for (item, vault, fields) in group_refs(&self.prompt.secrets) {
+                rows = rows.child(self.secret_group(&item, &vault, &fields));
             }
-            let heading = if self.prompt.secrets.len() == 1 {
-                "Secret"
+            let count = self.prompt.secrets.len();
+            let heading = if count == 1 {
+                "Secret".to_string()
             } else {
-                "Secrets"
+                format!("{count} secrets")
             };
             details = details.child(
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(3.))
-                    .child(self.label(heading))
+                    .child(self.label(&heading))
                     .child(rows),
             );
         }
@@ -438,6 +491,29 @@ mod tests {
         assert_eq!(
             describe_ref("op://Work/Server/admin/password?attribute=otp"),
             ("Server".into(), "admin › password".into(), "Work".into())
+        );
+    }
+
+    #[test]
+    fn groups_references_by_item() {
+        let refs: Vec<String> = [
+            "op://Quarry Admin/prod/A",
+            "op://Private/gateway/TOKEN",
+            "op://Quarry Admin/prod/B",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            group_refs(&refs),
+            vec![
+                (
+                    "prod".into(),
+                    "Quarry Admin".into(),
+                    vec!["A".into(), "B".into()]
+                ),
+                ("gateway".into(), "Private".into(), vec!["TOKEN".into()]),
+            ]
         );
     }
 }

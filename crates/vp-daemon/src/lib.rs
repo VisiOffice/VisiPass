@@ -144,6 +144,7 @@ fn who(requester: &Requester) -> String {
     requester
         .agent
         .clone()
+        .or_else(|| requester.origin.clone())
         .unwrap_or_else(|| "An unrecognised process".into())
 }
 
@@ -178,7 +179,11 @@ fn assess(request: &Request, requester: &Requester) -> Assessment {
                     Some(target.clone()),
                 ),
                 Usage::Reveal => (
-                    format!("print {count} where the agent can read them"),
+                    if requester.agent.is_some() {
+                        format!("print {count} where the agent can read them")
+                    } else {
+                        format!("print {count} to its output")
+                    },
                     vec![],
                     None,
                 ),
@@ -1158,6 +1163,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
         let requester = Requester {
             pid,
             agent: Some(APP_LABEL.into()),
+            origin: None,
             task: None,
             project: procinfo::Project {
                 root: "(desktop app)".into(),

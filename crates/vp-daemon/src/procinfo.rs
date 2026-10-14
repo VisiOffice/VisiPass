@@ -33,6 +33,9 @@ pub struct Requester {
     pub pid: u32,
     /// The known agent above the requester, if any (e.g. "Claude Code").
     pub agent: Option<String>,
+    /// With no known agent: the program that asked, for the prompt only (e.g.
+    /// "kamal (in your terminal)"). Never part of a grant.
+    pub origin: Option<String>,
     /// What "this task" binds to: the agent process, else the requester's parent.
     pub task: Option<ProcessId>,
     pub project: Project,
@@ -90,14 +93,18 @@ const AGENTS: [(&str, &str); 15] = [
     ("vivaldi-bin", "Vivaldi"),
 ];
 
-fn agent_name(pid: u32) -> Option<&'static str> {
-    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+fn argv(pid: u32) -> Vec<String> {
     let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
-    let argv: Vec<String> = cmdline
+    cmdline
         .split(|b| *b == 0)
         .filter(|a| !a.is_empty())
         .map(|a| String::from_utf8_lossy(a).into_owned())
-        .collect();
+        .collect()
+}
+
+fn agent_name(pid: u32) -> Option<&'static str> {
+    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+    let argv = argv(pid);
     let exe = std::fs::read_link(format!("/proc/{pid}/exe"))
         .ok()
         .map(|p| p.to_string_lossy().into_owned());
@@ -112,6 +119,73 @@ fn agent_name(pid: u32) -> Option<&'static str> {
         .iter()
         .find(|(name, _)| candidates.iter().flatten().any(|c| c == name))
         .map(|(_, label)| *label)
+}
+
+/// Passed over when naming the program that asked: they only carry the request along.
+const CARRIERS: [&str; 16] = [
+    "sh", "bash", "zsh", "fish", "dash", "nu", "env", "mise", "sudo", "timeout", "xargs", "nohup",
+    "vp", "make", "systemd", "init",
+];
+/// `ruby .../kamal` is kamal.
+const INTERPRETERS: [&str; 9] = [
+    "ruby", "node", "python", "python3", "perl", "bun", "deno", "bundle", "npx",
+];
+const TERMINALS: [&str; 10] = [
+    "alacritty",
+    "ghostty",
+    "kitty",
+    "foot",
+    "footclient",
+    "wezterm-gui",
+    "konsole",
+    "gnome-terminal-server",
+    "xterm",
+    "tmux: server",
+];
+
+/// The program name a person would recognise for `pid`.
+fn program(pid: u32) -> Option<String> {
+    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+    let argv = argv(pid);
+    let first = argv
+        .first()
+        .map(|a| base(a).trim_start_matches('-').to_string());
+    let name = first
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| comm.trim().into());
+    if INTERPRETERS.contains(&name.as_str()) || name.starts_with("python3.") {
+        // The first argument that is not an option is the script.
+        if let Some(script) = argv.iter().skip(1).find(|a| !a.starts_with('-')) {
+            // `bundle exec kamal` and `npx exec x` name the program one word later.
+            if base(script) != "exec" {
+                return Some(base(script).to_string());
+            }
+            return argv
+                .iter()
+                .skip(2)
+                .find(|a| !a.starts_with('-'))
+                .map(|a| base(a).to_string());
+        }
+    }
+    Some(name)
+}
+
+/// "kamal (in your terminal)", "kamal", or "Your terminal" for a command typed there.
+/// `names` are the requester's ancestors, nearest first.
+fn origin_of(names: &[String]) -> Option<String> {
+    let terminal = names
+        .iter()
+        .position(|n| TERMINALS.contains(&n.as_str()) || n.starts_with("tmux"));
+    let asker = names[..terminal.unwrap_or(names.len())]
+        .iter()
+        .find(|n| !CARRIERS.contains(&n.as_str()))
+        .cloned();
+    match (asker, terminal) {
+        (Some(asker), Some(_)) => Some(format!("{asker} (in your terminal)")),
+        (Some(asker), None) => Some(asker),
+        (None, Some(_)) => Some("Your terminal".into()),
+        (None, None) => None,
+    }
 }
 
 fn git_root(start: &Path) -> Option<PathBuf> {
@@ -172,9 +246,13 @@ pub fn identify(pid: u32) -> Requester {
     let mut agent = None;
     let mut task = None;
     let parent = stat(pid).map(|s| s.ppid);
+    let mut ancestors = Vec::new();
     let mut current = pid;
     for _ in 0..64 {
         let Some(s) = stat(current) else { break };
+        if current != pid {
+            ancestors.push(current);
+        }
         if current != pid
             && let Some(name) = agent_name(current)
         {
@@ -198,9 +276,16 @@ pub fn identify(pid: u32) -> Requester {
             })
         });
     }
+    let origin = if agent.is_none() {
+        let names: Vec<String> = ancestors.iter().filter_map(|p| program(*p)).collect();
+        origin_of(&names)
+    } else {
+        None
+    };
     Requester {
         pid,
         agent,
+        origin,
         task,
         project: project_of(&cwd),
         token: None,
@@ -210,6 +295,24 @@ pub fn identify(pid: u32) -> Requester {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_the_program_that_asked() {
+        let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            origin_of(&names(&["sh", "kamal", "bash", "ghostty", "systemd"])).as_deref(),
+            Some("kamal (in your terminal)")
+        );
+        assert_eq!(
+            origin_of(&names(&["bash", "ghostty"])).as_deref(),
+            Some("Your terminal")
+        );
+        assert_eq!(
+            origin_of(&names(&["sh", "cron", "systemd"])).as_deref(),
+            Some("cron")
+        );
+        assert_eq!(origin_of(&names(&["sh", "bash", "systemd"])), None);
+    }
 
     #[test]
     fn strips_remote_credentials() {
