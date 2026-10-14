@@ -60,6 +60,9 @@ SECRETS=$(vp kamal-fetch --from "op://Vault/Item" RAILS_MASTER_KEY POSTGRES_PASS
 RAILS_MASTER_KEY=$(kamal secrets extract RAILS_MASTER_KEY $SECRETS)
 ```
 
+A missing or empty field stops the deploy. If a secret is meant to be blank for now, add
+`--allow-empty NAME` for it rather than a `|| echo ""` fallback.
+
 Then run `kamal deploy` as usual: the human approves once. Never run `vp kamal-fetch` yourself
 outside a deploy, and never `kamal secrets print`: both put the values in your context.
 

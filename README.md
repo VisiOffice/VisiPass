@@ -83,7 +83,8 @@ KAMAL_REGISTRY_PASSWORD=$(kamal secrets extract KAMAL_REGISTRY_PASSWORD $SECRETS
 
 A bare name is a field of the `--from` item; `NAME=op://…` takes any other reference. If anything
 is missing or refused, `vp` prints nothing and `kamal secrets extract` stops the deploy, instead
-of Kamal shipping a blank secret as it does when a `$(op read …)` line fails. Values containing
+of Kamal shipping a blank secret as it does when a `$(op read …)` line fails. A field that is
+empty in the vault stops it too; name each one that may be blank with `--allow-empty NAME`. Values containing
 `$` arrive intact (Kamal expands `$NAME` inside a plain `$(op read …)` result). Kamal itself drops
 a trailing newline from any value.
 

@@ -7,7 +7,9 @@
 //! ```
 //!
 //! `extract` runs inside Kamal and raises on a missing name, so a failed fetch
-//! stops the deploy instead of shipping a blank secret.
+//! stops the deploy instead of shipping a blank secret. A field that exists but
+//! is empty stops it too, unless it is named with `--allow-empty`: an empty
+//! string boots a healthy container just as well as the real value.
 //!
 //! The output survives three rounds of rewriting inside Kamal, checked against
 //! Kamal 2.12 and dotenv 3.2:
@@ -66,6 +68,40 @@ pub fn plan(from: Option<&str>, specs: &[String]) -> Result<Vec<(String, SecretR
         planned.push((name.to_string(), SecretRef::parse(&reference)?));
     }
     Ok(planned)
+}
+
+/// Every `--allow-empty` name is one being fetched; checked before anything is asked.
+pub fn check_allowed(planned: &[(String, SecretRef)], allowed: &[String]) -> Result<(), Failure> {
+    match allowed
+        .iter()
+        .find(|a| !planned.iter().any(|(name, _)| name == *a))
+    {
+        Some(stray) => Err(Failure::new(format!(
+            "--allow-empty {stray} names a secret that is not being fetched"
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// Refuses empty values except the names in `allowed`.
+pub fn check_empty(secrets: &[(&str, &str)], allowed: &[String]) -> Result<(), Failure> {
+    let empty: Vec<&str> = secrets
+        .iter()
+        .filter(|(name, value)| {
+            value.trim_end_matches(['\n', '\r']).is_empty() && !allowed.iter().any(|a| a == name)
+        })
+        .map(|(name, _)| *name)
+        .collect();
+    match empty.as_slice() {
+        [] => Ok(()),
+        [one] => Err(Failure::new(format!(
+            "{one} is empty in the vault, so nothing was fetched. Fill it in, or pass --allow-empty {one} if a blank value is intended"
+        ))),
+        many => Err(Failure::new(format!(
+            "{} are empty in the vault, so nothing was fetched. Fill them in, or pass --allow-empty NAME for each one that is meant to be blank",
+            many.join(", ")
+        ))),
+    }
 }
 
 /// A name Kamal can extract and a shell can export.
@@ -202,6 +238,21 @@ mod tests {
         assert!(plan(Some("op://V/I"), &["A".into(), "A".into()]).is_err());
         assert!(plan(Some("op://V/I"), &["a-b".into()]).is_err());
         assert!(plan(Some("Vault/Item"), &["A".into()]).is_err());
+    }
+
+    #[test]
+    fn empty_values_stop_the_fetch_unless_allowed() {
+        let secrets = [("A", "1"), ("B", ""), ("C", "\n")];
+        let err = check_empty(&secrets, &[]).unwrap_err().to_string();
+        assert!(err.contains("B, C are empty"), "{err}");
+        assert!(check_empty(&secrets, &["B".into()]).is_err());
+        assert!(check_empty(&secrets, &["B".into(), "C".into()]).is_ok());
+        let planned = plan(Some("op://V/I"), &["B".into()]).unwrap();
+        assert!(check_allowed(&planned, &["B".into()]).is_ok());
+        assert!(
+            check_allowed(&planned, &["D".into()]).is_err(),
+            "a typo in --allow-empty is caught"
+        );
     }
 
     #[test]

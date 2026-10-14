@@ -215,11 +215,14 @@ enum Commands {
     /// Secrets for a Kamal deploy, as `kamal secrets fetch` prints them. In .kamal/secrets:
     ///   SECRETS=$(vp kamal-fetch --from "op://Vault/Item" RAILS_MASTER_KEY POSTGRES_PASSWORD)
     ///   RAILS_MASTER_KEY=$(kamal secrets extract RAILS_MASTER_KEY $SECRETS)
-    /// One approval per deploy; a missing secret stops the deploy
+    /// One approval per deploy; a missing or empty secret stops the deploy
     KamalFetch {
         /// The item whose fields the bare names are, e.g. "op://Vault/Item"
         #[arg(long)]
         from: Option<String>,
+        /// A NAME that may be blank in the vault; repeat for each
+        #[arg(long = "allow-empty", value_name = "NAME", num_args = 1)]
+        allow_empty: Vec<String>,
         /// NAME (a field of --from) or NAME=op://vault/item/field
         #[arg(required = true)]
         secrets: Vec<String>,
@@ -804,10 +807,12 @@ fn execute(command: Commands) -> Result<i32, Failure> {
         Commands::EmergencyKit => print(&client::call(Request::EmergencyKit)?),
         Commands::KamalFetch {
             from,
+            allow_empty,
             secrets,
             purpose,
         } => {
             let planned = vp_core::kamal::plan(from.as_deref(), &secrets)?;
+            vp_core::kamal::check_allowed(&planned, &allow_empty)?;
             let refs: Vec<SecretRef> = planned.iter().map(|(_, r)| r.clone()).collect();
             let values = resolve(
                 &refs,
@@ -818,6 +823,7 @@ fn execute(command: Commands) -> Result<i32, Failure> {
                 .iter()
                 .map(|(name, reference)| (name.as_str(), values[reference].expose()))
                 .collect();
+            vp_core::kamal::check_empty(&pairs, &allow_empty)?;
             let output = vp_core::kamal::fetch_output(&pairs);
             let mut stdout = std::io::stdout().lock();
             let _ = stdout

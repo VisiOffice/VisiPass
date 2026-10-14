@@ -1147,5 +1147,18 @@ fn kamal_fetch_is_one_approval_in_kamals_format_and_fails_closed() {
     );
     let bare = world.vp(&["kamal-fetch", "password"], None);
     assert!(text(&bare.stderr).contains("--from"));
+    let stray = world.vp(
+        &[
+            "kamal-fetch",
+            "--allow-empty",
+            "SENTRY_DSN",
+            "--from",
+            "op://Dev/Stripe Dashboard",
+            "password",
+        ],
+        None,
+    );
+    assert!(text(&stray.stderr).contains("--allow-empty SENTRY_DSN names a secret"));
+    assert!(text(&stray.stdout).is_empty());
     world.assert_contained();
 }
