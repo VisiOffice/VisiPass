@@ -3,7 +3,8 @@
 //! Approval is never a command an agent can run: a `vp approve` would be one
 //! shell call away from the agent itself. The human answers in a window the
 //! daemon launches and alone holds the output pipe of: `visipass-prompt` (GPUI,
-//! styled after the desktop theme), else zenity. When visipassd runs in the
+//! styled after the desktop theme), else zenity, or on macOS an AppleScript
+//! dialog run by the system's `osascript`. When visipassd runs in the
 //! foreground of a terminal a person sits at, with no graphical session, it asks
 //! there.
 //!
@@ -129,12 +130,21 @@ pub enum Desktop {
     /// `visipass-prompt`, found next to visipassd or in the system directories.
     Native(PathBuf),
     Zenity(PathBuf),
+    /// macOS: `choose from list` and `display dialog`, run by /usr/bin/osascript.
+    AppleScript,
     Terminal,
     Unavailable,
 }
 
 /// Where VisiPass runs its own helpers from: never PATH, which the caller sets.
+#[cfg(not(target_os = "macos"))]
 const SYSTEM_DIRS: [&str; 2] = ["/usr/bin", "/usr/local/bin"];
+/// Homebrew leaves /usr/local/bin writable by the user on macOS.
+#[cfg(target_os = "macos")]
+const SYSTEM_DIRS: [&str; 1] = ["/usr/bin"];
+
+/// Part of the system on macOS, under System Integrity Protection.
+const OSASCRIPT: &str = "/usr/bin/osascript";
 
 /// A helper program the daemon trusts with approvals, the app socket or the
 /// Emergency Kit: beside visipassd, else in the system directories.
@@ -212,6 +222,9 @@ impl Desktop {
     pub fn detect(display: bool, human_terminal: bool) -> Self {
         if display && let Some(native) = trusted_program("visipass-prompt") {
             return Desktop::Native(native);
+        }
+        if cfg!(target_os = "macos") && std::path::Path::new(OSASCRIPT).is_file() {
+            return Desktop::AppleScript;
         }
         match trusted_program("zenity") {
             Some(zenity) if display => Desktop::Zenity(zenity),
@@ -305,6 +318,53 @@ impl Desktop {
                     "No one answered the approval prompt within 2 minutes. Ask the human to approve, then run the command again",
                 ));
             }
+            _ => Decision::Deny,
+        })
+    }
+
+    /// The prompt text and labels go in as arguments to `on run`, never into the
+    /// script, so nothing in them is AppleScript. Deny is preselected, so Return
+    /// and Escape both deny.
+    async fn applescript(prompt: &Prompt) -> Result<Decision, Failure> {
+        const SCRIPT: &str = r#"on run argv
+    set choices to items 2 thru -1 of argv
+    activate
+    set picked to choose from list choices with title "VisiPass" with prompt (item 1 of argv) default items {item 1 of choices} OK button name "Choose" cancel button name "Deny"
+    if picked is false then return item 1 of choices
+    return item 1 of picked
+end run"#;
+        let mut child = tokio::process::Command::new(OSASCRIPT)
+            .args(["-e", SCRIPT])
+            .arg(plain(prompt))
+            .args(["Deny", ONCE, TASK, HOURS, ALWAYS])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|_| Failure::new("Could not show the approval prompt"))?;
+        let mut stdout = child.stdout.take();
+        let answered = tokio::time::timeout(TIMEOUT, async {
+            use tokio::io::AsyncReadExt;
+            let mut out = String::new();
+            if let Some(stdout) = stdout.as_mut() {
+                let _ = stdout.read_to_string(&mut out).await;
+            }
+            let _ = child.wait().await;
+            out
+        })
+        .await
+        .map_err(|_| {
+            Failure::new(
+                "No one answered the approval prompt within 2 minutes. Ask the human to approve, then run the command again",
+            )
+        })?;
+        Ok(match answered.trim() {
+            ONCE => Decision::Once,
+            TASK => Decision::Task,
+            HOURS => Decision::Hours(STANDING_HOURS),
+            ALWAYS => Decision::Always,
+            // Deny, Escape, an error, a crash: all deny.
             _ => Decision::Deny,
         })
     }
@@ -441,6 +501,57 @@ impl Desktop {
         Ok((output.status.success() && !value.is_blank()).then_some(value))
     }
 
+    /// A hidden-answer dialog; the value comes back on osascript's stdout only.
+    async fn applescript_paste(prompt: &Prompt) -> Result<Option<Secret>, Failure> {
+        const SCRIPT: &str = r#"on run argv
+    activate
+    try
+        set answer to display dialog (item 1 of argv) with title "VisiPass" default answer "" with hidden answer buttons {"Cancel", item 2 of argv} default button 2 cancel button 1 giving up after (item 3 of argv as integer)
+    on error number -128
+        return ""
+    end try
+    if gave up of answer then return character id 5
+    return text returned of answer
+end run"#;
+        let spec = prompt.paste.clone().unwrap_or_default();
+        if matches!(spec.mode, PasteMode::ShowKey { .. }) {
+            // The key would have to go into the dialog as an argument, which
+            // any process can read; the terminal shows it instead.
+            return Err(Failure::new(
+                "On macOS, create the vault from a terminal: run `vp daemon` there, then `vp init`",
+            ));
+        }
+        let (instruction, ok_label) = spec.instruction();
+        let text = if matches!(spec.mode, PasteMode::Secret) {
+            format!("{}\n\n{instruction}", plain(prompt).trim_end())
+        } else {
+            instruction
+        };
+        let output = tokio::process::Command::new(OSASCRIPT)
+            .args(["-e", SCRIPT])
+            .arg(text)
+            .arg(ok_label)
+            .arg(TIMEOUT.as_secs().to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .output()
+            .await
+            .map_err(|_| Failure::new("Could not show the paste window"))?;
+        // osascript ends its result with one newline.
+        let value = Secret::new(
+            String::from_utf8_lossy(&output.stdout)
+                .strip_suffix('\n')
+                .unwrap_or_default()
+                .to_string(),
+        );
+        if value.expose() == "\u{5}" {
+            return Err(Failure::new(NO_ANSWER));
+        }
+        Ok((output.status.success() && !value.is_blank()).then_some(value))
+    }
+
     async fn terminal_paste(prompt: &Prompt) -> Result<Option<Secret>, Failure> {
         let spec = prompt.paste.clone().unwrap_or_default();
         let text = plain(prompt);
@@ -564,6 +675,7 @@ impl Approver for Desktop {
         match self {
             Desktop::Native(_) => "VisiPass window",
             Desktop::Zenity(_) => "desktop dialog (zenity)",
+            Desktop::AppleScript => "macOS dialog",
             Desktop::Terminal => "visipassd terminal",
             Desktop::Unavailable => "none",
         }
@@ -574,6 +686,7 @@ impl Approver for Desktop {
         match self {
             Desktop::Native(program) => Self::native(program, prompt).await,
             Desktop::Zenity(zenity) => Self::zenity(zenity, prompt).await,
+            Desktop::AppleScript => Self::applescript(prompt).await,
             Desktop::Terminal => tokio::time::timeout(TIMEOUT, Self::terminal(prompt))
                 .await
                 .map_err(|_| {
@@ -590,6 +703,7 @@ impl Approver for Desktop {
         match self {
             Desktop::Native(program) => Self::native_paste(program, prompt).await,
             Desktop::Zenity(zenity) => Self::zenity_paste(zenity, prompt).await,
+            Desktop::AppleScript => Self::applescript_paste(prompt).await,
             Desktop::Terminal => tokio::time::timeout(TIMEOUT, Self::terminal_paste(prompt))
                 .await
                 .map_err(|_| Failure::new(NO_ANSWER))?,

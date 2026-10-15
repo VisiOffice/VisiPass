@@ -286,13 +286,7 @@ mod tests {
         let mut grants = Grants::load(dir.path().join("grants.json"));
         // This test process stands in for a live agent process.
         let pid = std::process::id();
-        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
-        let start = stat[stat.rfind(')').unwrap() + 1..]
-            .split_whitespace()
-            .nth(19)
-            .unwrap()
-            .parse()
-            .unwrap();
+        let start = crate::procinfo::start_time(pid).unwrap();
         let task = ProcessId { pid, start };
         let mut first = requester("Claude Code", "/p");
         first.task = Some(task);

@@ -395,8 +395,7 @@ pub fn human_terminal(pid: u32) -> bool {
         if current != pid && agent_name(current).is_some() {
             return false;
         }
-        let comm = std::fs::read_to_string(format!("/proc/{current}/comm")).unwrap_or_default();
-        seated |= seat(comm.trim());
+        seated |= seat(&comm(current).unwrap_or_default());
         if s.ppid <= 1 {
             break;
         }
@@ -406,6 +405,7 @@ pub fn human_terminal(pid: u32) -> bool {
 }
 
 /// Where the system installs the Chromium-family browsers the extension runs in.
+#[cfg(target_os = "linux")]
 const BROWSER_DIRS: [&str; 8] = [
     "/opt/google/chrome",
     "/opt/google/chrome-beta",
@@ -420,15 +420,82 @@ const BROWSER_DIRS: [&str; 8] = [
 /// Whether `pid`'s parent is an installed browser: the browser starts the
 /// native-messaging host itself. Judged by the parent's executable, which a
 /// renamed process (`exec -a chrome`) cannot change and a user cannot write.
+#[cfg(target_os = "linux")]
 pub fn started_by_browser(pid: u32) -> bool {
     let Some(parent) = stat(pid).map(|s| s.ppid) else {
         return false;
     };
-    std::fs::read_link(format!("/proc/{parent}/exe")).is_ok_and(|exe| {
+    exe(parent).is_some_and(|exe| {
         BROWSER_DIRS
             .iter()
-            .any(|dir| exe.parent() == Some(Path::new(dir)))
+            .any(|dir| Path::new(&exe).parent() == Some(Path::new(dir)))
     })
+}
+
+/// Browsers on macOS, by the team that signs them. Apps in /Applications are
+/// usually owned by the user, so the path alone proves nothing: the running
+/// parent must pass `codesign` against its maker's team. Chromium is unsigned
+/// on macOS and is not accepted.
+#[cfg(target_os = "macos")]
+const BROWSER_TEAMS: [(&str, &str); 2] = [
+    ("Google Chrome", "EQHXZ8M8AV"),
+    ("Brave Browser", "KL8N8XSYF4"),
+];
+
+/// See the Linux version. A verdict is kept per browser process (pid and start
+/// time), so `codesign` runs once per browser launch, not per request.
+#[cfg(target_os = "macos")]
+pub fn started_by_browser(pid: u32) -> bool {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static VERDICTS: Mutex<Option<HashMap<(u32, u64), bool>>> = Mutex::new(None);
+    let Some(parent) = stat(pid).map(|s| s.ppid) else {
+        return false;
+    };
+    let Some(start) = stat(parent).map(|s| s.start) else {
+        return false;
+    };
+    if let Some(known) = VERDICTS
+        .lock()
+        .ok()
+        .and_then(|v| v.as_ref()?.get(&(parent, start)).copied())
+    {
+        return known;
+    }
+    let Some(exe) = exe(parent) else {
+        return false;
+    };
+    let Some((_, team)) = BROWSER_TEAMS
+        .iter()
+        .find(|(name, _)| exe == format!("/Applications/{name}.app/Contents/MacOS/{name}"))
+    else {
+        return false;
+    };
+    // The running process, by pid: its signature as loaded, not the file on disk.
+    let signed = std::process::Command::new("/usr/bin/codesign")
+        .arg("--verify")
+        .arg(format!(
+            "-R=anchor apple generic and certificate leaf[subject.OU] = \"{team}\""
+        ))
+        .arg(parent.to_string())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if let Ok(mut verdicts) = VERDICTS.lock() {
+        verdicts
+            .get_or_insert_default()
+            .insert((parent, start), signed);
+    }
+    signed
+}
+
+/// When `pid` started, in the platform's own units; for tests that stand in
+/// for a live agent process.
+#[cfg(test)]
+pub(crate) fn start_time(pid: u32) -> Option<u64> {
+    stat(pid).map(|s| s.start)
 }
 
 fn git_root(start: &Path) -> Option<PathBuf> {
@@ -471,6 +538,11 @@ fn origin(root: &Path) -> Option<String> {
     None
 }
 
+/// The directory `pid` runs in.
+pub fn working_dir(pid: u32) -> Option<PathBuf> {
+    os::cwd(pid)
+}
+
 pub fn project_of(cwd: &Path) -> Project {
     match git_root(cwd) {
         Some(root) => Project {
@@ -502,15 +574,14 @@ pub fn identify(pid: u32) -> Requester {
             && let Some(name) = agent_name(current)
         {
             agent = Some(name.to_string());
-            agent_cwd = std::fs::read_link(format!("/proc/{current}/cwd")).ok();
+            agent_cwd = os::cwd(current);
             task = Some(ProcessId {
                 pid: current,
                 start: s.start,
             });
             break;
         }
-        let comm = std::fs::read_to_string(format!("/proc/{current}/comm")).unwrap_or_default();
-        seated |= seat(comm.trim());
+        seated |= seat(&comm(current).unwrap_or_default());
         if s.ppid <= 1 {
             break;
         }
