@@ -60,22 +60,202 @@ impl Requester {
     }
 }
 
+use os::{argv, comm, cwd, exe, stat};
+
 struct Stat {
     ppid: u32,
+    /// Only ever compared for equality: clock ticks since boot on Linux,
+    /// microseconds since the epoch on macOS.
     start: u64,
 }
 
-fn stat(pid: u32) -> Option<Stat> {
-    let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // comm may contain spaces and parentheses; the fields start after the last ')'.
-    let fields: Vec<&str> = text
-        .get(text.rfind(')')? + 1..)?
-        .split_whitespace()
-        .collect();
-    Some(Stat {
-        ppid: fields.get(1)?.parse().ok()?,
-        start: fields.get(19)?.parse().ok()?,
-    })
+/// What we read about another process, per platform. Every function returns
+/// nothing rather than failing when the process is gone or not readable.
+#[cfg(target_os = "linux")]
+mod os {
+    use super::Stat;
+    use std::path::PathBuf;
+
+    pub(super) fn stat(pid: u32) -> Option<Stat> {
+        let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        // comm may contain spaces and parentheses; the fields start after the last ')'.
+        let fields: Vec<&str> = text
+            .get(text.rfind(')')? + 1..)?
+            .split_whitespace()
+            .collect();
+        Some(Stat {
+            ppid: fields.get(1)?.parse().ok()?,
+            start: fields.get(19)?.parse().ok()?,
+        })
+    }
+
+    pub(super) fn comm(pid: u32) -> Option<String> {
+        std::fs::read_to_string(format!("/proc/{pid}/comm"))
+            .ok()
+            .map(|c| c.trim().to_string())
+    }
+
+    pub(super) fn argv(pid: u32) -> Vec<String> {
+        let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+        cmdline
+            .split(|b| *b == 0)
+            .filter(|a| !a.is_empty())
+            .map(|a| String::from_utf8_lossy(a).into_owned())
+            .collect()
+    }
+
+    pub(super) fn exe(pid: u32) -> Option<String> {
+        std::fs::read_link(format!("/proc/{pid}/exe"))
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
+    }
+
+    pub(super) fn cwd(pid: u32) -> Option<PathBuf> {
+        std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+    }
+}
+
+/// libproc and sysctl. They read same-user processes without extra
+/// entitlements, which is all the daemon needs: it only serves its own user.
+#[cfg(target_os = "macos")]
+mod os {
+    use super::Stat;
+    use std::ffi::CStr;
+    use std::mem::{MaybeUninit, size_of};
+    use std::path::PathBuf;
+
+    fn bsdinfo(pid: u32) -> Option<libc::proc_bsdinfo> {
+        let pid = libc::c_int::try_from(pid).ok()?;
+        let mut info = MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+        let size = size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        // SAFETY: the buffer is exactly `size` bytes and the kernel writes at most that.
+        let written = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        // SAFETY: a full-size write initialised the struct (and it was zeroed before).
+        (written == size).then(|| unsafe { info.assume_init() })
+    }
+
+    fn c_text(chars: &[libc::c_char]) -> Option<String> {
+        // SAFETY: c_char and u8 have the same size and alignment.
+        let bytes: &[u8] =
+            unsafe { std::slice::from_raw_parts(chars.as_ptr().cast(), chars.len()) };
+        let text = CStr::from_bytes_until_nul(bytes).ok()?.to_string_lossy();
+        (!text.is_empty()).then(|| text.into_owned())
+    }
+
+    pub(super) fn stat(pid: u32) -> Option<Stat> {
+        let info = bsdinfo(pid)?;
+        Some(Stat {
+            ppid: info.pbi_ppid,
+            start: info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec,
+        })
+    }
+
+    pub(super) fn comm(pid: u32) -> Option<String> {
+        // pbi_name is the longer form; pbi_comm is cut at 16 bytes.
+        let info = bsdinfo(pid)?;
+        c_text(&info.pbi_name).or_else(|| c_text(&info.pbi_comm))
+    }
+
+    pub(super) fn argv(pid: u32) -> Vec<String> {
+        procargs(pid).unwrap_or_default()
+    }
+
+    /// KERN_PROCARGS2 is argc (a C int), the executable path, NUL padding,
+    /// then argc NUL-terminated arguments, then the environment (never read).
+    fn procargs(pid: u32) -> Option<Vec<String>> {
+        let mut mib = [
+            libc::CTL_KERN,
+            libc::KERN_PROCARGS2,
+            libc::c_int::try_from(pid).ok()?,
+        ];
+        let mut size: libc::size_t = 0;
+        // SAFETY: a null buffer asks only for the size.
+        let sized = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                3,
+                std::ptr::null_mut(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if sized != 0 || size == 0 {
+            return None;
+        }
+        let mut buffer = vec![0u8; size];
+        // SAFETY: the buffer is `size` bytes; the kernel updates `size` to what it wrote.
+        let read = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                3,
+                buffer.as_mut_ptr().cast(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if read != 0 {
+            return None;
+        }
+        buffer.truncate(size);
+        let argc = usize::try_from(i32::from_ne_bytes(buffer.get(..4)?.try_into().ok()?)).ok()?;
+        let rest = buffer.get(4..)?;
+        let path_end = rest.iter().position(|b| *b == 0)?;
+        let args = rest[path_end..]
+            .iter()
+            .position(|b| *b != 0)
+            .map_or(&[][..], |start| &rest[path_end + start..]);
+        Some(
+            args.split(|b| *b == 0)
+                .take(argc)
+                .filter(|a| !a.is_empty())
+                .map(|a| String::from_utf8_lossy(a).into_owned())
+                .collect(),
+        )
+    }
+
+    pub(super) fn exe(pid: u32) -> Option<String> {
+        let pid = libc::c_int::try_from(pid).ok()?;
+        let mut buffer = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        // SAFETY: the buffer is the size we pass.
+        let len =
+            unsafe { libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+        let len = usize::try_from(len).ok().filter(|l| *l > 0)?;
+        Some(String::from_utf8_lossy(&buffer[..len]).into_owned())
+    }
+
+    pub(super) fn cwd(pid: u32) -> Option<PathBuf> {
+        let pid = libc::c_int::try_from(pid).ok()?;
+        let mut info = MaybeUninit::<libc::proc_vnodepathinfo>::zeroed();
+        let size = size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
+        // SAFETY: as in bsdinfo.
+        let written = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDVNODEPATHINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        if written != size {
+            return None;
+        }
+        // SAFETY: fully written above.
+        let info = unsafe { info.assume_init() };
+        // vip_path is a MAXPATHLEN char array, split into rows by libc.
+        let path = info.pvi_cdir.vip_path.as_flattened();
+        c_text(path).map(PathBuf::from)
+    }
 }
 
 fn base(path: &str) -> &str {
@@ -86,7 +266,7 @@ fn base(path: &str) -> &str {
 }
 
 // Browsers too: the extension's native-messaging host runs under one.
-const AGENTS: [(&str, &str); 15] = [
+const AGENTS: [(&str, &str); 18] = [
     ("claude", "Claude Code"),
     ("codex", "Codex"),
     ("gemini", "Gemini CLI"),
@@ -102,26 +282,19 @@ const AGENTS: [(&str, &str); 15] = [
     ("chromium", "Chromium"),
     ("brave", "Brave"),
     ("vivaldi-bin", "Vivaldi"),
+    // macOS app executables.
+    ("Google Chrome", "Chrome"),
+    ("Chromium", "Chromium"),
+    ("Brave Browser", "Brave"),
 ];
 
-fn argv(pid: u32) -> Vec<String> {
-    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
-    cmdline
-        .split(|b| *b == 0)
-        .filter(|a| !a.is_empty())
-        .map(|a| String::from_utf8_lossy(a).into_owned())
-        .collect()
-}
-
 fn agent_name(pid: u32) -> Option<&'static str> {
-    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+    let comm = comm(pid).unwrap_or_default();
     let argv = argv(pid);
-    let exe = std::fs::read_link(format!("/proc/{pid}/exe"))
-        .ok()
-        .map(|p| p.to_string_lossy().into_owned());
+    let exe = exe(pid);
     // Node and Python agents run as `node .../claude` or `python .../aider`, so argv[1] counts too.
     let candidates = [
-        Some(comm.trim()),
+        Some(comm.as_str()),
         argv.first().map(|a| base(a)),
         argv.get(1).map(|a| base(a)),
         exe.as_deref().map(base),
@@ -133,15 +306,16 @@ fn agent_name(pid: u32) -> Option<&'static str> {
 }
 
 /// Passed over when naming the program that asked: they only carry the request along.
-const CARRIERS: [&str; 16] = [
+/// `login` sits between a macOS terminal and its shell.
+const CARRIERS: [&str; 17] = [
     "sh", "bash", "zsh", "fish", "dash", "nu", "env", "mise", "sudo", "timeout", "xargs", "nohup",
-    "vp", "make", "systemd", "init",
+    "vp", "make", "systemd", "init", "login",
 ];
 /// `ruby .../kamal` is kamal.
 const INTERPRETERS: [&str; 9] = [
     "ruby", "node", "python", "python3", "perl", "bun", "deno", "bundle", "npx",
 ];
-const TERMINALS: [&str; 10] = [
+const TERMINALS: [&str; 12] = [
     "alacritty",
     "ghostty",
     "kitty",
@@ -152,18 +326,18 @@ const TERMINALS: [&str; 10] = [
     "gnome-terminal-server",
     "xterm",
     "tmux: server",
+    "Terminal",
+    "iTerm2",
 ];
 
 /// The program name a person would recognise for `pid`.
 fn program(pid: u32) -> Option<String> {
-    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+    let comm = comm(pid)?;
     let argv = argv(pid);
     let first = argv
         .first()
         .map(|a| base(a).trim_start_matches('-').to_string());
-    let name = first
-        .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| comm.trim().into());
+    let name = first.filter(|n| !n.is_empty()).unwrap_or(comm);
     if INTERPRETERS.contains(&name.as_str()) || name.starts_with("python3.") {
         // The first argument that is not an option is the script.
         if let Some(script) = argv.iter().skip(1).find(|a| !a.starts_with('-')) {
@@ -184,9 +358,10 @@ fn program(pid: u32) -> Option<String> {
 /// "kamal (in your terminal)", "kamal", or "Your terminal" for a command typed there.
 /// `names` are the requester's ancestors, nearest first.
 fn origin_of(names: &[String]) -> Option<String> {
-    let terminal = names
-        .iter()
-        .position(|n| TERMINALS.contains(&n.as_str()) || n.starts_with("tmux"));
+    let terminal = names.iter().position(|n| {
+        // iTerm2 runs shells under an `iTermServer-<version>` helper.
+        TERMINALS.contains(&n.as_str()) || n.starts_with("tmux") || n.starts_with("iTermServer")
+    });
     let asker = names[..terminal.unwrap_or(names.len())]
         .iter()
         .find(|n| !CARRIERS.contains(&n.as_str()))
@@ -310,7 +485,7 @@ pub fn project_of(cwd: &Path) -> Project {
 }
 
 pub fn identify(pid: u32) -> Requester {
-    let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).unwrap_or_else(|_| PathBuf::from("/"));
+    let cwd = cwd(pid).unwrap_or_else(|| PathBuf::from("/"));
     let mut agent = None;
     let mut task = None;
     let mut agent_cwd = None;
@@ -405,6 +580,14 @@ mod tests {
             Some("cron")
         );
         assert_eq!(origin_of(&names(&["sh", "bash", "systemd"])), None);
+        assert_eq!(
+            origin_of(&names(&["zsh", "kamal", "zsh", "login", "Terminal"])).as_deref(),
+            Some("kamal (in your terminal)")
+        );
+        assert_eq!(
+            origin_of(&names(&["zsh", "login", "iTermServer-3.5.14", "iTerm2"])).as_deref(),
+            Some("Your terminal")
+        );
     }
 
     #[test]
