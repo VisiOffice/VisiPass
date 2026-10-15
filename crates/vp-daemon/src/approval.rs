@@ -220,6 +220,9 @@ impl Desktop {
     /// visipassd runs in the foreground of a terminal a person sits at, with no
     /// agent above it ([`crate::procinfo::human_terminal`]).
     pub fn detect(display: bool, human_terminal: bool) -> Self {
+        // macOS has no display socket to find: the window server is the login session.
+        // Over SSH the window cannot open, and a prompt that never answers denies.
+        let display = display || cfg!(target_os = "macos");
         if display && let Some(native) = trusted_program("visipass-prompt") {
             return Desktop::Native(native);
         }
