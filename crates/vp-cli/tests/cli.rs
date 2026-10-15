@@ -329,6 +329,18 @@ fn find_batches_into_one_listing_and_one_detail_fetch() {
 }
 
 #[test]
+fn the_log_names_the_process_and_project_that_asked() {
+    // The daemon learns both from the socket peer, which differs per platform.
+    let world = World::new(&[]);
+    json(&world.vp(&["find", "openai"], None));
+    let log = std::fs::read_to_string(world.path("state/access.log")).unwrap();
+    let entry: serde_json::Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
+    assert_ne!(entry["pid"], 0, "{entry}");
+    let root = world.dir.path().canonicalize().unwrap();
+    assert_eq!(entry["project"], root.to_str().unwrap(), "{entry}");
+}
+
+#[test]
 fn run_masks_output_and_a_standing_grant_skips_the_prompt() {
     let world = World::new(&[Decision::Always]);
     let args = [
