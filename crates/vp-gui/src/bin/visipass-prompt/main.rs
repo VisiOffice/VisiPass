@@ -6,7 +6,8 @@
 //!
 //! On Wayland compositors with layer-shell (Hyprland, Sway, ...) it is a
 //! full-screen overlay with exclusive keyboard focus, like Omarchy's polkit
-//! prompt. Elsewhere it is an ordinary window.
+//! prompt. On macOS it is the same overlay, as a borderless pop-up panel over
+//! the main display. Elsewhere it is an ordinary window.
 //!
 //! `visipass-prompt --demo` shows a sample request, for checking the styling;
 //! `--demo-paste`, `--demo-unlock`, `--demo-new` and `--demo-key` show the paste window's modes.
@@ -14,9 +15,10 @@
 mod paste;
 mod view;
 
+#[cfg(target_os = "linux")]
+use gpui::Bounds;
 use gpui::{
-    App, AppContext, Bounds, Size, WindowBackgroundAppearance, WindowBounds, WindowKind,
-    WindowOptions, px,
+    App, AppContext, Size, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, px,
 };
 use std::io::Read;
 use view::ApprovalView;
@@ -83,6 +85,14 @@ fn options(overlay: bool, cx: &App) -> WindowOptions {
                 ..Default::default()
             });
         }
+        #[cfg(target_os = "macos")]
+        {
+            options.window_background = WindowBackgroundAppearance::Transparent;
+            if let Some(display) = cx.primary_display() {
+                options.window_bounds = Some(WindowBounds::Windowed(display.bounds()));
+            }
+            options.kind = WindowKind::PopUp;
+        }
     } else {
         options.titlebar = Some(gpui::TitlebarOptions {
             title: Some("VisiPass approval".into()),
@@ -147,7 +157,8 @@ fn main() {
         }
     };
     let theme = vp_gui::theme::Theme::load();
-    let wayland = cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some();
+    let overlay = cfg!(target_os = "macos")
+        || (cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some());
 
     gpui_platform::application()
         .with_assets(vp_gui::assets::Assets)
@@ -173,10 +184,13 @@ fn main() {
                 }
             };
             // Prefer the overlay; fall back to a window when the compositor has no layer-shell.
-            if !(wayland && open(true, cx).is_ok()) && open(false, cx).is_err() {
+            if !(overlay && open(true, cx).is_ok()) && open(false, cx).is_err() {
                 eprintln!("visipass-prompt: could not open a window");
                 cx.quit();
             }
+            // A program started from a terminal opens behind it on macOS unless it asks.
+            #[cfg(target_os = "macos")]
+            cx.activate(true);
             cx.on_window_closed(|cx, _| cx.quit()).detach();
         });
 }

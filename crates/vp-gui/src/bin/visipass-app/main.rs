@@ -62,7 +62,10 @@ fn main() {
 /// focus where the compositor supports it (Hyprland, Sway); a small window
 /// elsewhere. It quits itself (after clearing the clipboard if needed).
 fn open_quick(theme: vp_gui::theme::Theme, client: Arc<client::Client>, cx: &mut App) {
+    // `overlay` and `mut` are used only by the layer-shell code on Linux.
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
     let make = |overlay: bool, cx: &mut App| {
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
         let mut options = WindowOptions {
             app_id: Some("visipass-quick".into()),
             window_bounds: Some(WindowBounds::centered(Size::new(px(640.), px(520.)), cx)),

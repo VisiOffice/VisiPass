@@ -136,7 +136,15 @@ fn font_family() -> String {
         .or_else(|| {
             quick("fc-match", &["-f", "%{family[0]}", "monospace"]).filter(|f| !f.is_empty())
         })
-        .unwrap_or_else(|| "monospace".into())
+        .unwrap_or_else(|| {
+            // macOS has no fc-match, and GPUI resolves only real family names there.
+            if cfg!(target_os = "macos") {
+                "Menlo"
+            } else {
+                "monospace"
+            }
+            .into()
+        })
 }
 
 fn hyprland_rounding() -> Option<f32> {
