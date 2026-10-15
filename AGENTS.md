@@ -42,13 +42,14 @@ Security properties. Do not weaken them.
 3. Writes run once, are read back and compared. A failure after a write says "unverified" and is never retried.
 4. No preflight (`op whoami`); the operation is the capability check.
 5. Batch: one `op` call per discovery or consumption command, so one backend prompt covers it.
-6. Values leave the daemon only after a grant covers the exact agent, project, operation and references, or the human approves. Approval is never something an agent can run: no `vp approve`.
-7. Grants never widen silently. A new reference or operation goes back to the human.
+6. Values leave the daemon only after a grant covers the exact agent, project, operation and references, or the human approves. Approval is never something an agent can run: no `vp approve`, and nothing a caller sets (environment, PATH, a terminal it owns) chooses where approvals are asked. visipassd asks in its own terminal only when a person's seat (terminal window, SSH, console login) is above it and no agent is.
+7. Grants never widen silently. A new reference or operation goes back to the human. Write grants name what they cover (creating in a vault, or one login's password); task grants cover only their task; a detached process is not the person at the terminal (`agent_label` "detached"); an agent's project is its session's directory, not the command's.
 8. Every request except status, grant listing and log reading is written to the access log before its result is returned; if the log cannot be written, the request fails.
 9. `vp run` strips VisiPass and 1Password tokens from the child and masks injected values by default.
-10. Never read configuration that changes which program the daemon runs (`op`, `visipass-prompt`, `zenity`) from the environment beyond PATH. `visipass-prompt` is looked up next to visipassd first.
+10. Never read configuration that changes which program the daemon runs from the environment. `op` comes from PATH; the programs trusted with approvals, the app socket or the Emergency Kit (`visipass-prompt`, `zenity`, `visipass-app`, `xdg-open`) only from beside visipassd or /usr/bin, /usr/local/bin. The display is found from the sockets in /run/user/UID, not DISPLAY/WAYLAND_DISPLAY.
 11. Results are JSON on stdout, notices on stderr, `visipass: <message>` with exit 1 for expected errors.
-12. The approval window defaults to Deny (selected on open, Escape denies, closing or crashing denies) and ignores input for its first 700ms.
+12. The approval window defaults to Deny (selected on open, Escape denies, closing or crashing denies) and ignores input for its first 700ms; zenity defaults to Deny too. Prompt text is cleaned (`ApprovalPrompt::cleaned`: no control or invisible characters, capped) before any approver shows it.
+13. Browser requests (match, search, fill) are served only to a host whose parent is an installed browser binary (`procinfo::started_by_browser`). The extension acts only on trusted input (`isTrusted`) with its menu visible (IntersectionObserver v2), fills only the approved origin's documents and only visible fields; page URLs are parsed with the `url` crate (credentials in the URL are refused) and sites compared by the Public Suffix List.
 
 ## Changing things
 

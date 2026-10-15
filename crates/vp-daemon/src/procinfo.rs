@@ -38,14 +38,25 @@ pub struct Requester {
     pub origin: Option<String>,
     /// What "this task" binds to: the agent process, else the requester's parent.
     pub task: Option<ProcessId>,
+    /// With no known agent: whether a person's terminal (a terminal window, SSH,
+    /// a console login) is above the requester. A detached process is not the
+    /// person at the terminal and does not share their grants.
+    pub seated: bool,
     pub project: Project,
     /// Set when the request carried a valid agent token.
     pub token: Option<crate::tokens::TokenRecord>,
 }
 
 impl Requester {
+    /// The grant key for who is asking: the agent, else "unknown" for a command
+    /// in a person's terminal, else "detached" (started with setsid, nohup &, a
+    /// detached tmux), which an agent could otherwise use to pass as the person.
     pub fn agent_label(&self) -> &str {
-        self.agent.as_deref().unwrap_or("unknown")
+        match (&self.agent, self.seated) {
+            (Some(agent), _) => agent,
+            (None, true) => "unknown",
+            (None, false) => "detached",
+        }
     }
 }
 
@@ -188,6 +199,63 @@ fn origin_of(names: &[String]) -> Option<String> {
     }
 }
 
+/// Where a person can be sitting: a terminal emulator's window, an SSH session,
+/// a console login. Not tmux or screen: an agent can start one detached and type
+/// into it.
+fn seat(comm: &str) -> bool {
+    (TERMINALS.contains(&comm) && !comm.starts_with("tmux"))
+        || comm.starts_with("sshd")
+        || comm == "login"
+}
+
+/// Whether `pid` runs in a terminal a person is at: a seat above it and no
+/// coding agent anywhere above it. Decides whether visipassd may ask in its own
+/// terminal; an agent that ran `vp daemon` through `script` or a detached tmux
+/// would otherwise be answering its own approvals.
+pub fn human_terminal(pid: u32) -> bool {
+    let mut seated = false;
+    let mut current = pid;
+    for _ in 0..64 {
+        let Some(s) = stat(current) else { break };
+        if current != pid && agent_name(current).is_some() {
+            return false;
+        }
+        let comm = std::fs::read_to_string(format!("/proc/{current}/comm")).unwrap_or_default();
+        seated |= seat(comm.trim());
+        if s.ppid <= 1 {
+            break;
+        }
+        current = s.ppid;
+    }
+    seated
+}
+
+/// Where the system installs the Chromium-family browsers the extension runs in.
+const BROWSER_DIRS: [&str; 8] = [
+    "/opt/google/chrome",
+    "/opt/google/chrome-beta",
+    "/opt/google/chrome-unstable",
+    "/usr/lib/chromium",
+    "/usr/lib/chromium-browser",
+    "/opt/brave.com/brave",
+    "/opt/brave-bin",
+    "/opt/vivaldi",
+];
+
+/// Whether `pid`'s parent is an installed browser: the browser starts the
+/// native-messaging host itself. Judged by the parent's executable, which a
+/// renamed process (`exec -a chrome`) cannot change and a user cannot write.
+pub fn started_by_browser(pid: u32) -> bool {
+    let Some(parent) = stat(pid).map(|s| s.ppid) else {
+        return false;
+    };
+    std::fs::read_link(format!("/proc/{parent}/exe")).is_ok_and(|exe| {
+        BROWSER_DIRS
+            .iter()
+            .any(|dir| exe.parent() == Some(Path::new(dir)))
+    })
+}
+
 fn git_root(start: &Path) -> Option<PathBuf> {
     start
         .ancestors()
@@ -245,6 +313,8 @@ pub fn identify(pid: u32) -> Requester {
     let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).unwrap_or_else(|_| PathBuf::from("/"));
     let mut agent = None;
     let mut task = None;
+    let mut agent_cwd = None;
+    let mut seated = false;
     let parent = stat(pid).map(|s| s.ppid);
     let mut ancestors = Vec::new();
     let mut current = pid;
@@ -257,12 +327,15 @@ pub fn identify(pid: u32) -> Requester {
             && let Some(name) = agent_name(current)
         {
             agent = Some(name.to_string());
+            agent_cwd = std::fs::read_link(format!("/proc/{current}/cwd")).ok();
             task = Some(ProcessId {
                 pid: current,
                 start: s.start,
             });
             break;
         }
+        let comm = std::fs::read_to_string(format!("/proc/{current}/comm")).unwrap_or_default();
+        seated |= seat(comm.trim());
         if s.ppid <= 1 {
             break;
         }
@@ -287,7 +360,10 @@ pub fn identify(pid: u32) -> Requester {
         agent,
         origin,
         task,
-        project: project_of(&cwd),
+        seated,
+        // An agent's project is its session's, wherever the command it ran has
+        // changed directory to: `cd ../other-repo` does not borrow that repo's grants.
+        project: project_of(agent_cwd.as_deref().unwrap_or(&cwd)),
         token: None,
     }
 }
@@ -295,6 +371,23 @@ pub fn identify(pid: u32) -> Requester {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_place_a_person_sits_is_a_seat() {
+        for comm in ["alacritty", "kitty", "sshd-session", "sshd", "login"] {
+            assert!(seat(comm), "{comm}");
+        }
+        for comm in [
+            "tmux: server",
+            "screen",
+            "script",
+            "bash",
+            "claude",
+            "systemd",
+        ] {
+            assert!(!seat(comm), "{comm}");
+        }
+    }
 
     #[test]
     fn names_the_program_that_asked() {

@@ -69,6 +69,12 @@ pub fn run_with_literals(
     for name in STRIPPED {
         child_command.env_remove(name);
     }
+    // op signs in per account as OP_SESSION_<account>.
+    for (name, _) in std::env::vars_os() {
+        if name.to_str().is_some_and(|n| n.starts_with("OP_SESSION_")) {
+            child_command.env_remove(name);
+        }
+    }
     child_command.envs(literals.iter().chain(secrets).map(|(k, v)| (k, v.expose())));
     child_command.stdout(if out_mask.is_some() {
         Stdio::piped()

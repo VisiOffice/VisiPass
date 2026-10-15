@@ -35,12 +35,25 @@ fn main() {
     if std::env::set_current_dir("/").is_err() {
         fail("could not leave the starting directory");
     }
-    let foreground = std::io::stdin().is_terminal();
+    // Before any thread starts: the prompt and the app inherit the session found
+    // here, not whatever display the caller that started the daemon had set.
+    let display = vp_daemon::approval::find_display();
+    for (name, value) in &display {
+        unsafe { std::env::set_var(name, value) };
+    }
+    let human_terminal =
+        std::io::stdin().is_terminal() && vp_daemon::procinfo::human_terminal(std::process::id());
+    let approver = Desktop::detect(!display.is_empty(), human_terminal);
+    if matches!(approver, Desktop::Unavailable) && std::io::stdin().is_terminal() {
+        eprintln!(
+            "visipassd: no desktop session, and this terminal cannot answer approvals: it is not a terminal window, SSH or console login, or a coding agent started it"
+        );
+    }
     let runtime = tokio::runtime::Runtime::new().unwrap_or_else(|_| fail("could not start"));
-    runtime.block_on(run(foreground));
+    runtime.block_on(run(approver));
 }
 
-async fn run(foreground: bool) {
+async fn run(approver: Desktop) {
     let socket = paths::socket();
     let state = paths::state_dir();
     for dir in [socket.parent(), Some(state.as_path())]
@@ -61,7 +74,6 @@ async fn run(foreground: bool) {
 
     let exe =
         std::env::current_exe().unwrap_or_else(|_| fail("could not locate its own executable"));
-    let approver = Desktop::detect(foreground);
     // VisiPass's own vault once `vp init` has made one; 1Password until then.
     let native = NativeBackend::new(Paths::standard(), WindowUnlock(approver.clone()));
     tokio::spawn(vp_daemon::session::watch(native.clone()));

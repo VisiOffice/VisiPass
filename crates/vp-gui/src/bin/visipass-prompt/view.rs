@@ -64,17 +64,27 @@ pub struct ApprovalView {
     answered: bool,
 }
 
-/// `op://Private/Stripe/password` -> ("Stripe", "password", "Private").
+/// `op://Private/Stripe/password` -> ("Stripe", "password", "Private"). A query
+/// stays visible on the field (`one-time password ?attribute=otp`): a TOTP code
+/// and the seed it comes from are different things to hand over.
 fn describe_ref(reference: &str) -> (String, String, String) {
     let path = reference
         .split_once("://")
         .map(|(_, p)| p)
         .unwrap_or(reference);
-    let path = path.split('?').next().unwrap_or(path);
+    let (path, query) = match path.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (path, None),
+    };
     let parts: Vec<&str> = path.split('/').collect();
     match parts.as_slice() {
         [vault, item, rest @ ..] if !rest.is_empty() => {
-            (item.to_string(), rest.join(" › "), vault.to_string())
+            let field = rest.join(" › ");
+            let field = match query {
+                Some(query) => format!("{field} ?{query}"),
+                None => field,
+            };
+            (item.to_string(), field, vault.to_string())
         }
         _ => (reference.to_string(), String::new(), String::new()),
     }
@@ -402,6 +412,9 @@ impl Render for ApprovalView {
             .child(
                 div()
                     .flex_1()
+                    // Without a zero min width the flex item sizes to its
+                    // unwrapped text and the title runs past the card edge.
+                    .min_w(px(0.))
                     .text_size(px(t.size(1.167)))
                     .text_color(t.foreground)
                     .child(
@@ -490,7 +503,11 @@ mod tests {
         );
         assert_eq!(
             describe_ref("op://Work/Server/admin/password?attribute=otp"),
-            ("Server".into(), "admin › password".into(), "Work".into())
+            (
+                "Server".into(),
+                "admin › password ?attribute=otp".into(),
+                "Work".into()
+            )
         );
     }
 

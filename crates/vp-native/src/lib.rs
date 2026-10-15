@@ -25,8 +25,13 @@ use zeroize::Zeroizing;
 
 /// Asks the human for the master password. `None` if they cancel.
 pub trait Unlock: Send + Sync + 'static {
-    fn password(&self, retry: bool)
-    -> impl Future<Output = Result<Option<Secret>, Failure>> + Send;
+    /// Asks for the master password. `purpose` says what unlocking is for when
+    /// it is more than unlocking ("turn on quick unlock for 8 hours").
+    fn password(
+        &self,
+        retry: bool,
+        purpose: Option<&str>,
+    ) -> impl Future<Output = Result<Option<Secret>, Failure>> + Send;
 
     /// Quick unlock (§4.3): asks the system to confirm the human is present, by
     /// fingerprint or login password.
@@ -429,8 +434,15 @@ impl<U: Unlock> NativeBackend<U> {
             state.quick_unlock = window;
             previous
         };
-        if window.is_some()
-            && let Err(e) = self.open().await
+        let purpose = window.map(|w| {
+            let hours = w.as_secs().div_ceil(3600);
+            format!(
+                "turn on quick unlock for {hours} hour{}: after a lock, your fingerprint or Linux login password unlocks VisiPass",
+                if hours == 1 { "" } else { "s" }
+            )
+        });
+        if let Some(purpose) = &purpose
+            && let Err(e) = self.open_for(Some(purpose)).await
         {
             self.inner.state().quick_unlock = previous;
             return Err(e);
@@ -497,6 +509,10 @@ impl<U: Unlock> NativeBackend<U> {
 
     /// Unlocks if needed, asking the human for the master password.
     async fn open(&self) -> Result<(), Failure> {
+        self.open_for(None).await
+    }
+
+    async fn open_for(&self, purpose: Option<&str>) -> Result<(), Failure> {
         let _gate = self.inner.gate.lock().await;
         self.inner.expire_if_idle();
         {
@@ -537,7 +553,7 @@ impl<U: Unlock> NativeBackend<U> {
         let secret = SecretKey::parse(&secret_text).map_err(|e| Failure::new(e.0))?;
         let secret = Arc::new(secret);
         for attempt in 0..UNLOCK_ATTEMPTS {
-            let Some(password) = self.inner.unlock.password(attempt > 0).await? else {
+            let Some(password) = self.inner.unlock.password(attempt > 0, purpose).await? else {
                 self.quiet();
                 return Err(Failure::new("Unlocking VisiPass was cancelled"));
             };

@@ -4,7 +4,15 @@
 
 A password manager built for coding agents. Your agent finds, uses and saves secrets without ever seeing them, and you approve per task and project instead of per shell.
 
-Milestone 0 runs on top of 1Password: `vp` talks to your existing vaults through the 1Password CLI, and adds standing grants, an approval prompt that names the agent, project and command, output masking, and an access log. VisiPass's own encrypted store follows in M0.5.
+## Status
+
+0.x, Linux only (x86_64 and aarch64), Omarchy first.
+
+- **The agent layer over 1Password is the part to rely on.** `vp` reaches your existing vaults through the 1Password CLI and adds standing grants, an approval prompt that names the agent, project and command, output masking, and a hash-chained access log. 1Password still stores and encrypts everything.
+- **VisiPass's own vault is experimental** (`vp init`, `vp import op`). Its design ([docs/crypto-design.md](docs/crypto-design.md)) has had an internal review, but neither the design nor the code has had an outside audit. Keep 1Password as your backup, and don't store anyone else's credentials in it yet.
+- **The browser extension** works in Chrome and Chromium, loaded unpacked (see [extension/README.md](extension/README.md)); it is not in the Chrome Web Store.
+- No sync, and no macOS or Windows builds, yet.
+- VisiPass is not a sandbox: a command given a secret by `vp run` can do anything with it.
 
 ## Install
 

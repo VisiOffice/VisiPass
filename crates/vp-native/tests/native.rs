@@ -50,7 +50,11 @@ impl Scripted {
 }
 
 impl Unlock for Scripted {
-    async fn password(&self, _retry: bool) -> Result<Option<Secret>, Failure> {
+    async fn password(
+        &self,
+        _retry: bool,
+        _purpose: Option<&str>,
+    ) -> Result<Option<Secret>, Failure> {
         let n = self.asked.fetch_add(1, Ordering::SeqCst);
         Ok(self
             .answers

@@ -76,6 +76,62 @@ pub struct ApprovalPrompt {
     pub paste: Option<PasteSpec>,
 }
 
+/// Characters that change how text reads without being seen: bidirectional
+/// overrides and isolates, marks, and zero-width characters. An agent could use
+/// them to make "op://Dev/x" read as something else in a prompt.
+fn invisible(c: char) -> bool {
+    matches!(c,
+        '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}'
+        | '\u{061C}' | '\u{FEFF}' | '\u{00AD}')
+}
+
+/// Prompt text as the human should see it: no control characters (a terminal
+/// escape could redraw the terminal prompt), no invisible characters, newlines
+/// only where `lines` allows them, at most `max` characters.
+pub fn clean_text(text: &str, lines: bool, max: usize) -> String {
+    let clean: String = text
+        .chars()
+        .filter(|c| !invisible(*c))
+        .map(|c| match c {
+            '\n' if lines => '\n',
+            c if c.is_control() => ' ',
+            c => c,
+        })
+        .collect();
+    if clean.chars().count() <= max {
+        clean
+    } else {
+        format!("{}…", clean.chars().take(max).collect::<String>())
+    }
+}
+
+impl ApprovalPrompt {
+    /// The prompt with everything a caller chose cleaned and capped, before any
+    /// window, dialog or terminal shows it.
+    pub fn cleaned(&self) -> Self {
+        let mut prompt = self.clone();
+        prompt.who = clean_text(&self.who, false, 120);
+        prompt.action = clean_text(&self.action, false, 400);
+        prompt.details = self
+            .details
+            .iter()
+            .take(12)
+            .map(|(label, value)| (clean_text(label, false, 40), clean_text(value, true, 1200)))
+            .collect();
+        prompt.secrets = self
+            .secrets
+            .iter()
+            .map(|s| clean_text(s, false, 300))
+            .collect();
+        prompt.purpose = self.purpose.as_deref().map(|p| clean_text(p, true, 400));
+        if let Some(paste) = &mut prompt.paste {
+            paste.title = clean_text(&paste.title, false, 200);
+            paste.vault = clean_text(&paste.vault, false, 200);
+        }
+        prompt
+    }
+}
+
 /// What a paste prompt asks for: a new secret, saved where the agent said.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PasteSpec {
@@ -495,6 +551,24 @@ impl Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prompt_text_is_cleaned_before_anyone_sees_it() {
+        let prompt = ApprovalPrompt {
+            who: "Claude\u{1b}[2J Code\nYour terminal".into(),
+            action: format!("read {}", "x".repeat(1000)),
+            details: vec![("Item".into(), "a\u{202E}lmth.exe\nsecond line".into())],
+            secrets: vec!["op://Dev/\u{200B}stripe/key".into()],
+            purpose: Some("why\u{7}".into()),
+            ..Default::default()
+        }
+        .cleaned();
+        assert_eq!(prompt.who, "Claude [2J Code Your terminal");
+        assert!(prompt.action.chars().count() <= 401 && prompt.action.ends_with('…'));
+        assert_eq!(prompt.details[0].1, "almth.exe\nsecond line");
+        assert_eq!(prompt.secrets[0], "op://Dev/stripe/key");
+        assert_eq!(prompt.purpose.as_deref(), Some("why "));
+    }
 
     #[test]
     fn round_trips() {

@@ -4,6 +4,10 @@
 // site, and filled into this frame only.
 //
 // Everything is drawn in a closed shadow root, so the page cannot read the list.
+// Only real input picks a login: events the page dispatches itself
+// (isTrusted false) are ignored, and nothing is picked unless Chrome reports the
+// menu as actually visible (IntersectionObserver v2), so a page cannot hide it
+// under a decoy and collect the click, or wait for an Enter nobody meant for it.
 (() => {
   if (window.__visipassInline) return;
   window.__visipassInline = true;
@@ -38,11 +42,13 @@
   let selected = 0;
   let menuOpen = false;
   let dismissed = new WeakSet();
+  let menuVisible = false;
 
   function ensureUi() {
     if (host) return;
     host = document.createElement("visipass-inline");
-    host.style.cssText = "all: initial; position: fixed; top: 0; left: 0; z-index: 2147483647;";
+    host.style.cssText =
+      "all: initial !important; position: fixed !important; top: 0 !important; left: 0 !important; z-index: 2147483647 !important;";
     root = host.attachShadow({ mode: "closed" });
     root.innerHTML = `<style>
       :host { --bg:#1a1b26; --fg:#c0caf5; --accent:#7aa2f7; --muted:#9aa5ce; --danger:#f7768e; --font: ui-monospace, monospace; }
@@ -67,10 +73,18 @@
     <button class="mark" title="VisiPass">${MARK}<span class="count"></span></button>
     <div class="menu" role="listbox"></div>`;
     root.querySelector(".mark").addEventListener("mousedown", (e) => {
+      if (!e.isTrusted) return;
       e.preventDefault(); // keep focus in the field
       menuOpen ? closeMenu() : openMenu();
     });
     (document.documentElement || document.body).append(host);
+    // Visible means unobscured, unfaded and untransformed for at least 100ms.
+    new IntersectionObserver(
+      (entries) => {
+        menuVisible = entries[entries.length - 1].isVisible === true;
+      },
+      { trackVisibility: true, delay: 100 },
+    ).observe(root.querySelector(".menu"));
     send({ kind: "theme" })
       .then((theme) => {
         for (const [key, value] of Object.entries(theme || {})) {
@@ -120,6 +134,7 @@
       row.setAttribute("role", "option");
       row.append(el("div", "title", "Unlock VisiPass"), el("div", "sub", "Then pick a login for this site"));
       row.addEventListener("mousedown", (e) => {
+        if (!e.isTrusted) return;
         e.preventDefault();
         unlock();
       });
@@ -132,6 +147,7 @@
       row.setAttribute("role", "option");
       row.append(el("div", "title", login.title), el("div", "sub", [login.username, login.host].filter(Boolean).join(" · ")));
       row.addEventListener("mousedown", (e) => {
+        if (!e.isTrusted) return;
         e.preventDefault();
         choose(i);
       });
@@ -153,6 +169,18 @@
   function closeMenu() {
     menuOpen = false;
     if (root) root.querySelector(".menu").style.display = "none";
+  }
+
+  // A field a person can see: a page can hide one to collect a fill nobody sees.
+  function shown(el) {
+    if (!el || !el.isConnected) return false;
+    const r = el.getBoundingClientRect();
+    if (r.width < 8 || r.height < 8) return false;
+    for (let n = el; n; n = n.parentElement) {
+      const s = getComputedStyle(n);
+      if (s.display === "none" || s.visibility !== "visible" || Number(s.opacity) < 0.5) return false;
+    }
+    return true;
   }
 
   async function unlock() {
@@ -181,6 +209,9 @@
   }
 
   async function choose(i) {
+    if (!menuVisible || !shown(field)) {
+      return renderMenu("VisiPass can't see this menu clearly on the page, so it won't fill here.", true);
+    }
     if (locked) return unlock();
     const login = logins[i];
     if (!login) return;
@@ -224,7 +255,7 @@
     (e) => {
       const target = e.composedPath()[0];
       if (host && e.target === host) return;
-      if (isLoginField(target)) show(target);
+      if (isLoginField(target) && shown(target)) show(target);
       else hide();
     },
     true,
@@ -233,7 +264,7 @@
   document.addEventListener(
     "keydown",
     (e) => {
-      if (!field || e.composedPath()[0] !== field) return;
+      if (!e.isTrusted || !field || e.composedPath()[0] !== field) return;
       if (!menuOpen) {
         if (e.key === "ArrowDown" && (locked || (logins && logins.length))) {
           openMenu();

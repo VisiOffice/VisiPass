@@ -122,6 +122,21 @@ impl Approver for Scripted {
     }
 }
 
+/// The requester as the human at a terminal would be, whoever runs the tests.
+fn as_human(pid: u32) -> vp_daemon::procinfo::Requester {
+    let mut requester = vp_daemon::procinfo::identify(pid);
+    requester.agent = None;
+    requester.seated = true;
+    requester
+}
+
+fn as_agent(pid: u32) -> vp_daemon::procinfo::Requester {
+    let mut requester = vp_daemon::procinfo::identify(pid);
+    requester.agent = Some("Claude Code".into());
+    requester.origin = None;
+    requester
+}
+
 struct World {
     dir: tempfile::TempDir,
     approver: Scripted,
@@ -129,15 +144,30 @@ struct World {
 
 impl World {
     fn new(decisions: &[Decision]) -> Self {
-        Self::start(decisions, false)
+        Self::start(decisions, false, false, false)
     }
 
     /// With VisiPass's own vault in front of the fake 1Password.
     fn native(decisions: &[Decision]) -> Self {
-        Self::start(decisions, true)
+        Self::start(decisions, true, false, false)
     }
 
-    fn start(decisions: &[Decision], native: bool) -> Self {
+    /// Where the test stands in for the browser that starts the extension's host.
+    fn browser(decisions: &[Decision]) -> Self {
+        Self::start(decisions, false, true, false)
+    }
+
+    /// Both: VisiPass's own vault, and the browser.
+    fn native_browser(decisions: &[Decision]) -> Self {
+        Self::start(decisions, true, true, false)
+    }
+
+    /// VisiPass's own vault, asked by a coding agent.
+    fn native_agent(decisions: &[Decision]) -> Self {
+        Self::start(decisions, true, false, true)
+    }
+
+    fn start(decisions: &[Decision], native: bool, browser: bool, agent: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let op = dir.path().join("op");
         let script = FAKE_OP
@@ -183,11 +213,19 @@ impl World {
                             },
                         ),
                     };
-                    let daemon = Arc::new(Daemon::new(backend, daemon_approver, &state, socket));
+                    let daemon = Arc::new(
+                        Daemon::new(backend, daemon_approver, &state, socket)
+                            .with_browser_host(if browser { |_| true } else { |_| false })
+                            .with_identify(if agent { as_agent } else { as_human }),
+                    );
                     ready_tx.send(()).unwrap();
                     daemon.serve(listener).await;
                 } else {
-                    let daemon = Arc::new(Daemon::new(op, daemon_approver, &state, socket));
+                    let daemon = Arc::new(
+                        Daemon::new(op, daemon_approver, &state, socket)
+                            .with_browser_host(if browser { |_| true } else { |_| false })
+                            .with_identify(if agent { as_agent } else { as_human }),
+                    );
                     ready_tx.send(()).unwrap();
                     daemon.serve(listener).await;
                 }
@@ -345,10 +383,11 @@ fn run_passes_the_exit_code_and_strips_tokens() {
             "--",
             "sh",
             "-c",
-            "test -z \"$OP_SERVICE_ACCOUNT_TOKEN\" && exit 7",
+            "test -z \"$OP_SERVICE_ACCOUNT_TOKEN$OP_SESSION_my\" && exit 7",
         ])
         .env("VISIPASS_SOCKET", world.path("vp.sock"))
         .env("OP_SERVICE_ACCOUNT_TOKEN", "ops_fake")
+        .env("OP_SESSION_my", "session_fake")
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(7), "{}", text(&out.stderr));
@@ -833,7 +872,7 @@ const ORIGIN: &str = "chrome-extension://pmfmecknoobmojibgpbkpeckpdnmhnpm/";
 
 #[test]
 fn browser_lists_logins_for_the_site_and_fills_only_there() {
-    let world = World::new(&[Decision::Always]);
+    let world = World::browser(&[Decision::Always]);
     let id = "l".repeat(26);
     let vault = "v".repeat(26);
     let (replies, code) = native(
@@ -910,6 +949,32 @@ fn browser_lists_logins_for_the_site_and_fills_only_there() {
         "a standing grant for this site and login"
     );
     world.assert_contained();
+}
+
+#[test]
+fn only_a_host_the_browser_started_gets_a_fill() {
+    // An agent running the host itself, or writing the request to the socket,
+    // is not the browser: no logins, no values, no prompt.
+    let world = World::new(&[Decision::Always]);
+    let (replies, _) = native(
+        &world,
+        ORIGIN,
+        &[
+            serde_json::json!({"id": 1, "type": "match", "url": "https://dashboard.stripe.com/login"}),
+            serde_json::json!({"id": 2, "type": "fill", "url": "https://dashboard.stripe.com/login", "item": "l".repeat(26), "vault": "v".repeat(26)}),
+        ],
+    );
+    for reply in &replies {
+        assert_eq!(reply["ok"], false, "{reply}");
+        assert!(
+            reply["error"]
+                .as_str()
+                .unwrap()
+                .contains("browser extension")
+        );
+    }
+    assert!(!format!("{replies:?}").contains(LOGIN));
+    assert_eq!(world.approver.asked(), 0);
 }
 
 #[test]
@@ -993,6 +1058,26 @@ fn the_native_vault_takes_over_after_init_and_import() {
 }
 
 #[test]
+fn an_agent_cannot_turn_on_quick_unlock() {
+    let world = World::native_agent(&[Decision::Once, Decision::Once, Decision::Deny]);
+    clean(&world.vp(&["init"], None));
+    let asked = world.approver.asked();
+    let on = world.vp(&["quick-unlock", "on"], None);
+    assert!(!on.status.success());
+    assert!(
+        text(&on.stderr).contains("Only the human"),
+        "{}",
+        text(&on.stderr)
+    );
+    assert_eq!(world.approver.asked(), asked, "not even a password window");
+    assert_eq!(
+        json(&world.vp(&["quick-unlock", "off"], None))["quickUnlock"],
+        false,
+        "turning it off is always allowed"
+    );
+}
+
+#[test]
 fn quick_unlock_needs_presence_after_a_lock_and_the_password_after_a_full_one() {
     let world = World::native(&[
         // init: password, confirmation, Secret Key window
@@ -1042,7 +1127,7 @@ fn quick_unlock_needs_presence_after_a_lock_and_the_password_after_a_full_one() 
 
 #[test]
 fn a_page_load_never_prompts_to_unlock_the_native_vault() {
-    let world = World::native(&[
+    let world = World::native_browser(&[
         // init: password, confirmation, Secret Key window
         Decision::Once,
         Decision::Once,

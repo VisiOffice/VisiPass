@@ -20,9 +20,23 @@ export function ask(message) {
 
 // Runs inside the page, injected only when you ask to fill. Fills the visible
 // username and password fields (or a one-time-code field on a 2FA step) with
-// real input events, so frameworks notice.
-export function fillPage(username, password, totp) {
-  const visible = (el) => el && el.getClientRects().length > 0 && !el.disabled && !el.readOnly;
+// real input events, so frameworks notice. Does nothing in a frame from another
+// origin than the one VisiPass approved: an ad iframe, or a frame that navigated
+// away while the approval was open.
+export function fillPage(origin, username, password, totp) {
+  if (location.origin !== origin) return 0;
+  // Visible to a person: a page can hide a password field (opacity, 1px, off
+  // screen, visibility) to collect a fill nobody sees.
+  const visible = (el) => {
+    if (!el || el.disabled || el.readOnly) return false;
+    const r = el.getBoundingClientRect();
+    if (r.width < 8 || r.height < 8 || r.right <= 0 || r.left >= innerWidth || r.top + scrollY < 0) return false;
+    for (let n = el; n; n = n.parentElement) {
+      const s = getComputedStyle(n);
+      if (s.display === "none" || s.visibility !== "visible" || Number(s.opacity) < 0.5) return false;
+    }
+    return true;
+  };
   const set = (el, value) => {
     const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), "value")?.set;
     if (setter) setter.call(el, value);
@@ -50,13 +64,15 @@ export function fillPage(username, password, totp) {
 }
 
 // Asks VisiPass for one login's values and fills them into the tab's frames
-// (or only `target`'s). `tab.url` is the page VisiPass checks the login against.
+// from the page's own origin (or only `target`'s document). `tab.url` is the
+// page VisiPass checks the login against.
 export async function fill(tab, login, force = false, target = { tabId: tab.id, allFrames: true }) {
+  const origin = new URL(tab.url).origin;
   const values = await ask({ type: "fill", url: tab.url, item: login.id, vault: login.vault, force });
   const results = await chrome.scripting.executeScript({
     target,
     func: fillPage,
-    args: [values.username || "", values.password || "", values.totp || ""],
+    args: [origin, values.username || "", values.password || "", values.totp || ""],
   });
   return results.reduce((n, r) => n + (r.result || 0), 0);
 }

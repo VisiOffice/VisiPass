@@ -20,10 +20,14 @@ use vp_op::OpBackend;
 pub struct WindowUnlock<A>(pub A);
 
 impl<A: Approver> Unlock for WindowUnlock<A> {
-    async fn password(&self, retry: bool) -> Result<Option<Secret>, Failure> {
+    async fn password(
+        &self,
+        retry: bool,
+        purpose: Option<&str>,
+    ) -> Result<Option<Secret>, Failure> {
         let prompt = Prompt {
             who: "VisiPass".into(),
-            action: "unlock your vault".into(),
+            action: purpose.unwrap_or("unlock your vault").into(),
             details: vec![],
             secrets: vec![],
             purpose: None,
@@ -31,7 +35,7 @@ impl<A: Approver> Unlock for WindowUnlock<A> {
             paste: Some(PasteSpec {
                 mode: PasteMode::Unlock {
                     retry,
-                    purpose: None,
+                    purpose: purpose.map(String::from),
                 },
                 ..PasteSpec::default()
             }),

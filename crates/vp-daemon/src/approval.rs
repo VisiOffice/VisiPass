@@ -4,7 +4,15 @@
 //! shell call away from the agent itself. The human answers in a window the
 //! daemon launches and alone holds the output pipe of: `visipass-prompt` (GPUI,
 //! styled after the desktop theme), else zenity. When visipassd runs in the
-//! foreground of a terminal with no graphical session, it asks there.
+//! foreground of a terminal a person sits at, with no graphical session, it asks
+//! there.
+//!
+//! Nothing a caller controls picks the channel: the graphical session is found
+//! from the sockets in the user's runtime directory, not from DISPLAY or
+//! WAYLAND_DISPLAY, and the programs come from beside visipassd or the system
+//! directories, not from PATH. Otherwise an agent could start its own daemon with
+//! the display cleared, or a fake `visipass-prompt` first on PATH, and answer
+//! its own approvals.
 
 use crate::grants::Decision;
 use std::future::Future;
@@ -118,18 +126,77 @@ fn plain(prompt: &Prompt) -> String {
 
 #[derive(Clone)]
 pub enum Desktop {
-    /// `visipass-prompt`, found next to visipassd or on PATH.
+    /// `visipass-prompt`, found next to visipassd or in the system directories.
     Native(PathBuf),
-    Zenity,
+    Zenity(PathBuf),
     Terminal,
     Unavailable,
 }
 
-pub(crate) fn on_path(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(name))
-        .find(|p| p.is_file())
+/// Where VisiPass runs its own helpers from: never PATH, which the caller sets.
+const SYSTEM_DIRS: [&str; 2] = ["/usr/bin", "/usr/local/bin"];
+
+/// A helper program the daemon trusts with approvals, the app socket or the
+/// Emergency Kit: beside visipassd, else in the system directories.
+pub(crate) fn trusted_program(name: &str) -> Option<PathBuf> {
+    beside_self(name).or_else(|| {
+        SYSTEM_DIRS
+            .iter()
+            .map(|dir| PathBuf::from(dir).join(name))
+            .find(|p| p.is_file())
+    })
+}
+
+/// The graphical session, as the environment variables its programs need, found
+/// from the sockets themselves: `$WAYLAND_DISPLAY` and `$DISPLAY` are kept only
+/// when they name a socket that exists, and otherwise the user's own Wayland
+/// socket under /run/user/UID, or an X server's under /tmp/.X11-unix, is used.
+pub fn find_display() -> Vec<(&'static str, std::ffi::OsString)> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let uid = unsafe { libc::getuid() };
+    let runtime = PathBuf::from(format!("/run/user/{uid}"));
+    let ours = |p: &std::path::Path| {
+        std::fs::metadata(p).is_ok_and(|m| m.file_type().is_socket() && m.uid() == uid)
+    };
+    let mut found = Vec::new();
+    let named = std::env::var_os("WAYLAND_DISPLAY")
+        .filter(|v| !v.is_empty())
+        .map(|v| runtime.join(v))
+        .filter(|p| ours(p));
+    let wayland = named.or_else(|| {
+        let mut sockets: Vec<PathBuf> = std::fs::read_dir(&runtime)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("wayland-") && !n.ends_with(".lock"))
+                    && ours(p)
+            })
+            .collect();
+        sockets.sort();
+        sockets.into_iter().next()
+    });
+    if let Some(socket) = wayland {
+        // An absolute WAYLAND_DISPLAY needs no XDG_RUNTIME_DIR.
+        found.push(("WAYLAND_DISPLAY", socket.into_os_string()));
+    }
+    let x_socket = |display: &str| {
+        let number = display.strip_prefix(':')?.split('.').next()?;
+        let path = PathBuf::from(format!("/tmp/.X11-unix/X{number}"));
+        std::fs::metadata(&path)
+            .is_ok_and(|m| m.file_type().is_socket())
+            .then_some(display.to_string())
+    };
+    let x11 = std::env::var("DISPLAY")
+        .ok()
+        .and_then(|d| x_socket(&d))
+        .or_else(|| (0..10).find_map(|n| x_socket(&format!(":{n}"))));
+    if let Some(display) = x11 {
+        found.push(("DISPLAY", display.into()));
+    }
+    found
 }
 
 pub(crate) fn beside_self(name: &str) -> Option<PathBuf> {
@@ -138,23 +205,18 @@ pub(crate) fn beside_self(name: &str) -> Option<PathBuf> {
 }
 
 impl Desktop {
-    /// Chooses how to ask, once, at startup.
-    pub fn detect(foreground_terminal: bool) -> Self {
-        let display = ["WAYLAND_DISPLAY", "DISPLAY"]
-            .iter()
-            .any(|v| std::env::var_os(v).is_some_and(|x| !x.is_empty()));
-        if display
-            && let Some(native) =
-                beside_self("visipass-prompt").or_else(|| on_path("visipass-prompt"))
-        {
+    /// Chooses how to ask, once, at startup. `display` is whether
+    /// [`find_display`] found a graphical session; `human_terminal` whether
+    /// visipassd runs in the foreground of a terminal a person sits at, with no
+    /// agent above it ([`crate::procinfo::human_terminal`]).
+    pub fn detect(display: bool, human_terminal: bool) -> Self {
+        if display && let Some(native) = trusted_program("visipass-prompt") {
             return Desktop::Native(native);
         }
-        if display && on_path("zenity").is_some() {
-            Desktop::Zenity
-        } else if foreground_terminal {
-            Desktop::Terminal
-        } else {
-            Desktop::Unavailable
+        match trusted_program("zenity") {
+            Some(zenity) if display => Desktop::Zenity(zenity),
+            _ if human_terminal => Desktop::Terminal,
+            _ => Desktop::Unavailable,
         }
     }
 
@@ -196,8 +258,8 @@ impl Desktop {
         )
     }
 
-    async fn zenity(prompt: &Prompt) -> Result<Decision, Failure> {
-        let mut command = tokio::process::Command::new("zenity");
+    async fn zenity(zenity: &PathBuf, prompt: &Prompt) -> Result<Decision, Failure> {
+        let mut command = tokio::process::Command::new(zenity);
         command
             .args([
                 "--question",
@@ -208,7 +270,13 @@ impl Desktop {
                 "--text",
             ])
             .arg(markup(prompt))
-            .args(["--ok-label", ONCE, "--cancel-label", "Deny"])
+            .args([
+                "--ok-label",
+                ONCE,
+                "--cancel-label",
+                "Deny",
+                "--default-cancel",
+            ])
             .args([
                 "--extra-button",
                 TASK,
@@ -300,10 +368,10 @@ impl Desktop {
         }
     }
 
-    async fn zenity_show_key(key: &Secret) -> Result<Option<Secret>, Failure> {
+    async fn zenity_show_key(zenity: &PathBuf, key: &Secret) -> Result<Option<Secret>, Failure> {
         use tokio::io::AsyncWriteExt;
         // The key goes in on stdin, never in argv.
-        let mut child = tokio::process::Command::new("zenity")
+        let mut child = tokio::process::Command::new(zenity)
             .args([
                 "--text-info",
                 "--title",
@@ -331,10 +399,10 @@ impl Desktop {
         Ok(None)
     }
 
-    async fn zenity_paste(prompt: &Prompt) -> Result<Option<Secret>, Failure> {
+    async fn zenity_paste(zenity: &PathBuf, prompt: &Prompt) -> Result<Option<Secret>, Failure> {
         let spec = prompt.paste.clone().unwrap_or_default();
         if let PasteMode::ShowKey { key } = &spec.mode {
-            return Self::zenity_show_key(key).await;
+            return Self::zenity_show_key(zenity, key).await;
         }
         let (instruction, ok_label) = spec.instruction();
         let text = if matches!(spec.mode, PasteMode::Secret) {
@@ -342,7 +410,7 @@ impl Desktop {
         } else {
             instruction
         };
-        let output = tokio::process::Command::new("zenity")
+        let output = tokio::process::Command::new(zenity)
             .args([
                 "--entry",
                 "--hide-text",
@@ -458,7 +526,7 @@ impl Approver for Desktop {
             let _ = std::fs::remove_file(&path);
             return Err(Failure::new("Could not write the page"));
         }
-        let opened = on_path("xdg-open").and_then(|program| {
+        let opened = trusted_program("xdg-open").and_then(|program| {
             let mut child = tokio::process::Command::new(program)
                 .arg(&path)
                 .stdin(Stdio::null())
@@ -495,16 +563,17 @@ impl Approver for Desktop {
     fn method(&self) -> &'static str {
         match self {
             Desktop::Native(_) => "VisiPass window",
-            Desktop::Zenity => "desktop dialog (zenity)",
+            Desktop::Zenity(_) => "desktop dialog (zenity)",
             Desktop::Terminal => "visipassd terminal",
             Desktop::Unavailable => "none",
         }
     }
 
     async fn ask(&self, prompt: &Prompt) -> Result<Decision, Failure> {
+        let prompt = &prompt.cleaned();
         match self {
             Desktop::Native(program) => Self::native(program, prompt).await,
-            Desktop::Zenity => Self::zenity(prompt).await,
+            Desktop::Zenity(zenity) => Self::zenity(zenity, prompt).await,
             Desktop::Terminal => tokio::time::timeout(TIMEOUT, Self::terminal(prompt))
                 .await
                 .map_err(|_| {
@@ -517,9 +586,10 @@ impl Approver for Desktop {
     }
 
     async fn paste(&self, prompt: &Prompt) -> Result<Option<Secret>, Failure> {
+        let prompt = &prompt.cleaned();
         match self {
             Desktop::Native(program) => Self::native_paste(program, prompt).await,
-            Desktop::Zenity => Self::zenity_paste(prompt).await,
+            Desktop::Zenity(zenity) => Self::zenity_paste(zenity, prompt).await,
             Desktop::Terminal => tokio::time::timeout(TIMEOUT, Self::terminal_paste(prompt))
                 .await
                 .map_err(|_| Failure::new(NO_ANSWER))?,

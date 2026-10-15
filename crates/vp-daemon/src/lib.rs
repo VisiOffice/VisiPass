@@ -45,7 +45,7 @@ fn browser_entry(s: &vp_core::model::ItemSummary, exact: bool) -> Value {
         "vaultName": s.vault.name,
         "title": s.title,
         "username": s.additional_information,
-        "host": s.urls.first().map(|u| find::page_host(&u.href)),
+        "host": s.urls.first().map(|u| find::saved_host(&u.href)),
         "category": s.category,
         "exact": exact,
     })
@@ -90,6 +90,10 @@ pub struct Daemon<B, A> {
     /// PIDs of the desktop app and the Quick Access palette this daemon launched.
     app: tokio::sync::Mutex<Option<u32>>,
     quick: tokio::sync::Mutex<Option<u32>>,
+    /// Whether a requester is the extension's native-messaging host.
+    browser_host: fn(u32) -> bool,
+    /// Who a connecting process is.
+    identify: fn(u32) -> Requester,
 }
 
 /// Where a request arrived. Only `App`, the private socket pair visipassd
@@ -146,6 +150,11 @@ fn who(requester: &Requester) -> String {
         .clone()
         .or_else(|| requester.origin.clone())
         .unwrap_or_else(|| "An unrecognised process".into())
+}
+
+/// What a grant to save new items covers: creating in that vault, nothing else.
+fn creates_in(vault: &str) -> String {
+    format!("create in {vault}")
 }
 
 fn assess(request: &Request, requester: &Requester) -> Assessment {
@@ -215,7 +224,7 @@ fn assess(request: &Request, requester: &Requester) -> Assessment {
         } => Assessment {
             need: Some(Need {
                 operation: Operation::Write,
-                refs: BTreeSet::new(),
+                refs: BTreeSet::from([creates_in(&destination.vault)]),
                 vaults: BTreeSet::from([destination.vault.clone()]),
             }),
             refs: vec![],
@@ -248,9 +257,16 @@ fn assess(request: &Request, requester: &Requester) -> Assessment {
                 "check the password of"
             };
             Assessment {
+                // This login only, and changing it is not checking it: a grant to
+                // save new items, or to check one login, never covers changing another.
                 need: Some(Need {
                     operation: Operation::Write,
-                    refs: BTreeSet::new(),
+                    refs: BTreeSet::from([format!(
+                        "{} {}/{}",
+                        if request.apply { "change" } else { "check" },
+                        request.vault,
+                        request.item
+                    )]),
                     vaults: BTreeSet::from([request.vault.clone()]),
                 }),
                 refs: vec![],
@@ -291,7 +307,7 @@ fn assess(request: &Request, requester: &Requester) -> Assessment {
             Assessment {
                 need: Some(Need {
                     operation: Operation::Write,
-                    refs: BTreeSet::new(),
+                    refs: BTreeSet::from([creates_in(vault)]),
                     vaults: BTreeSet::from([vault.clone()]),
                 }),
                 refs: vec![],
@@ -348,7 +364,23 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
             state: state_dir.to_path_buf(),
             app: tokio::sync::Mutex::new(None),
             quick: tokio::sync::Mutex::new(None),
+            browser_host: procinfo::started_by_browser,
+            identify: procinfo::identify,
         }
+    }
+
+    /// Replaces the check that browser requests come from a browser's
+    /// native-messaging host; for tests, whose host runs under the test.
+    pub fn with_browser_host(mut self, check: fn(u32) -> bool) -> Self {
+        self.browser_host = check;
+        self
+    }
+
+    /// Replaces how a connecting process is identified; for tests, which must
+    /// not depend on whether an agent happens to be running them.
+    pub fn with_identify(mut self, identify: fn(u32) -> Requester) -> Self {
+        self.identify = identify;
+        self
     }
 
     fn grants(&self) -> std::sync::MutexGuard<'_, Grants> {
@@ -523,6 +555,13 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 }))
             }
             Request::QuickUnlock { hours } => {
+                // Turning it on lowers what unlocks the vault, so it is the human's
+                // own act: never an agent's, and the password window says what it is for.
+                if hours.is_some() && requester.agent.is_some() {
+                    return Err(Failure::new(
+                        "Only the human can turn on quick unlock: ask them to run `vp quick-unlock on` in their own terminal",
+                    ));
+                }
                 let window = hours.map(|h| std::time::Duration::from_secs(h.saturating_mul(3600)));
                 let _turn = self.approvals.lock().await;
                 self.backend.native_quick_unlock(window).await?;
@@ -871,8 +910,11 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                     additional_information: None,
                 };
                 let matches_page = find::page_match(&url, &summary).is_some();
-                let saved_for: Vec<String> =
-                    item.urls.iter().map(|u| find::page_host(&u.href)).collect();
+                let saved_for: Vec<String> = item
+                    .urls
+                    .iter()
+                    .map(|u| find::saved_host(&u.href))
+                    .collect();
                 // Phishing guard: a login only fills on its own site unless the human overrides.
                 if !matches_page && !force {
                     return Err(Failure::new(format!(
@@ -968,21 +1010,47 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
     ) -> Response {
         let name = request.name();
         let assessment = assess(&request, requester);
+        // Everything is logged except reading VisiPass's own state, a page load
+        // asking which logins it has (titles only, never an unlock), and the
+        // app's own browsing, which would bury everything else.
         let quiet = matches!(
             request,
             Request::Status
                 | Request::Grants
                 | Request::Log { .. }
-                | Request::Vaults { .. }
-                | Request::Items { .. }
-                | Request::Tokens
-                | Request::BrowserMatch { .. }
-                | Request::BrowserSearch { .. }
+                | Request::BrowserMatch { unlock: false, .. }
+        ) || (channel == Channel::App
+            && matches!(request, Request::Vaults { .. } | Request::Items { .. }));
+        let writes = matches!(
+            request,
+            Request::CreateApiCredential { .. }
+                | Request::Password { .. }
+                | Request::ImportEnv { .. }
+                | Request::ImportOp { .. }
+                | Request::SaveItem { .. }
+                | Request::Archive { .. }
+                | Request::SetFavorite { .. }
+                | Request::RequestSecret { .. }
         );
         let mut grant = None;
         let result = if channel == Channel::Public && request.app_only() {
             Err(Failure::new(
                 "Only the VisiPass app can do this. Use vp find, vp run or vp read instead",
+            ))
+        } else if channel == Channel::Public
+            && matches!(
+                request,
+                Request::BrowserMatch { .. }
+                    | Request::BrowserSearch { .. }
+                    | Request::BrowserFill { .. }
+            )
+            && !(self.browser_host)(requester.pid)
+        {
+            // A fill hands back the password itself, so only the extension's
+            // host, started by the browser, may ask for one; an agent sending
+            // the same request over the socket is refused.
+            Err(Failure::new(
+                "Only the VisiPass browser extension can ask for this. Use vp run or vp read instead",
             ))
         } else {
             self.execute(request, requester, &assessment, &mut grant)
@@ -1011,9 +1079,13 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 .append(&entry)
                 .is_err()
             {
-                return Response::err(
-                    "The access log could not be written, so the request was not completed",
-                );
+                // A vault change has happened by now: saying it did not would
+                // invite a retry and a duplicate.
+                return Response::err(if writes && result.is_ok() {
+                    "The change was made, but the access log could not be written. Do not retry; check the vault"
+                } else {
+                    "The access log could not be written, so the request was not completed"
+                });
             }
         }
         match result {
@@ -1053,10 +1125,10 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                     Err(e) => Response::err(e.0),
                 },
                 Ok(envelope) => {
-                    let mut requester =
-                        tokio::task::spawn_blocking(move || procinfo::identify(pid))
-                            .await
-                            .unwrap_or_else(|_| procinfo::identify(0));
+                    let identify = self.identify;
+                    let mut requester = tokio::task::spawn_blocking(move || identify(pid))
+                        .await
+                        .unwrap_or_else(|_| procinfo::identify(0));
                     match envelope.token.map(|t| {
                         self.tokens
                             .lock()
@@ -1112,8 +1184,8 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
         {
             return Ok(json!({ "running": true }));
         }
-        let program = approval::beside_self("visipass-app")
-            .or_else(|| approval::on_path("visipass-app"))
+        // Never from PATH: the app gets the private socket that serves app-only requests.
+        let program = approval::trusted_program("visipass-app")
             .ok_or_else(|| Failure::new("visipass-app is not installed next to visipassd"))?;
         let failed = || Failure::new("Could not start the VisiPass app");
         let (ours, theirs) = std::os::unix::net::UnixStream::pair().map_err(|_| failed())?;
@@ -1165,6 +1237,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
             agent: Some(APP_LABEL.into()),
             origin: None,
             task: None,
+            seated: true,
             project: procinfo::Project {
                 root: "(desktop app)".into(),
                 remote: None,

@@ -364,55 +364,103 @@ fn host_of(href: &str) -> String {
     host.strip_prefix("www.").map(String::from).unwrap_or(host)
 }
 
+/// Where a login may be filled: a page's scheme, host and port, parsed as the
+/// browser parses it. `https://bank.com:x@evil.com/` is evil.com, so a page URL
+/// carrying a user name or password is refused rather than split by hand.
+struct Origin {
+    https: bool,
+    host: String,
+    /// `None` for the scheme's default port.
+    port: Option<u16>,
+}
+
+fn origin(url: &url::Url) -> Option<Origin> {
+    let https = match url.scheme() {
+        "https" => true,
+        "http" => false,
+        _ => return None,
+    };
+    let host = url.host_str()?.trim_end_matches('.').to_lowercase();
+    let host = host.strip_prefix("www.").map(String::from).unwrap_or(host);
+    (!host.is_empty()).then_some(Origin {
+        https,
+        host,
+        port: url.port(),
+    })
+}
+
+/// A page the extension reports. Strict: http(s), no credentials in the URL.
+fn page_origin(page_url: &str) -> Option<Origin> {
+    let url = url::Url::parse(page_url).ok()?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return None;
+    }
+    origin(&url)
+}
+
+/// A website saved on an item, which may be written without a scheme
+/// (`payvy.com/login`); those count as https.
+fn saved_origin(href: &str) -> Option<Origin> {
+    let href = href.trim();
+    let url = if href.contains("://") {
+        url::Url::parse(href)
+    } else {
+        url::Url::parse(&format!("https://{href}"))
+    }
+    .ok()?;
+    origin(&url)
+}
+
+/// The registrable domain by the Public Suffix List, private section included,
+/// so `myapp.vercel.app` and `evil.vercel.app` are different sites.
+fn registrable(host: &str) -> Option<&str> {
+    psl::domain_str(host)
+}
+
 /// How well an item's websites match a page, for filling: 3 for the exact
 /// host, 2 for the same site (another subdomain), None otherwise. The exact
 /// host wins, so a login saved for admin.payvy.com is offered before one for
-/// payvy.com on admin.payvy.com.
+/// payvy.com on admin.payvy.com. Ports must agree, and a login saved for an
+/// https site never fills on plain http (the reverse is an upgrade, and fine).
 pub fn page_match(page_url: &str, item: &ItemSummary) -> Option<u32> {
-    let page_host = host_of(page_url);
-    let page_site = site_name(page_url);
-    if page_host.is_empty() {
-        return None;
-    }
+    let page = page_origin(page_url)?;
     item.urls
         .iter()
         .filter_map(|u| {
-            if host_of(&u.href) == page_host {
+            let saved = saved_origin(&u.href)?;
+            if (saved.https && !page.https) || saved.port != page.port {
+                return None;
+            }
+            if saved.host == page.host {
                 Some(3)
-            } else if page_site.is_some()
-                && site_name(&u.href) == page_site
-                && same_registrable(&u.href, page_url)
-            {
-                Some(2)
             } else {
-                None
+                registrable(&page.host)
+                    .filter(|site| registrable(&saved.host) == Some(*site))
+                    .map(|_| 2)
             }
         })
         .max()
 }
 
-/// `app.payvy.com` and `payvy.com` share a registrable domain; `payvy.com` and
-/// `payvy.net` do not.
-fn same_registrable(a: &str, b: &str) -> bool {
-    let tail = |u: &str| {
-        let host = host_of(u);
-        let labels: Vec<&str> = host.split('.').collect();
-        let n = if labels.len() >= 3
-            && labels[labels.len() - 2].len() <= 3
-            && labels[labels.len() - 1].len() == 2
-        {
-            3
-        } else {
-            2
-        };
-        labels[labels.len().saturating_sub(n)..].join(".")
-    };
-    tail(a) == tail(b)
+fn label(origin: &Origin) -> String {
+    match (origin.https, origin.port) {
+        (true, None) => origin.host.clone(),
+        (true, Some(port)) => format!("{}:{port}", origin.host),
+        (false, None) => format!("http://{}", origin.host),
+        (false, Some(port)) => format!("http://{}:{port}", origin.host),
+    }
 }
 
-/// The host a page belongs to, for grants and prompts: `dashboard.stripe.com`.
+/// The page a fill belongs to, for grants and prompts: `dashboard.stripe.com`,
+/// or `http://localhost:3000` off https. Empty when the URL is not a page
+/// VisiPass fills (not http(s), or credentials in the URL).
 pub fn page_host(url: &str) -> String {
-    host_of(url)
+    page_origin(url).map(|o| label(&o)).unwrap_or_default()
+}
+
+/// A saved website, for display: `payvy.com`.
+pub fn saved_host(href: &str) -> String {
+    saved_origin(href).map(|o| label(&o)).unwrap_or_default()
 }
 
 /// A parsed search: free words, `"quoted phrases"`, and field filters
@@ -706,5 +754,61 @@ mod rank_tests {
             "lookalike host"
         );
         assert_eq!(page_match("chrome://newtab", &root), None);
+    }
+
+    #[test]
+    fn page_matching_parses_urls_as_the_browser_does() {
+        let bank = item("Bank", Some("https://bank.com/login"), &[]);
+        for phish in [
+            "https://bank.com:x@evil.com/login",
+            "https://bank.com@evil.com/",
+        ] {
+            assert_eq!(page_match(phish, &bank), None, "{phish}");
+            assert_eq!(page_host(phish), "", "credentials in the URL: {phish}");
+        }
+        // A backslash is a path separator for http(s): the host is evil.com.
+        assert_eq!(page_match(r"https://evil.com\@bank.com/", &bank), None);
+        assert_eq!(page_host(r"https://evil.com\@bank.com/"), "evil.com");
+        assert_eq!(
+            page_match("http://bank.com/login", &bank),
+            None,
+            "https login on http"
+        );
+        assert_eq!(
+            page_match("https://bank.com:8443/", &bank),
+            None,
+            "other port"
+        );
+        assert_eq!(page_match("https://WWW.Bank.com./x", &bank), Some(3));
+        let old = item("Old", Some("http://bank.com"), &[]);
+        assert_eq!(
+            page_match("https://bank.com/", &old),
+            Some(3),
+            "upgrade to https"
+        );
+        let bare = item("Bare", Some("bank.com"), &[]);
+        assert_eq!(page_match("https://bank.com/", &bare), Some(3));
+        let dev = item("Dev", Some("http://localhost:3000"), &[]);
+        assert_eq!(page_match("http://localhost:3000/login", &dev), Some(3));
+        assert_eq!(page_match("http://localhost:4000/login", &dev), None);
+        assert_eq!(
+            page_host("http://localhost:3000/x"),
+            "http://localhost:3000"
+        );
+        assert_eq!(
+            page_host("https://dashboard.stripe.com/x"),
+            "dashboard.stripe.com"
+        );
+    }
+
+    #[test]
+    fn shared_hosting_suffixes_are_separate_sites() {
+        let app = item("App", Some("https://myapp.vercel.app"), &[]);
+        assert_eq!(page_match("https://evil.vercel.app/", &app), None);
+        let pages = item("Pages", Some("https://me.github.io"), &[]);
+        assert_eq!(page_match("https://them.github.io/", &pages), None);
+        let uk = item("Shop", Some("https://shop.example.co.uk"), &[]);
+        assert_eq!(page_match("https://www.example.co.uk/", &uk), Some(2));
+        assert_eq!(page_match("https://other.co.uk/", &uk), None);
     }
 }

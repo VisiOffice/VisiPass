@@ -56,6 +56,9 @@ impl Grant {
         self.live(now)
             && self.agent == requester.agent_label()
             && self.project == requester.project.root
+            // "This task" means the task that was asked: another session of the
+            // same agent in the same project asks again.
+            && self.task.is_none_or(|t| requester.task == Some(t))
             && self.operations.contains(&need.operation)
             && need.refs.is_subset(&self.refs)
             && need.vaults.is_subset(&self.vaults)
@@ -206,6 +209,7 @@ mod tests {
             agent: Some(agent.into()),
             origin: None,
             task: None,
+            seated: true,
             project: Project {
                 root: root.into(),
                 remote: None,
@@ -274,6 +278,48 @@ mod tests {
         grants.saved[0].expires_at = Some(now_unix() - 1);
         assert!(grants.find(&r, &n).is_none());
         assert!(grants.list().is_empty());
+    }
+
+    #[test]
+    fn a_task_grant_covers_only_its_own_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut grants = Grants::load(dir.path().join("grants.json"));
+        // This test process stands in for a live agent process.
+        let pid = std::process::id();
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        let start = stat[stat.rfind(')').unwrap() + 1..]
+            .split_whitespace()
+            .nth(19)
+            .unwrap()
+            .parse()
+            .unwrap();
+        let task = ProcessId { pid, start };
+        let mut first = requester("Claude Code", "/p");
+        first.task = Some(task);
+        let n = need(Operation::Run, &["op://a/b/c"]);
+        grants.record(&first, &n, Decision::Task).unwrap();
+        assert!(grants.find(&first, &n).is_some());
+        let mut second = requester("Claude Code", "/p");
+        second.task = Some(ProcessId { pid: 1, start: 0 });
+        assert!(grants.find(&second, &n).is_none(), "another session");
+        assert!(grants.find(&requester("Claude Code", "/p"), &n).is_none());
+    }
+
+    #[test]
+    fn a_detached_process_is_not_the_person_at_the_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut grants = Grants::load(dir.path().join("grants.json"));
+        let mut terminal = requester("x", "/p");
+        terminal.agent = None;
+        let n = need(Operation::Run, &["op://a/b/c"]);
+        grants.record(&terminal, &n, Decision::Always).unwrap();
+        assert!(grants.find(&terminal, &n).is_some());
+        let detached = Requester {
+            seated: false,
+            ..terminal
+        };
+        assert_eq!(detached.agent_label(), "detached");
+        assert!(grants.find(&detached, &n).is_none());
     }
 
     #[test]

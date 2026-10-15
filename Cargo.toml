@@ -27,6 +27,8 @@ vp-store = { path = "crates/vp-store" }
 vp-native = { path = "crates/vp-native" }
 vp-daemon = { path = "crates/vp-daemon" }
 aho-corasick = "1.1"
+psl = "2"
+url = "2.5"
 argon2 = { version = "0.5.3", features = ["zeroize"] }
 chacha20poly1305 = "0.10.1"
 ed25519-dalek = { version = "2.2", features = ["zeroize"] }
