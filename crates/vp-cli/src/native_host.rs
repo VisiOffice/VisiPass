@@ -13,11 +13,13 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use vp_core::Failure;
 use vp_core::ipc::Request;
+use vp_core::secret::Secret;
 
 pub const HOST_NAME: &str = "com.visioffice.visipass";
 /// Fixed by the public key in extension/manifest.json.
 pub const EXTENSION_ID: &str = "pmfmecknoobmojibgpbkpeckpdnmhnpm";
-const MAX_MESSAGE: usize = 1 << 20;
+/// Room for a screenshot of the page, for reading a two-factor QR code.
+const MAX_MESSAGE: usize = 3 << 20;
 
 fn read_message(input: &mut impl Read) -> Option<Value> {
     let mut length = [0u8; 4];
@@ -76,6 +78,7 @@ fn theme() -> Value {
 fn handle(message: &Value) -> Result<Value, Failure> {
     let text = |key: &str| message.get(key).and_then(Value::as_str).map(String::from);
     let required = |key: &str| text(key).ok_or_else(|| Failure::new(format!("Missing \"{key}\"")));
+    let flag = |key: &str| message.get(key).and_then(Value::as_bool).unwrap_or(false);
     match message.get("type").and_then(Value::as_str).unwrap_or("") {
         "ping" => Ok(json!({ "version": env!("CARGO_PKG_VERSION") })),
         "theme" => Ok(theme()),
@@ -97,6 +100,23 @@ fn handle(message: &Value) -> Result<Value, Failure> {
                 .get("force")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+        }),
+        "generate" => client::call(Request::BrowserGenerate),
+        "vaults" => client::call(Request::BrowserVaults),
+        "save" => client::call(Request::BrowserSave {
+            url: required("url")?,
+            username: text("username").unwrap_or_default(),
+            password: Secret::new(required("password")?),
+            check: flag("check"),
+            id: text("item"),
+            vault: text("vault"),
+        }),
+        "add-totp" => client::call(Request::BrowserAddTotp {
+            url: required("url")?,
+            id: required("item")?,
+            vault: required("vault")?,
+            image: text("image"),
+            key: text("key").map(Secret::new),
         }),
         "open-app" => client::call(Request::OpenApp { quick: false }),
         other => Err(Failure::new(format!("Unknown message \"{other}\""))),

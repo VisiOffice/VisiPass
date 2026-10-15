@@ -76,6 +76,35 @@ impl OpBackend {
         .await
     }
 
+    /// `op vault create`, once, then reads the vault list back.
+    pub(crate) async fn new_vault(&self, name: &str) -> Result<VaultRef, Failure> {
+        let named = |vaults: &[VaultRef]| {
+            vaults
+                .iter()
+                .find(|v| v.name.eq_ignore_ascii_case(name))
+                .cloned()
+        };
+        if named(&self.vault_list(None).await?).is_some() {
+            return Err(Failure::new(format!(
+                "A vault named \"{name}\" already exists"
+            )));
+        }
+        let unverified = "The vault may have been created, but could not be verified. Do not create it again; check the vault list first (1Password details suppressed)";
+        let created: VaultRef = self
+            .json(
+                &["vault", "create", name, "--format", "json"],
+                Call {
+                    failure: Some(unverified),
+                    ..Call::default()
+                },
+            )
+            .await?;
+        match named(&self.vault_list(None).await?) {
+            Some(vault) if vault.id == created.id => Ok(vault),
+            _ => Err(Failure::new(unverified)),
+        }
+    }
+
     async fn raw_item(&self, id: &str, vault: &str, failure: &str) -> Result<Secret, Failure> {
         Ok(Secret::new(
             self.op(

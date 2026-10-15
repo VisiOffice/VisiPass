@@ -44,6 +44,10 @@ pub trait Backend: Send + Sync + 'static {
         account: Option<&str>,
     ) -> impl Future<Output = Result<Vec<VaultRef>, Failure>> + Send;
 
+    /// Creates an empty vault, once, and confirms it exists. Refuses a name
+    /// already in use (ignoring case), so a retry never makes a second one.
+    fn create_vault(&self, name: &str) -> impl Future<Output = Result<VaultRef, Failure>> + Send;
+
     /// One item with its values. Human surfaces only.
     fn item(&self, id: &str, vault: &str) -> impl Future<Output = Result<Item, Failure>> + Send;
 

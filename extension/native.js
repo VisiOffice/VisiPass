@@ -54,7 +54,14 @@ export function fillPage(origin, username, password, totp) {
   } else {
     user_field = inputs.find((i) => i.type === "email" || /user|email|login/i.test(i.name + i.id + i.autocomplete));
   }
-  const otp_field = inputs.find((i) => i.autocomplete === "one-time-code" || /otp|totp|2fa|mfa|one.?time/i.test(i.name + i.id));
+  const otp_field = inputs.find(
+    (i) =>
+      ["text", "tel", "number", ""].includes(i.type) &&
+      (i.autocomplete === "one-time-code" ||
+        /otp|totp|2fa|mfa|one.?time|verification.?code|auth(entication)?.?code|security.?code|two.?factor/i.test(
+          `${i.name} ${i.id} ${i.placeholder} ${i.getAttribute("aria-label") || ""}`,
+        )),
+  );
   let filled = 0;
   if (password_field && password) { set(password_field, password); filled++; }
   if (user_field && username && user_field !== otp_field) { set(user_field, username); filled++; }
@@ -74,5 +81,5 @@ export async function fill(tab, login, force = false, target = { tabId: tab.id, 
     func: fillPage,
     args: [origin, values.username || "", values.password || "", values.totp || ""],
   });
-  return results.reduce((n, r) => n + (r.result || 0), 0);
+  return { filled: results.reduce((n, r) => n + (r.result || 0), 0), totp: Boolean(values.totp) };
 }

@@ -102,6 +102,12 @@ some-command-that-prints-a-key | vp create api-credential --title "OpenAI API Ke
 - Success means exit 0 and `"verified": true`. Reuse the returned `ref`; do not `read` it to double-check.
 - Duplicate titles are refused, and nothing is ever overwritten.
 
+If the vault the human names does not exist yet, create it (the human approves; a name already in use is refused before asking):
+
+```bash
+vp vault create VisiStaff --purpose "SES credentials for VisiStaff"
+```
+
 ## Check or update a login password
 
 ```bash

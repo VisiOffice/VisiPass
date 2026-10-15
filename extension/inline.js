@@ -1,7 +1,12 @@
 // The inline menu: a VisiPass mark in a login field and a "Log in as…" list of
 // the logins saved for this site. It shows titles and usernames only; values are
 // fetched by the background worker when you pick one, after VisiPass approves the
-// site, and filled into this frame only.
+// site, and filled into this frame only. On a new-password field it suggests a
+// generated password instead; on a two-factor code field it fills the code.
+//
+// When a form with a password is submitted (by a real submit, Enter or click),
+// the username and password go to the background worker, which asks VisiPass
+// whether they are new or changed and has the top frame show a save card.
 //
 // Everything is drawn in a closed shadow root, so the page cannot read the list.
 // Only real input picks a login: events the page dispatches itself
@@ -20,6 +25,54 @@
       if (!reply || !reply.ok) throw new Error((reply && reply.error) || "VisiPass did not answer");
       return reply.result;
     });
+
+  const hintOf = (el) =>
+    `${el.autocomplete} ${el.name} ${el.id} ${el.getAttribute("aria-label") || ""} ${el.placeholder}`;
+  const scopeOf = (el) => el.form || el.closest("form, [role=dialog], main") || document.body;
+
+  // A two-factor code field.
+  function isOtpField(el) {
+    if (!(el instanceof HTMLInputElement) || el.disabled || el.readOnly) return false;
+    if (!["text", "tel", "number", ""].includes(el.type)) return false;
+    if (el.autocomplete === "one-time-code") return true;
+    return /(^|[^a-z])(otp|totp|2fa|mfa)([^a-z]|$)|one.?time|verification.?code|auth(entication)?.?code|security.?code|two.?factor/i.test(
+      hintOf(el),
+    );
+  }
+
+  // A password field for a new password: sign-up, or the new one on a change form.
+  function isNewPassword(el) {
+    if (!(el instanceof HTMLInputElement) || el.type !== "password" || el.disabled || el.readOnly) return false;
+    if (/new-password/.test(el.autocomplete)) return true;
+    if (/current-password/.test(el.autocomplete)) return false;
+    if (/new|create|confirm|repeat|sign.?up|register/i.test(hintOf(el))) return true;
+    const fields = [...scopeOf(el).querySelectorAll("input[type=password]")];
+    // Two: password and confirmation. Three: current, new, confirmation.
+    if (fields.length === 2 || (fields.length >= 3 && fields.indexOf(el) > 0)) return true;
+    return /sign.?up|register|create.{0,16}account|join/i.test(`${document.title} ${location.pathname}`);
+  }
+
+  // The username that goes with a password field: the nearest textual field
+  // before it that looks like one.
+  function usernameFor(passwordField) {
+    const inputs = [...scopeOf(passwordField).querySelectorAll("input")].filter(shown);
+    const at = inputs.indexOf(passwordField);
+    const before = (at < 0 ? inputs : inputs.slice(0, at)).reverse();
+    const textual = (i) => ["text", "email", "tel", ""].includes(i.type) && i.value && !isOtpField(i);
+    const field =
+      before.find((i) => textual(i) && (i.type === "email" || /user|email|login|account/i.test(hintOf(i)))) ||
+      before.find(textual);
+    return field ? field.value.trim() : "";
+  }
+
+  // Sets a value the way typing does, so frameworks notice.
+  function setValue(el, value) {
+    const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), "value")?.set;
+    if (setter) setter.call(el, value);
+    else el.value = value;
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  }
 
   // A field we offer to fill: a password, or a username/email next to one.
   function isLoginField(el) {
@@ -43,6 +96,9 @@
   let menuOpen = false;
   let dismissed = new WeakSet();
   let menuVisible = false;
+  // "login", "new" (suggest a password) or "otp" (fill a two-factor code).
+  let mode = "login";
+  let suggestion = null;
 
   function ensureUi() {
     if (host) return;
@@ -69,6 +125,7 @@
       .sub { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .status { padding: 6px 12px; color: var(--muted); font-size: 11px; }
       .status.error { color: var(--danger); }
+      .sub.secret { color: var(--accent); font-size: 12px; letter-spacing: .02em; }
     </style>
     <button class="mark" title="VisiPass">${MARK}<span class="count"></span></button>
     <div class="menu" role="listbox"></div>`;
@@ -85,12 +142,16 @@
       },
       { trackVisibility: true, delay: 100 },
     ).observe(root.querySelector(".menu"));
+    applyTheme(host);
+  }
+
+  function applyTheme(target) {
     send({ kind: "theme" })
       .then((theme) => {
         for (const [key, value] of Object.entries(theme || {})) {
           if (!value) continue;
           const name = key === "background" ? "bg" : key === "foreground" ? "fg" : key;
-          host.style.setProperty(`--${name}`, key === "font" ? `"${value}", monospace` : value);
+          target.style.setProperty(`--${name}`, key === "font" ? `"${value}", monospace` : value);
         }
       })
       .catch(() => {});
@@ -128,7 +189,9 @@
     const menu = root.querySelector(".menu");
     const head = el("div", "head");
     head.innerHTML = MARK;
-    head.append(locked ? "VisiPass is locked" : "Log in as…");
+    head.append(
+      locked ? "VisiPass is locked" : mode === "new" ? "Password" : mode === "otp" ? "Fill the code from…" : "Log in as…",
+    );
     if (locked) {
       const row = el("div", "item selected");
       row.setAttribute("role", "option");
@@ -142,10 +205,15 @@
       if (status) menu.append(el("div", `status${isError ? " error" : ""}`, status));
       return;
     }
-    const rows = (logins || []).map((login, i) => {
+    const rows = entries().map((entry, i) => {
       const row = el("div", `item${i === selected ? " selected" : ""}`);
       row.setAttribute("role", "option");
-      row.append(el("div", "title", login.title), el("div", "sub", [login.username, login.host].filter(Boolean).join(" · ")));
+      if (entry.kind === "generate") {
+        row.append(el("div", "title", "Use a strong password"), el("div", "sub secret", entry.password));
+      } else {
+        const login = entry.login;
+        row.append(el("div", "title", login.title), el("div", "sub", [login.username, login.host].filter(Boolean).join(" · ")));
+      }
       row.addEventListener("mousedown", (e) => {
         if (!e.isTrusted) return;
         e.preventDefault();
@@ -158,8 +226,15 @@
     menu.querySelector(".selected")?.scrollIntoView({ block: "nearest" });
   }
 
+  // What the menu lists: the suggested password on a new-password field, else
+  // the logins for this site.
+  function entries() {
+    if (mode === "new") return suggestion ? [{ kind: "generate", password: suggestion }] : [];
+    return (logins || []).map((login) => ({ kind: "login", login }));
+  }
+
   function openMenu() {
-    if (!locked && (!logins || !logins.length)) return;
+    if (!locked && !entries().length) return;
     menuOpen = true;
     root.querySelector(".menu").style.display = "block";
     renderMenu();
@@ -213,13 +288,17 @@
       return renderMenu("VisiPass can't see this menu clearly on the page, so it won't fill here.", true);
     }
     if (locked) return unlock();
-    const login = logins[i];
-    if (!login) return;
+    const entry = entries()[i];
+    if (!entry) return;
     selected = i;
+    if (entry.kind === "generate") return useSuggestion(entry.password);
+    const login = entry.login;
     renderMenu("Filling… approve in VisiPass if it asks.");
     try {
-      const { filled } = await send({ kind: "page-fill", login });
-      if (filled === 0) renderMenu("No login fields found here.", true);
+      const { filled, totp } = await send({ kind: "page-fill", login });
+      if (mode === "otp" && !totp) {
+        renderMenu("This login has no two-factor code saved. Add one from the VisiPass button in the toolbar.", true);
+      } else if (filled === 0) renderMenu("No login fields found here.", true);
       else {
         if (field) dismissed.add(field);
         closeMenu();
@@ -229,25 +308,49 @@
     }
   }
 
+  // Saves the suggested password first, so a failed sign-up or a closed tab
+  // never loses it, then fills it into this field and the confirmation after it.
+  async function useSuggestion(password) {
+    renderMenu("Saving the new password in VisiPass…");
+    try {
+      const { vaultName } = await send({ kind: "page-use-generated", password, username: usernameFor(field) });
+      const fields = [...scopeOf(field).querySelectorAll("input[type=password]")].filter(shown);
+      for (const f of fields.slice(Math.max(0, fields.indexOf(field)))) setValue(f, password);
+      dismissed.add(field);
+      suggestion = null;
+      closeMenu();
+      renderCard({ status: "saved", title: location.host.replace(/^www\./, ""), saved: vaultName, generated: true });
+    } catch (error) {
+      renderMenu(error.message, true);
+    }
+  }
+
   async function show(target) {
     field = target;
+    mode = isOtpField(target) ? "otp" : isNewPassword(target) ? "new" : "login";
     let result;
     try {
-      result = await send({ kind: "page-logins" });
-    } catch {
-      return; // VisiPass not running: stay out of the way
+      result =
+        mode === "new"
+          ? { logins: [], locked: false, ...(await send({ kind: "page-generate" })) }
+          : await send({ kind: "page-logins" });
+    } catch (error) {
+      // VisiPass not running: stay out of the way, but say why in the console.
+      console.debug("VisiPass:", error.message);
+      return;
     }
     if (field !== target) return;
     locked = Boolean(result.locked);
     logins = result.logins || [];
-    if (!locked && !logins.length) return hide();
+    suggestion = mode === "new" ? result.password : null;
+    if (!locked && !entries().length) return hide();
     ensureUi();
     selected = 0;
     updateMark();
     place();
     // Open on first focus, as other managers do; not again after Esc or a fill.
     // While locked only the mark shows: unlocking waits for a click.
-    if (!locked && !dismissed.has(target)) openMenu();
+    if (!locked && !dismissed.has(target) && !(mode === "new" && target.value)) openMenu();
   }
 
   document.addEventListener(
@@ -255,7 +358,7 @@
     (e) => {
       const target = e.composedPath()[0];
       if (host && e.target === host) return;
-      if (isLoginField(target) && shown(target)) show(target);
+      if ((isLoginField(target) || isOtpField(target)) && shown(target)) show(target);
       else hide();
     },
     true,
@@ -266,14 +369,14 @@
     (e) => {
       if (!e.isTrusted || !field || e.composedPath()[0] !== field) return;
       if (!menuOpen) {
-        if (e.key === "ArrowDown" && (locked || (logins && logins.length))) {
+        if (e.key === "ArrowDown" && (locked || entries().length)) {
           openMenu();
           e.preventDefault();
         }
         return;
       }
       if (locked && e.key !== "Enter" && e.key !== "Escape") return;
-      if (e.key === "ArrowDown") selected = Math.min(selected + 1, logins.length - 1);
+      if (e.key === "ArrowDown") selected = Math.min(selected + 1, entries().length - 1);
       else if (e.key === "ArrowUp") selected = Math.max(selected - 1, 0);
       else if (e.key === "Enter") choose(selected);
       else if (e.key === "Escape") {
@@ -293,4 +396,187 @@
   }, true);
   addEventListener("scroll", place, true);
   addEventListener("resize", place);
+
+  // ---- Saving what was typed ----
+
+  // A form with a password was submitted. Only real input counts: a page
+  // cannot submit for you to get a card shown.
+  let lastSent = "";
+  function capture(scope) {
+    if (!scope) return;
+    const passwords = [...scope.querySelectorAll("input[type=password]")].filter((f) => f.value && shown(f));
+    if (!passwords.length) {
+      // The username step of a two-page login: remember it for the password page.
+      const user = [...scope.querySelectorAll("input")].find(
+        (i) => shown(i) && i.value && (i.type === "email" || /username|email/i.test(i.autocomplete)),
+      );
+      if (user) send({ kind: "page-username", username: user.value.trim() }).catch(() => {});
+      return;
+    }
+    // A new password if the form says which; else the last one (new and
+    // confirmation follow the current one); else the only one.
+    const fresh = passwords.find((f) => /new-password/.test(f.autocomplete));
+    const password = (fresh || passwords[passwords.length - 1]).value;
+    const username = usernameFor(passwords[0]);
+    const key = `${username}\n${password}`;
+    if (key === lastSent) return;
+    lastSent = key;
+    setTimeout(() => {
+      if (lastSent === key) lastSent = "";
+    }, 5000);
+    send({ kind: "page-submitted", username, password }).catch(() => {});
+  }
+
+  document.addEventListener("submit", (e) => e.isTrusted && capture(e.target), true);
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      if (!e.isTrusted || e.key !== "Enter" || menuOpen) return;
+      const target = e.composedPath()[0];
+      if (target instanceof HTMLInputElement && (target.type === "password" || isLoginField(target))) {
+        capture(scopeOf(target));
+      }
+    },
+    true,
+  );
+  document.addEventListener(
+    "click",
+    (e) => {
+      const path = e.composedPath();
+      if (!e.isTrusted || (host && path.includes(host)) || (card && path.includes(card))) return;
+      const button = path.find((n) => n instanceof Element && n.matches("button, input[type=submit], input[type=button], [role=button]"));
+      if (!button) return;
+      const scope = scopeOf(button);
+      if (scope.querySelector("input[type=password], input[type=email]")) capture(scope);
+    },
+    true,
+  );
+
+  // ---- The save card ----
+  //
+  // "Save login?", "Update password?", "Saved", or a new two-factor code, at the
+  // top right of the page in its own closed shadow root. Its buttons act only on
+  // real clicks while Chrome reports the card as visible.
+  let card = null;
+  let cardRoot = null;
+  let cardVisible = false;
+  let cardTimer = null;
+
+  function ensureCard() {
+    if (card) return;
+    card = document.createElement("visipass-card");
+    card.style.cssText =
+      "all: initial !important; position: fixed !important; top: 16px !important; right: 16px !important; z-index: 2147483647 !important;";
+    cardRoot = card.attachShadow({ mode: "closed" });
+    cardRoot.innerHTML = `<style>
+      :host { --bg:#1a1b26; --fg:#c0caf5; --accent:#7aa2f7; --muted:#9aa5ce; --danger:#f7768e; --font: ui-monospace, monospace; }
+      * { box-sizing: border-box; }
+      .card { width: 320px; background: var(--bg); color: var(--fg); font: 12px/1.45 var(--font); padding: 12px 14px;
+        border: 1px solid color-mix(in srgb, var(--fg) 18%, transparent); border-radius: 8px; box-shadow: 0 8px 28px rgba(0,0,0,.35); }
+      .head { display: flex; align-items: center; gap: 8px; font-weight: 600; margin-bottom: 6px; }
+      .head svg { width: 14px; height: 14px; color: var(--accent); flex: none; }
+      .line { color: var(--muted); word-break: break-all; }
+      .code { font-size: 22px; letter-spacing: .15em; color: var(--accent); margin: 6px 0; }
+      .error { color: var(--danger); }
+      select { width: 100%; margin-top: 8px; background: transparent; color: var(--fg); font: inherit; padding: 4px;
+        border: 1px solid color-mix(in srgb, var(--fg) 25%, transparent); }
+      option { background: var(--bg); }
+      .buttons { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+      button { font: inherit; padding: 4px 10px; cursor: pointer; background: transparent; color: var(--fg);
+        border: 1px solid color-mix(in srgb, var(--fg) 25%, transparent); border-radius: 4px; }
+      button.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+    </style><div class="card"></div>`;
+    (document.documentElement || document.body).append(card);
+    new IntersectionObserver(
+      (entries) => {
+        cardVisible = entries[entries.length - 1].isVisible === true;
+      },
+      { trackVisibility: true, delay: 100 },
+    ).observe(cardRoot.querySelector(".card"));
+    applyTheme(card);
+  }
+
+  function closeCard() {
+    clearTimeout(cardTimer);
+    card?.remove();
+    card = cardRoot = null;
+    cardVisible = false;
+  }
+
+  function button(label, primary, act) {
+    const b = el("button", primary ? "primary" : "", label);
+    b.addEventListener("click", (e) => {
+      if (!e.isTrusted) return;
+      if (!cardVisible) return;
+      act();
+    });
+    return b;
+  }
+
+  function renderCard(c) {
+    if (!c) return;
+    ensureCard();
+    clearTimeout(cardTimer);
+    const box = cardRoot.querySelector(".card");
+    const head = el("div", "head");
+    head.innerHTML = MARK;
+    const lines = [];
+    const buttons = el("div", "buttons");
+    const answer = async (choice, vault) => {
+      box.replaceChildren(head, el("div", "line", choice === "save" ? "Saving… approve in VisiPass if it asks." : ""));
+      try {
+        const result = await send({ kind: "page-offer-answer", choice, vault });
+        if (choice === "save") renderCard({ status: "saved", title: result.title, saved: result.vaultName });
+        else closeCard();
+      } catch (error) {
+        renderCard({ status: "error", error: error.message });
+      }
+    };
+    if (c.status === "new") {
+      head.append(`Save login for ${c.host}?`);
+      lines.push(el("div", "line", c.username || "No username"));
+      const select = el("select");
+      for (const v of c.vaults || []) {
+        const option = el("option", "", v.name);
+        option.value = v.id;
+        option.selected = v.id === c.vault;
+        select.append(option);
+      }
+      lines.push(select);
+      buttons.append(
+        button("Save", true, () => answer("save", select.value)),
+        button("Not now", false, () => answer("dismiss")),
+        button("Never for this site", false, () => answer("never")),
+      );
+    } else if (c.status === "changed") {
+      head.append(`Update the password for ${c.title}?`);
+      lines.push(el("div", "line", c.username || "No username"));
+      buttons.append(button("Update", true, () => answer("save")), button("Not now", false, () => answer("dismiss")));
+    } else if (c.status === "saved") {
+      head.append(c.generated ? "New password saved in VisiPass" : "Saved in VisiPass");
+      lines.push(el("div", "line", [c.title, c.saved].filter(Boolean).join(" · ")));
+      if (c.generated) lines.push(el("div", "line", "Finish signing up; VisiPass adds the username when you submit."));
+      cardTimer = setTimeout(closeCard, 6000);
+    } else if (c.status === "totp") {
+      head.append(`Two-factor code added to ${c.title}`);
+      lines.push(el("div", "code", c.code || ""), el("div", "line", "Enter this code on the page to finish turning on two-factor."));
+      buttons.append(button("Done", false, closeCard));
+      cardTimer = setTimeout(closeCard, 60_000);
+    } else {
+      head.append("VisiPass");
+      lines.push(el("div", "line error", c.error || "Something went wrong"));
+      buttons.append(button("Close", false, closeCard));
+    }
+    box.replaceChildren(head, ...lines, ...(buttons.children.length ? [buttons] : []));
+  }
+
+  if (window === window.top) {
+    chrome.runtime.onMessage.addListener((message) => {
+      if (message && message.kind === "show-card") renderCard(message.card);
+    });
+    // A login submitted on the previous page of this tab.
+    send({ kind: "page-offer" })
+      .then((offer) => offer && renderCard(offer))
+      .catch(() => {});
+  }
 })();

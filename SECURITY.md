@@ -13,7 +13,7 @@ VisiPass keeps secret values out of agent-visible surfaces by default. A value m
 - `vp run` and `vp env run` inject secrets into the chosen command's environment. That command is inside the trust boundary; VisiPass masks its output but cannot stop it from using or sending the value.
 - `vp kamal-fetch` prints the requested secrets in the form `kamal secrets fetch` uses, for `.kamal/secrets` to read.
 
-Anything else is a vulnerability: a secret in an error, diagnostic, argument, receipt, log entry, metadata response or unrelated process environment; a value released without a grant or an approval; a grant covering more than the human approved; an agent able to approve its own request; or a web page able to read or fill credentials through the browser extension without the user picking them.
+Anything else is a vulnerability: a secret in an error, diagnostic, argument, receipt, log entry, metadata response or unrelated process environment; a value released without a grant or an approval; a grant covering more than the human approved; an agent able to approve its own request; or a web page able to read or fill credentials, or save or change a login, through the browser extension without the user choosing to.
 
 For VisiPass's own vault (`vp init`), also report anything that weakens [docs/crypto-design.md](docs/crypto-design.md) or where the code departs from it. That vault has not had an outside audit yet.
 

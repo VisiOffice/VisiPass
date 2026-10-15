@@ -49,7 +49,14 @@ if args[:2] == ["item", "list"]:
         listed.append({k: c[k] for k in ("id", "title", "category", "vault")})
     print(json.dumps(listed))
 elif args[:2] == ["vault", "list"]:
-    print(json.dumps([V]))
+    vaults = os.path.join(DIR, "vaults.json")
+    print(json.dumps([V] + (json.load(open(vaults)) if os.path.exists(vaults) else [])))
+elif args[:2] == ["vault", "create"]:
+    vaults = os.path.join(DIR, "vaults.json")
+    made = json.load(open(vaults)) if os.path.exists(vaults) else []
+    vault = {"id": "n" * 26, "name": args[2], "content_version": 1}
+    json.dump(made + [vault], open(vaults, "w"))
+    print(json.dumps(vault))
 elif args[:3] == ["item", "get", "-"]:
     wanted = {e["id"] for e in json.loads(stdin)}
     for it in ITEMS:
@@ -336,6 +343,8 @@ fn find_batches_into_one_listing_and_one_detail_fetch() {
 fn the_log_names_the_process_and_project_that_asked() {
     // The daemon learns both from the socket peer, which differs per platform.
     let world = World::new(&[]);
+    // Its own project, whatever the temporary directory sits in.
+    std::fs::create_dir(world.path(".git")).unwrap();
     json(&world.vp(&["find", "openai"], None));
     let log = std::fs::read_to_string(world.path("state/access.log")).unwrap();
     let entry: serde_json::Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
@@ -978,6 +987,10 @@ fn only_a_host_the_browser_started_gets_a_fill() {
         &[
             serde_json::json!({"id": 1, "type": "match", "url": "https://dashboard.stripe.com/login"}),
             serde_json::json!({"id": 2, "type": "fill", "url": "https://dashboard.stripe.com/login", "item": "l".repeat(26), "vault": "v".repeat(26)}),
+            serde_json::json!({"id": 3, "type": "save", "url": "https://dashboard.stripe.com/login", "password": "x", "item": "l".repeat(26), "vault": "v".repeat(26)}),
+            serde_json::json!({"id": 4, "type": "save", "check": true, "url": "https://dashboard.stripe.com/login", "password": LOGIN}),
+            serde_json::json!({"id": 5, "type": "add-totp", "url": "https://dashboard.stripe.com/login", "item": "l".repeat(26), "vault": "v".repeat(26), "key": "JBSWY3DPEHPK3PXP"}),
+            serde_json::json!({"id": 6, "type": "generate"}),
         ],
     );
     for reply in &replies {
@@ -1176,6 +1189,230 @@ fn a_page_load_never_prompts_to_unlock_the_native_vault() {
         "Stripe Dashboard"
     );
     assert_eq!(world.approver.asked(), asked + 1);
+}
+
+#[test]
+fn creating_a_vault_asks_once_and_never_makes_two() {
+    let world = World::new(&[Decision::Deny, Decision::Once]);
+    let create = |name: &str| world.vp(&["vault", "create", name, "--purpose", "SES keys"], None);
+    let denied = create("VisiStaff");
+    assert!(!denied.status.success());
+    assert!(!world.calls().iter().any(|c| c["args"][1] == "create"));
+
+    let created = json(&create("VisiStaff"));
+    assert_eq!(created["vault"]["name"], "VisiStaff", "{created}");
+    assert_eq!(world.approver.asked(), 2);
+    let again = create("visistaff");
+    assert!(String::from_utf8_lossy(&again.stderr).contains("already exists"));
+    assert_eq!(
+        world.approver.asked(),
+        2,
+        "a duplicate is refused before asking"
+    );
+    assert_eq!(
+        world
+            .calls()
+            .iter()
+            .filter(|c| c["args"][1] == "create")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn a_vault_created_in_visipass_takes_new_items() {
+    let world = World::native(&[
+        // init: password, confirmation, Secret Key window
+        Decision::Once,
+        Decision::Once,
+        Decision::Deny,
+        // the vault, then the credential
+        Decision::Once,
+        Decision::Once,
+    ]);
+    clean(&world.vp(&["init"], None));
+    let created = json(&world.vp(&["vault", "create", "VisiStaff"], None));
+    assert_eq!(created["vault"]["name"], "VisiStaff", "{created}");
+    let saved = world.vp(
+        &[
+            "create",
+            "api-credential",
+            "--stdin",
+            "--vault",
+            "VisiStaff",
+            "--title",
+            "SES",
+        ],
+        Some(NEW_KEY),
+    );
+    assert!(
+        saved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&saved.stderr)
+    );
+    let again = world.vp(&["vault", "create", "VisiStaff"], None);
+    assert!(String::from_utf8_lossy(&again.stderr).contains("already exists"));
+}
+
+/// One message to the native host, as the extension sends it.
+fn host(world: &World, message: serde_json::Value) -> serde_json::Value {
+    let (mut replies, _) = native(world, ORIGIN, &[message]);
+    replies.remove(0)
+}
+
+#[test]
+fn the_browser_saves_new_logins_and_asks_before_changing_one() {
+    let world = World::native_browser(&[
+        // init: password, confirmation, Secret Key window
+        Decision::Once,
+        Decision::Once,
+        Decision::Deny,
+        // changing the saved Stripe password: denied, then allowed
+        Decision::Deny,
+        Decision::Once,
+    ]);
+    clean(&world.vp(&["init"], None));
+    clean(&world.vp(&["import", "op"], None));
+    let asked = world.approver.asked();
+    let signup = "https://app.example.com/signup?invite=1";
+
+    let generated = host(&world, serde_json::json!({"id": 1, "type": "generate"}));
+    let password = generated["result"]["password"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(password.chars().count(), 20, "{generated}");
+    let vault = host(&world, serde_json::json!({"id": 2, "type": "vaults"}))["result"]["vaults"][0]
+        ["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // A generated password is saved the moment it is used, then finished
+    // with the username the form took, without asking.
+    let saved = host(
+        &world,
+        serde_json::json!({"id": 3, "type": "save", "url": signup, "username": "", "password": password, "vault": vault}),
+    );
+    assert_eq!(saved["result"]["title"], "app.example.com", "{saved}");
+    let id = saved["result"]["id"].as_str().unwrap().to_string();
+    let finished = host(
+        &world,
+        serde_json::json!({"id": 4, "type": "save", "url": "https://app.example.com/welcome", "username": "robert@payvy.com", "password": password, "item": id, "vault": vault}),
+    );
+    assert_eq!(finished["ok"], true, "{finished}");
+    assert_eq!(
+        world.approver.asked(),
+        asked,
+        "saving new logins never prompts"
+    );
+
+    // The same draft cannot be finished from another site.
+    let elsewhere = host(
+        &world,
+        serde_json::json!({"id": 5, "type": "save", "url": "https://evil.example.net/", "username": "x", "password": "y", "item": id, "vault": vault}),
+    );
+    assert!(
+        elsewhere["error"]
+            .as_str()
+            .unwrap()
+            .contains("not saved for"),
+        "{elsewhere}"
+    );
+
+    let check = |username: &str, password: &str| {
+        host(
+            &world,
+            serde_json::json!({"id": 6, "type": "save", "check": true, "url": "https://app.example.com/login", "username": username, "password": password}),
+        )["result"]["status"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(check("robert@payvy.com", &password), "same");
+    assert_eq!(check("ROBERT@payvy.com", "something else"), "changed");
+    assert_eq!(check("someone@else.com", &password), "new");
+
+    // Changing a login VisiPass did not just make asks every time.
+    let stripe = "https://dashboard.stripe.com/login";
+    let login = host(
+        &world,
+        serde_json::json!({"id": 7, "type": "match", "url": stripe}),
+    )["result"]["logins"][0]
+        .clone();
+    let change = serde_json::json!({"id": 8, "type": "save", "url": stripe, "password": "new-stripe-password", "item": login["id"], "vault": login["vault"]});
+    let denied = host(&world, change.clone());
+    assert_eq!(denied["ok"], false, "{denied}");
+    let allowed = host(&world, change);
+    assert_eq!(allowed["ok"], true, "{allowed}");
+    assert_eq!(world.approver.asked(), asked + 2);
+    let username = login["username"].as_str().unwrap_or_default();
+    let status = host(
+        &world,
+        serde_json::json!({"id": 9, "type": "save", "check": true, "url": stripe, "username": username, "password": "new-stripe-password"}),
+    );
+    assert_eq!(status["result"]["status"], "same", "{status}");
+}
+
+#[test]
+fn a_two_factor_code_is_added_only_after_asking_and_then_fills() {
+    let world = World::native_browser(&[
+        Decision::Once,
+        Decision::Once,
+        Decision::Deny,
+        // adding the code, then the fill
+        Decision::Once,
+        Decision::Once,
+    ]);
+    clean(&world.vp(&["init"], None));
+    clean(&world.vp(&["import", "op"], None));
+    let stripe = "https://dashboard.stripe.com/login";
+    let login = host(
+        &world,
+        serde_json::json!({"id": 1, "type": "match", "url": stripe}),
+    )["result"]["logins"][0]
+        .clone();
+
+    let nothing = host(
+        &world,
+        serde_json::json!({"id": 2, "type": "add-totp", "url": stripe, "item": login["id"], "vault": login["vault"]}),
+    );
+    assert!(
+        nothing["error"].as_str().unwrap().contains("setup key"),
+        "{nothing}"
+    );
+    let wrong_site = host(
+        &world,
+        serde_json::json!({"id": 3, "type": "add-totp", "url": "https://evil.example.net/", "item": login["id"], "vault": login["vault"], "key": "JBSWY3DPEHPK3PXP"}),
+    );
+    assert!(
+        wrong_site["error"]
+            .as_str()
+            .unwrap()
+            .contains("not saved for"),
+        "{wrong_site}"
+    );
+    let asked = world.approver.asked();
+
+    let added = host(
+        &world,
+        serde_json::json!({"id": 4, "type": "add-totp", "url": stripe, "item": login["id"], "vault": login["vault"], "key": "JBSWY3DPEHPK3PXP"}),
+    );
+    let code = added["result"]["code"].as_str().unwrap().to_string();
+    assert_eq!(code.len(), 6, "{added}");
+    assert_eq!(world.approver.asked(), asked + 1);
+
+    let filled = host(
+        &world,
+        serde_json::json!({"id": 5, "type": "fill", "url": stripe, "item": login["id"], "vault": login["vault"]}),
+    );
+    assert_eq!(
+        filled["result"]["totp"].as_str().unwrap().len(),
+        6,
+        "{filled}"
+    );
+    let log = std::fs::read_to_string(world.path("state/access.log")).unwrap();
+    assert!(!log.contains("JBSWY3DPEHPK3PXP") && !log.contains(LOGIN));
 }
 
 #[test]

@@ -10,8 +10,11 @@ name = "visipassd"
 path = "src/main.rs"
 
 [dependencies]
+base64.workspace = true
 futures-util.workspace = true
+image.workspace = true
 libc.workspace = true
+rqrr.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -23,4 +26,5 @@ zeroize.workspace = true
 zbus.workspace = true
 
 [dev-dependencies]
+qrcode = { version = "0.14", default-features = false }
 tempfile.workspace = true

@@ -13,6 +13,7 @@ pub mod log;
 pub mod paths;
 pub mod presence;
 pub mod procinfo;
+pub mod qr;
 pub mod routed;
 pub mod session;
 pub mod tokens;
@@ -49,6 +50,72 @@ fn browser_entry(s: &vp_core::model::ItemSummary, exact: bool) -> Value {
         "category": s.category,
         "exact": exact,
     })
+}
+
+/// What matching and the prompt need from a full item.
+fn summary_of(item: &vp_core::model::Item) -> vp_core::model::ItemSummary {
+    vp_core::model::ItemSummary {
+        id: item.id.clone(),
+        title: item.title.clone(),
+        category: item.category.clone(),
+        vault: item.vault.clone(),
+        tags: item.tags.clone(),
+        urls: item
+            .urls
+            .iter()
+            .map(|u| vp_core::model::Url {
+                href: u.href.clone(),
+            })
+            .collect(),
+        favorite: item.favorite,
+        updated_at: None,
+        additional_information: None,
+    }
+}
+
+/// The built-in field with this purpose (`USERNAME`, `PASSWORD`).
+fn field_value(item: &vp_core::model::Item, purpose: &str) -> Option<String> {
+    item.fields
+        .iter()
+        .find(|f| f.purpose.as_deref() == Some(purpose))
+        .and_then(|f| f.value.as_ref())
+        .map(|v| v.expose().to_string())
+}
+
+/// Sets the built-in field with this purpose, adding it if the item has none.
+fn set_field(fields: &mut Vec<vp_core::model::Field>, purpose: &str, value: &str) {
+    let value = Some(vp_core::secret::Secret::new(value.to_string()));
+    match fields
+        .iter_mut()
+        .find(|f| f.purpose.as_deref() == Some(purpose))
+    {
+        Some(field) => field.value = value,
+        None => {
+            if let Some(mut field) = vp_core::model::template("LOGIN")
+                .into_iter()
+                .find(|f| f.purpose.as_deref() == Some(purpose))
+            {
+                field.value = value;
+                fields.push(field);
+            }
+        }
+    }
+}
+
+/// Website, login and vault, for a prompt about one saved login.
+fn login_details(page: &str, item: &vp_core::model::Item) -> Vec<(String, String)> {
+    let username = field_value(item, "USERNAME").filter(|u| !u.is_empty());
+    vec![
+        ("Website".into(), page.to_string()),
+        (
+            "Login".into(),
+            match username {
+                Some(u) => format!("{}  ({u})", item.title),
+                None => item.title.clone(),
+            },
+        ),
+        ("Vault".into(), item.vault.name.clone()),
+    ]
 }
 
 /// Writes a file readable only by this user, atomically.
@@ -94,6 +161,10 @@ pub struct Daemon<B, A> {
     browser_host: fn(u32) -> bool,
     /// Who a connecting process is.
     identify: fn(u32) -> Requester,
+    /// Logins this daemon saved from a generated password, with the page they
+    /// were made on: the extension may finish them (username, the password the
+    /// form took) without asking, but only from the same site.
+    drafts: Mutex<std::collections::HashMap<String, String>>,
 }
 
 /// Where a request arrived. Only `App`, the private socket pair visipassd
@@ -294,6 +365,38 @@ fn assess(request: &Request, requester: &Requester) -> Assessment {
             detail: Some(format!("fill on {}", find::page_host(url))),
             prompt: None,
         },
+        Request::CreateVault { name, purpose } => Assessment {
+            need: Some(Need {
+                operation: Operation::Write,
+                refs: BTreeSet::from([format!("create vault {name}")]),
+                vaults: BTreeSet::from([name.clone()]),
+            }),
+            refs: vec![],
+            detail: Some(format!("create vault {name}")),
+            prompt: Some(Prompt {
+                who: who(requester),
+                action: format!("create a new vault named \"{name}\""),
+                details: vec![project_line(requester), ("Vault".into(), name.clone())],
+                secrets: vec![],
+                purpose: purpose.clone(),
+                timeout_secs: approval::TIMEOUT.as_secs(),
+                paste: None,
+            }),
+        },
+        Request::BrowserSave { url, id, check, .. } => {
+            let page = find::page_host(url);
+            none(Some(match (check, id) {
+                (true, _) => format!("check a login on {page}"),
+                (false, None) => format!("save a new login from {page}"),
+                (false, Some(id)) => format!("update {id} from {page}"),
+            }))
+        }
+        Request::BrowserAddTotp { url, id, .. } => Assessment {
+            need: None,
+            refs: vec![format!("{}#{id}", find::page_host(url))],
+            detail: Some(format!("add a two-factor code on {}", find::page_host(url))),
+            prompt: None,
+        },
         Request::ImportEnv {
             vault,
             entries,
@@ -366,6 +469,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
             quick: tokio::sync::Mutex::new(None),
             browser_host: procinfo::started_by_browser,
             identify: procinfo::identify,
+            drafts: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -388,6 +492,57 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
     }
 
     /// Returns the grant that covers the request: an existing one, or the human's answer.
+    /// Asks the human, every time, and never records a grant: for changes to a
+    /// saved login that would be lost if a page could make them unasked.
+    async fn ask_each_time(&self, prompt: &Prompt) -> Result<(), Failure> {
+        let decision = {
+            let _turn = self.approvals.lock().await;
+            self.approver.ask(prompt).await?
+        };
+        if decision == Decision::Deny {
+            return Err(Failure::new(
+                "The human denied this request. Do not retry it; ask them how to proceed",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether the login saved for this site and username already has this
+    /// password. Only the answer leaves the daemon.
+    async fn compare_login(
+        &self,
+        url: &str,
+        username: &str,
+        password: &vp_core::secret::Secret,
+    ) -> Result<Value, Failure> {
+        let listed = self.backend.list(&vp_core::model::Scope::default()).await?;
+        let mut candidates: Vec<(u32, vp_core::model::ItemSummary)> = listed
+            .into_iter()
+            .filter(|l| l.summary.category == "LOGIN")
+            .filter_map(|l| find::page_match(url, &l.summary).map(|score| (score, l.summary)))
+            .filter(|(_, s)| {
+                s.additional_information
+                    .as_deref()
+                    .unwrap_or_default()
+                    .trim()
+                    .eq_ignore_ascii_case(username)
+            })
+            .collect();
+        candidates.sort_by_key(|c| std::cmp::Reverse(c.0));
+        let Some((_, login)) = candidates.into_iter().next() else {
+            return Ok(json!({ "status": "new" }));
+        };
+        let item = self.backend.item(&login.id, &login.vault.id).await?;
+        let same = field_value(&item, "PASSWORD").as_deref() == Some(password.expose());
+        Ok(json!({
+            "status": if same { "same" } else { "changed" },
+            "id": item.id,
+            "vault": item.vault.id,
+            "vaultName": item.vault.name,
+            "title": item.title,
+        }))
+    }
+
     async fn authorize(
         &self,
         requester: &Requester,
@@ -432,7 +587,10 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
         assessment: &Assessment,
         grant: &mut Option<String>,
     ) -> Result<Value, Failure> {
-        if let (Some(need), Some(prompt)) = (&assessment.need, &assessment.prompt) {
+        // Creating a vault checks the name before asking, below.
+        if let (Some(need), Some(prompt)) = (&assessment.need, &assessment.prompt)
+            && !matches!(request, Request::CreateVault { .. })
+        {
             *grant = Some(self.authorize(requester, need, prompt).await?);
         }
         match request {
@@ -892,23 +1050,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                     ));
                 }
                 let item = self.backend.item(&id, &vault).await?;
-                let summary = vp_core::model::ItemSummary {
-                    id: item.id.clone(),
-                    title: item.title.clone(),
-                    category: item.category.clone(),
-                    vault: item.vault.clone(),
-                    tags: item.tags.clone(),
-                    urls: item
-                        .urls
-                        .iter()
-                        .map(|u| vp_core::model::Url {
-                            href: u.href.clone(),
-                        })
-                        .collect(),
-                    favorite: item.favorite,
-                    updated_at: None,
-                    additional_information: None,
-                };
+                let summary = summary_of(&item);
                 let matches_page = find::page_match(&url, &summary).is_some();
                 let saved_for: Vec<String> = item
                     .urls
@@ -998,6 +1140,227 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                     "title": item.title,
                 }))
             }
+            Request::CreateVault { name, .. } => {
+                let name = name.trim();
+                if name.is_empty()
+                    || name.chars().count() > 100
+                    || name.chars().any(char::is_control)
+                {
+                    return Err(Failure::new(
+                        "A vault name needs 1 to 100 characters and no control characters",
+                    ));
+                }
+                if self
+                    .backend
+                    .vaults(None)
+                    .await?
+                    .iter()
+                    .any(|v| v.name.eq_ignore_ascii_case(name))
+                {
+                    return Err(Failure::new(format!(
+                        "A vault named \"{name}\" already exists; use it with --vault \"{name}\""
+                    )));
+                }
+                if let (Some(need), Some(prompt)) = (&assessment.need, &assessment.prompt) {
+                    *grant = Some(self.authorize(requester, need, prompt).await?);
+                }
+                let vault = self.backend.create_vault(name).await?;
+                Ok(json!({ "created": true, "vault": { "id": vault.id, "name": vault.name } }))
+            }
+            Request::BrowserGenerate => {
+                let password = vp_core::generate::generate(&vp_core::generate::Recipe::Random {
+                    length: 20,
+                    digits: true,
+                    symbols: true,
+                    avoid_ambiguous: true,
+                })?;
+                Ok(json!({ "password": password.expose() }))
+            }
+            Request::BrowserVaults => {
+                let vaults = self.backend.vaults(None).await?;
+                Ok(json!({
+                    "vaults": vaults
+                        .iter()
+                        .map(|v| json!({ "id": v.id, "name": v.name }))
+                        .collect::<Vec<_>>(),
+                }))
+            }
+            Request::BrowserSave {
+                url,
+                username,
+                password,
+                check,
+                id,
+                vault,
+            } => {
+                let page = find::page_host(&url);
+                let Some(website) = find::page_website(&url) else {
+                    return Err(Failure::new(
+                        "VisiPass only saves logins from web pages (http and https)",
+                    ));
+                };
+                if password.is_blank() {
+                    return Err(Failure::new("There is no password to save"));
+                }
+                let username = username.trim().to_string();
+                if check {
+                    return self.compare_login(&url, &username, &password).await;
+                }
+                let saved = match id {
+                    None => {
+                        let wanted = vault
+                            .ok_or_else(|| Failure::new("Choose a vault to save the login in"))?;
+                        let vault = self
+                            .backend
+                            .vaults(None)
+                            .await?
+                            .into_iter()
+                            .find(|v| v.id == wanted || v.name == wanted)
+                            .ok_or_else(|| {
+                                Failure::new(format!("There is no vault \"{wanted}\""))
+                            })?;
+                        let mut fields = vp_core::model::template("LOGIN");
+                        set_field(&mut fields, "USERNAME", &username);
+                        set_field(&mut fields, "PASSWORD", password.expose());
+                        let item = vp_core::model::Item {
+                            id: String::new(),
+                            title: page.clone(),
+                            category: "LOGIN".into(),
+                            vault,
+                            tags: vec![],
+                            urls: vec![vp_core::model::UrlEntry {
+                                href: website,
+                                label: None,
+                                primary: true,
+                            }],
+                            favorite: false,
+                            created_at: None,
+                            updated_at: None,
+                            sections: vec![],
+                            fields,
+                        };
+                        let saved = self.backend.save_item(&item).await?;
+                        if let Ok(mut drafts) = self.drafts.lock() {
+                            drafts.insert(saved.id.clone(), url.clone());
+                        }
+                        saved
+                    }
+                    Some(id) => {
+                        let vault =
+                            vault.ok_or_else(|| Failure::new("Missing the login's vault"))?;
+                        let mut item = self.backend.item(&id, &vault).await?;
+                        let drafted = self
+                            .drafts
+                            .lock()
+                            .ok()
+                            .and_then(|d| d.get(&id).cloned())
+                            .is_some_and(|made_on| find::same_site(&made_on, &url));
+                        if !drafted {
+                            if find::page_match(&url, &summary_of(&item)).is_none() {
+                                return Err(Failure::new(format!(
+                                    "\"{}\" is not saved for {page}, so VisiPass will not change it from here",
+                                    item.title
+                                )));
+                            }
+                            let old_username = field_value(&item, "USERNAME").unwrap_or_default();
+                            let mut details = login_details(&page, &item);
+                            if !username.is_empty() && username != old_username {
+                                details.push(("New username".into(), username.clone()));
+                            }
+                            let prompt = Prompt {
+                                who: who(requester),
+                                action: format!(
+                                    "change the password of your \"{}\" login to the one you just used on {page}",
+                                    item.title
+                                ),
+                                details,
+                                secrets: vec![],
+                                purpose: None,
+                                timeout_secs: approval::TIMEOUT.as_secs(),
+                                paste: None,
+                            };
+                            self.ask_each_time(&prompt).await?;
+                            *grant = Some("once".into());
+                        }
+                        if !username.is_empty() {
+                            set_field(&mut item.fields, "USERNAME", &username);
+                        }
+                        set_field(&mut item.fields, "PASSWORD", password.expose());
+                        self.backend.save_item(&item).await?
+                    }
+                };
+                Ok(json!({
+                    "saved": true,
+                    "id": saved.id,
+                    "vault": saved.vault.id,
+                    "vaultName": saved.vault.name,
+                    "title": saved.title,
+                }))
+            }
+            Request::BrowserAddTotp {
+                url,
+                id,
+                vault,
+                image,
+                key,
+            } => {
+                let page = find::page_host(&url);
+                if page.is_empty() {
+                    return Err(Failure::new("Open the site's two-factor setup page first"));
+                }
+                let (secret, from) = match (key, image) {
+                    (Some(key), _) if !key.is_blank() => (key, "the setup key you pasted"),
+                    (_, Some(image)) => (qr::otpauth_in(&image)?, "the QR code on the page"),
+                    _ => {
+                        return Err(Failure::new(
+                            "Paste the setup key, or scan the QR code on the page",
+                        ));
+                    }
+                };
+                let totp = vp_core::totp::Totp::parse(secret.expose())?;
+                let mut item = self.backend.item(&id, &vault).await?;
+                if find::page_match(&url, &summary_of(&item)).is_none() {
+                    return Err(Failure::new(format!(
+                        "\"{}\" is not saved for {page}. Add the code to the login for this site",
+                        item.title
+                    )));
+                }
+                let mut details = login_details(&page, &item);
+                details.push(("From".into(), from.into()));
+                if item.fields.iter().any(|f| f.kind == "OTP") {
+                    details.push((
+                        "Warning".into(),
+                        "This replaces the two-factor code already saved on this login.".into(),
+                    ));
+                }
+                let prompt = Prompt {
+                    who: who(requester),
+                    action: format!(
+                        "add a two-factor code to your \"{}\" login on {page}",
+                        item.title
+                    ),
+                    details,
+                    secrets: vec![],
+                    purpose: None,
+                    timeout_secs: approval::TIMEOUT.as_secs(),
+                    paste: None,
+                };
+                self.ask_each_time(&prompt).await?;
+                *grant = Some("once".into());
+                item.fields.retain(|f| f.kind != "OTP");
+                item.fields.push(vp_core::model::Field {
+                    id: format!("TOTP_{}", vp_native::new_id()),
+                    label: Some("one-time password".into()),
+                    kind: "OTP".into(),
+                    purpose: None,
+                    section: None,
+                    value: Some(secret),
+                    reference: None,
+                });
+                let saved = self.backend.save_item(&item).await?;
+                // The site asks for a code to finish turning two-factor on.
+                Ok(json!({ "saved": true, "title": saved.title, "code": totp.now().0 }))
+            }
             Request::OpenApp { .. } => Err(Failure::new("visipassd could not open the app")),
         }
     }
@@ -1019,6 +1382,8 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 | Request::Grants
                 | Request::Log { .. }
                 | Request::BrowserMatch { unlock: false, .. }
+                | Request::BrowserGenerate
+                | Request::BrowserVaults
         ) || (channel == Channel::App
             && matches!(request, Request::Vaults { .. } | Request::Items { .. }));
         let writes = matches!(
@@ -1031,6 +1396,9 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 | Request::Archive { .. }
                 | Request::SetFavorite { .. }
                 | Request::RequestSecret { .. }
+                | Request::BrowserSave { check: false, .. }
+                | Request::CreateVault { .. }
+                | Request::BrowserAddTotp { .. }
         );
         let mut grant = None;
         let result = if channel == Channel::Public && request.app_only() {
@@ -1043,6 +1411,10 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 Request::BrowserMatch { .. }
                     | Request::BrowserSearch { .. }
                     | Request::BrowserFill { .. }
+                    | Request::BrowserGenerate
+                    | Request::BrowserVaults
+                    | Request::BrowserSave { .. }
+                    | Request::BrowserAddTotp { .. }
             )
             && !(self.browser_host)(requester.pid)
         {

@@ -96,6 +96,10 @@ impl<U: Unlock> Backend for Routed<U> {
         route!(self, vaults(account))
     }
 
+    async fn create_vault(&self, name: &str) -> Result<VaultRef, Failure> {
+        route!(self, create_vault(name))
+    }
+
     async fn item(&self, id: &str, vault: &str) -> Result<Item, Failure> {
         route!(self, item(id, vault))
     }

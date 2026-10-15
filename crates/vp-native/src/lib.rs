@@ -1114,6 +1114,34 @@ impl<U: Unlock> Backend for NativeBackend<U> {
         self.with(|_, opened| Ok(opened.vaults.clone())).await
     }
 
+    async fn create_vault(&self, name: &str) -> Result<VaultRef, Failure> {
+        let name = name.trim().to_string();
+        self.with(move |store, opened| {
+            if opened
+                .vaults
+                .iter()
+                .any(|v| v.name.eq_ignore_ascii_case(&name))
+            {
+                return Err(Failure::new(format!(
+                    "A vault named \"{name}\" already exists"
+                )));
+            }
+            let vault = VaultRef { id: new_id(), name };
+            store
+                .create_vault(
+                    &mut opened.unlocked,
+                    &vault.id,
+                    &encode(&VaultAttrs {
+                        name: vault.name.clone(),
+                    }),
+                )
+                .map_err(failure)?;
+            opened.vaults.push(vault.clone());
+            Ok(vault)
+        })
+        .await
+    }
+
     async fn item(&self, id: &str, vault: &str) -> Result<Item, Failure> {
         let (id, vault) = (id.to_string(), vault.to_string());
         self.with(move |store, opened| {

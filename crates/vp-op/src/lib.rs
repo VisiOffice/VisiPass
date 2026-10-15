@@ -456,6 +456,10 @@ impl Backend for OpBackend {
         self.vault_list(account).await
     }
 
+    async fn create_vault(&self, name: &str) -> Result<VaultRef, Failure> {
+        self.new_vault(name.trim()).await
+    }
+
     async fn item(&self, id: &str, vault: &str) -> Result<vp_core::model::Item, Failure> {
         self.get_item(id, vault).await
     }

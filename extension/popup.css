@@ -26,3 +26,9 @@ li.selected { border-left-color: var(--accent); }
 #status button { margin-top: 6px; background: transparent; color: var(--danger); border: 1px solid var(--danger); padding: 4px 10px; font: inherit; cursor: pointer; }
 footer { display: flex; justify-content: space-between; padding: 6px 12px; border-top: 1px solid color-mix(in srgb, var(--fg) 10%, transparent); color: var(--muted); font-size: 10px; }
 footer a { color: var(--accent); text-decoration: none; }
+li .totp { margin-left: auto; background: transparent; color: var(--muted); border: 1px solid color-mix(in srgb, var(--fg) 20%, transparent); font: 10px var(--font); padding: 0 6px; cursor: pointer; }
+li .totp:hover { color: var(--accent); border-color: var(--accent); }
+#status > button { display: block; margin: 8px 0; background: var(--accent); color: var(--bg); border: 0; padding: 5px 10px; font: inherit; cursor: pointer; }
+.totp-row { display: flex; gap: 6px; }
+.totp-row input { flex: 1; padding: 4px 6px; background: var(--well); color: var(--fg); border: 1px solid color-mix(in srgb, var(--fg) 15%, transparent); font: inherit; }
+.totp-row button { background: transparent; color: var(--fg); border: 1px solid color-mix(in srgb, var(--fg) 25%, transparent); padding: 4px 10px; font: inherit; cursor: pointer; }

@@ -31,6 +31,17 @@ function render() {
       sub.className = "sub";
       sub.textContent = [login.username, login.host, login.vaultName].filter(Boolean).join(" · ");
       li.append(title, sub);
+      if (!search.value.trim()) {
+        const add = document.createElement("button");
+        add.className = "totp";
+        add.textContent = "+ 2FA";
+        add.title = "Add a two-factor code to this login";
+        add.addEventListener("click", (e) => {
+          e.stopPropagation();
+          addTotp(login);
+        });
+        title.append(add);
+      }
       li.addEventListener("click", () => choose(i));
       return li;
     }),
@@ -62,6 +73,52 @@ async function choose(i, force = false) {
       status.append(document.createElement("br"), anyway);
     }
   }
+}
+
+// Adds a two-factor code to `login`: from the QR code on the page (a screenshot
+// of the visible tab, read by VisiPass), or a pasted setup key. VisiPass asks
+// before saving it, which closes this popup, so the result shows on the page.
+function addTotp(login) {
+  status.className = "";
+  status.replaceChildren();
+  const heading = document.createElement("div");
+  heading.textContent = `Add a two-factor code to ${login.title}`;
+  const scan = document.createElement("button");
+  scan.textContent = "Scan the QR code on this page";
+  const key = document.createElement("input");
+  key.type = "password";
+  key.placeholder = "or paste the setup key";
+  key.autocomplete = "off";
+  const add = document.createElement("button");
+  add.textContent = "Add";
+  const send = async (fields) => {
+    say("Waiting for your approval in VisiPass…");
+    try {
+      const reply = await chrome.runtime.sendMessage({ kind: "popup-add-totp", tabId: tab.id, login, ...fields });
+      if (!reply.ok) throw new Error(reply.error);
+      window.close();
+    } catch (error) {
+      say(error.message, true);
+    }
+  };
+  scan.addEventListener("click", async () => {
+    try {
+      const image = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 92 });
+      await send({ image });
+    } catch (error) {
+      say(error.message, true);
+    }
+  });
+  add.addEventListener("click", () => key.value.trim() && send({ key: key.value.trim() }));
+  key.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter" && key.value.trim()) send({ key: key.value.trim() });
+  });
+  const row = document.createElement("div");
+  row.className = "totp-row";
+  row.append(key, add);
+  status.append(heading, scan, row);
+  scan.focus();
 }
 
 let timer = null;

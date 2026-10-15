@@ -193,6 +193,9 @@ enum Commands {
     /// List or revoke the standing grants the human has given
     #[command(subcommand)]
     Grant(GrantCommands),
+    /// Create a vault (asks the human)
+    #[command(subcommand)]
+    Vault(VaultCommands),
     /// Show the access log (never contains values)
     Log {
         #[arg(long, default_value_t = 50)]
@@ -373,6 +376,17 @@ enum AgentCommands {
     List,
     /// Revoke a token by ID
     Revoke { id: String },
+}
+
+#[derive(Subcommand)]
+enum VaultCommands {
+    /// Create an empty vault; refuses a name already in use
+    Create {
+        /// The new vault's name
+        name: String,
+        #[command(flatten)]
+        purpose: Purpose,
+    },
 }
 
 #[derive(Subcommand)]
@@ -779,6 +793,12 @@ fn execute(command: Commands) -> Result<i32, Failure> {
         Commands::Grant(GrantCommands::List) => print(&client::call(Request::Grants)?),
         Commands::Grant(GrantCommands::Revoke { id, all }) => {
             print(&client::call(Request::Revoke { id, all })?)
+        }
+        Commands::Vault(VaultCommands::Create { name, purpose }) => {
+            print(&client::call(Request::CreateVault {
+                name,
+                purpose: purpose.purpose,
+            })?)
         }
         Commands::Log { limit } => print(&client::call(Request::Log { limit })?),
         Commands::Quick => {

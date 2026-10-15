@@ -458,6 +458,27 @@ pub fn page_host(url: &str) -> String {
     page_origin(url).map(|o| label(&o)).unwrap_or_default()
 }
 
+/// The website to save on a new login made on this page: its scheme, host and
+/// port (`https://app.payvy.com`), never the path or query.
+pub fn page_website(url: &str) -> Option<String> {
+    page_origin(url)?;
+    let origin = url::Url::parse(url).ok()?.origin();
+    origin.is_tuple().then(|| origin.ascii_serialization())
+}
+
+/// Whether two pages are the same site (registrable domain, scheme and port).
+pub fn same_site(a: &str, b: &str) -> bool {
+    match (page_origin(a), page_origin(b)) {
+        (Some(a), Some(b)) => {
+            a.https == b.https
+                && a.port == b.port
+                && (a.host == b.host
+                    || registrable(&a.host).is_some_and(|site| registrable(&b.host) == Some(site)))
+        }
+        _ => false,
+    }
+}
+
 /// A saved website, for display: `payvy.com`.
 pub fn saved_host(href: &str) -> String {
     saved_origin(href).map(|o| label(&o)).unwrap_or_default()
@@ -799,6 +820,23 @@ mod rank_tests {
             page_host("https://dashboard.stripe.com/x"),
             "dashboard.stripe.com"
         );
+    }
+
+    #[test]
+    fn a_new_login_saves_the_pages_origin() {
+        assert_eq!(
+            page_website("https://app.payvy.com/signup?next=/x#y").as_deref(),
+            Some("https://app.payvy.com")
+        );
+        assert_eq!(
+            page_website("http://localhost:3000/register").as_deref(),
+            Some("http://localhost:3000")
+        );
+        assert_eq!(page_website("https://a:b@evil.com/"), None);
+        assert_eq!(page_website("file:///etc/passwd"), None);
+        assert!(same_site("https://app.payvy.com/a", "https://payvy.com/b"));
+        assert!(!same_site("https://a.vercel.app/", "https://b.vercel.app/"));
+        assert!(!same_site("https://payvy.com/", "http://payvy.com/"));
     }
 
     #[test]

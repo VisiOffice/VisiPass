@@ -295,6 +295,13 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         purpose: Option<String>,
     },
+    /// Creates an empty vault. Always asks the human, unless an agent token
+    /// for a vault of that name allows writes.
+    CreateVault {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        purpose: Option<String>,
+    },
     /// Opens the desktop app (or, with `quick`, the Quick Access palette);
     /// visipassd launches it and hands it a private channel.
     OpenApp {
@@ -408,6 +415,40 @@ pub enum Request {
         #[serde(default)]
         force: bool,
     },
+    /// A strong password for a sign-up form. Nothing is saved.
+    BrowserGenerate,
+    /// The vaults a login saved from the browser can go to. Names only.
+    BrowserVaults,
+    /// A login typed or generated on the page at `url`. With `check`, compares
+    /// it with the saved login for that username and writes nothing ("new",
+    /// "same" or "changed"). Without `id`, creates a login in `vault`. With
+    /// `id`, updates that login: one saved from this site's generated password
+    /// in this daemon's lifetime without asking, any other only after the human
+    /// approves.
+    BrowserSave {
+        url: String,
+        #[serde(default)]
+        username: String,
+        password: Secret,
+        #[serde(default)]
+        check: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        vault: Option<String>,
+    },
+    /// Adds a one-time-code secret to a login for the page at `url`, read from
+    /// a QR code in `image` (a screenshot of the page, base64 PNG or JPEG) or
+    /// from `key` (an otpauth:// link or the setup key). Always asks the human.
+    BrowserAddTotp {
+        url: String,
+        id: String,
+        vault: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        image: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<Secret>,
+    },
     Grants,
     Revoke {
         #[serde(default)]
@@ -466,6 +507,12 @@ impl Request {
             Request::BrowserMatch { .. } => "browser-match",
             Request::BrowserSearch { .. } => "browser-search",
             Request::BrowserFill { .. } => "browser-fill",
+            Request::CreateVault { .. } => "create-vault",
+            Request::BrowserGenerate => "browser-generate",
+            Request::BrowserVaults => "browser-vaults",
+            Request::BrowserSave { check: true, .. } => "browser-check",
+            Request::BrowserSave { .. } => "browser-save",
+            Request::BrowserAddTotp { .. } => "browser-add-totp",
             Request::Grants => "grants",
             Request::Revoke { .. } => "revoke",
             Request::Log { .. } => "log",
