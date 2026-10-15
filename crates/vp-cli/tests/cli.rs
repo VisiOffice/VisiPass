@@ -127,6 +127,10 @@ fn as_human(pid: u32) -> vp_daemon::procinfo::Requester {
     let mut requester = vp_daemon::procinfo::identify(pid);
     requester.agent = None;
     requester.seated = true;
+    // Under a real agent (these tests often run in one) the project was the agent's.
+    if let Some(cwd) = vp_daemon::procinfo::working_dir(pid) {
+        requester.project = vp_daemon::procinfo::project_of(&cwd);
+    }
     requester
 }
 
