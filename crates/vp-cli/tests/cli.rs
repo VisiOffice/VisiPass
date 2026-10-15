@@ -1254,6 +1254,80 @@ fn a_vault_created_in_visipass_takes_new_items() {
     assert!(String::from_utf8_lossy(&again.stderr).contains("already exists"));
 }
 
+#[test]
+fn the_popup_opens_edits_adds_and_archives_items() {
+    let world = World::native_browser(&[Decision::Once, Decision::Once, Decision::Deny]);
+    clean(&world.vp(&["init"], None));
+    clean(&world.vp(&["import", "op"], None));
+    let asked = world.approver.asked();
+    let stripe = "https://dashboard.stripe.com/login";
+    let login = host(
+        &world,
+        serde_json::json!({"id": 1, "type": "match", "url": stripe}),
+    )["result"]["logins"][0]
+        .clone();
+
+    let opened = host(
+        &world,
+        serde_json::json!({"id": 2, "type": "item", "item": login["id"], "vault": login["vault"]}),
+    );
+    let mut item = opened["result"].clone();
+    assert!(
+        item.to_string().contains(LOGIN),
+        "the popup shows values: {opened}"
+    );
+
+    item["title"] = "Stripe (work)".into();
+    item["fields"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!(
+            {"id": "custom1", "label": "PIN", "type": "CONCEALED", "value": "4321"}
+        ));
+    let saved = host(
+        &world,
+        serde_json::json!({"id": 3, "type": "save-item", "data": item}),
+    );
+    assert_eq!(saved["result"]["title"], "Stripe (work)", "{saved}");
+    assert!(saved["result"].to_string().contains("4321"));
+
+    let mut fresh = serde_json::json!({
+        "title": "New site", "category": "LOGIN", "vault": item["vault"],
+        "urls": [{"href": "https://new.example.com", "primary": true}],
+        "fields": [{"id": "username", "type": "STRING", "purpose": "USERNAME", "value": "me"},
+                   {"id": "password", "type": "CONCEALED", "purpose": "PASSWORD", "value": "pw-1"}]
+    });
+    let created = host(
+        &world,
+        serde_json::json!({"id": 4, "type": "save-item", "data": fresh.take()}),
+    );
+    let id = created["result"]["id"].as_str().unwrap().to_string();
+    assert!(!id.is_empty(), "{created}");
+    let archived = host(
+        &world,
+        serde_json::json!({"id": 5, "type": "archive", "item": id, "vault": item["vault"]["id"]}),
+    );
+    assert_eq!(archived["ok"], true, "{archived}");
+    assert_eq!(world.approver.asked(), asked, "the popup never prompts");
+
+    // Only the browser's host: an agent asking for the same is refused.
+    let agent = World::new(&[Decision::Always]);
+    let (replies, _) = native(
+        &agent,
+        ORIGIN,
+        &[
+            serde_json::json!({"id": 1, "type": "item", "item": "l".repeat(26), "vault": "v".repeat(26)}),
+        ],
+    );
+    assert!(
+        replies[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("Only the VisiPass app"),
+        "{replies:?}"
+    );
+}
+
 /// One message to the native host, as the extension sends it.
 fn host(world: &World, message: serde_json::Value) -> serde_json::Value {
     let (mut replies, _) = native(world, ORIGIN, &[message]);

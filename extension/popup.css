@@ -26,9 +26,36 @@ li.selected { border-left-color: var(--accent); }
 #status button { margin-top: 6px; background: transparent; color: var(--danger); border: 1px solid var(--danger); padding: 4px 10px; font: inherit; cursor: pointer; }
 footer { display: flex; justify-content: space-between; padding: 6px 12px; border-top: 1px solid color-mix(in srgb, var(--fg) 10%, transparent); color: var(--muted); font-size: 10px; }
 footer a { color: var(--accent); text-decoration: none; }
-li .totp { margin-left: auto; background: transparent; color: var(--muted); border: 1px solid color-mix(in srgb, var(--fg) 20%, transparent); font: 10px var(--font); padding: 0 6px; cursor: pointer; }
-li .totp:hover { color: var(--accent); border-color: var(--accent); }
-#status > button { display: block; margin: 8px 0; background: var(--accent); color: var(--bg); border: 0; padding: 5px 10px; font: inherit; cursor: pointer; }
-.totp-row { display: flex; gap: 6px; }
-.totp-row input { flex: 1; padding: 4px 6px; background: var(--well); color: var(--fg); border: 1px solid color-mix(in srgb, var(--fg) 15%, transparent); font: inherit; }
-.totp-row button { background: transparent; color: var(--fg); border: 1px solid color-mix(in srgb, var(--fg) 25%, transparent); padding: 4px 10px; font: inherit; cursor: pointer; }
+header .icon { background: transparent; color: var(--accent); border: 1px solid color-mix(in srgb, var(--fg) 15%, transparent); font: 16px/1 var(--font); width: 28px; height: 28px; cursor: pointer; }
+#item-view { padding: 8px 12px 12px; max-height: 560px; overflow-y: auto; }
+.item-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.item-title { flex: 1; font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+button { font: inherit; cursor: pointer; }
+button.back { background: transparent; border: 0; color: var(--accent); padding: 2px 0; }
+button.icon.star { background: transparent; border: 0; color: var(--accent); font-size: 16px; }
+.note { color: var(--muted); font-size: 11px; margin: 4px 0; }
+.note.error { color: var(--danger); }
+.tools { display: flex; gap: 6px; margin: 8px 0; flex-wrap: wrap; align-items: center; }
+.tools button, button.small { background: transparent; color: var(--fg); border: 1px solid color-mix(in srgb, var(--fg) 25%, transparent); padding: 3px 10px; border-radius: 3px; }
+button.small { padding: 1px 6px; font-size: 10px; }
+button.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+button.danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); padding: 3px 10px; border-radius: 3px; }
+button.link { background: transparent; border: 0; color: var(--accent); padding: 4px 0; text-align: left; }
+.fields { display: flex; flex-direction: column; gap: 6px; }
+.field { display: grid; grid-template-columns: 1fr auto; grid-template-areas: "label actions" "value actions"; padding: 6px 8px; background: var(--well); border-radius: 4px; }
+.field .label { grid-area: label; }
+.field .value { grid-area: value; word-break: break-all; color: var(--fg); text-decoration: none; }
+.field a.value { color: var(--accent); }
+.field .actions { grid-area: actions; display: flex; gap: 4px; align-items: center; }
+.label { color: var(--muted); font-size: 10px; text-transform: lowercase; }
+.value.notes { white-space: pre-wrap; }
+.value.code { font-size: 18px; letter-spacing: .12em; color: var(--accent); }
+.label .left { color: var(--accent); }
+label.edit, .group { display: flex; flex-direction: column; gap: 3px; }
+label.edit input, label.edit textarea, label.edit select, .group input { padding: 4px 6px; background: var(--well); color: var(--fg); border: 1px solid color-mix(in srgb, var(--fg) 15%, transparent); font: inherit; outline: none; min-width: 0; }
+label.edit input:focus, label.edit textarea:focus, .group input:focus { border-color: var(--accent); }
+label.edit textarea { min-height: 60px; resize: vertical; }
+option { background: var(--bg); }
+.group .line { display: flex; gap: 4px; }
+.group .line input { flex: 1; }
+.inline-tools { display: flex; gap: 8px; }

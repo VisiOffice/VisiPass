@@ -118,6 +118,24 @@ fn handle(message: &Value) -> Result<Value, Failure> {
             image: text("image"),
             key: text("key").map(Secret::new),
         }),
+        // From the popup only: the extension never lets a page send these.
+        "item" => client::call(Request::Item {
+            id: required("item")?,
+            vault: required("vault")?,
+        }),
+        "save-item" => client::call(Request::SaveItem {
+            item: serde_json::from_value(message.get("data").cloned().unwrap_or(Value::Null))
+                .map_err(|_| Failure::new("That item could not be read"))?,
+        }),
+        "archive" => client::call(Request::Archive {
+            id: required("item")?,
+            vault: required("vault")?,
+        }),
+        "favorite" => client::call(Request::SetFavorite {
+            id: required("item")?,
+            vault: required("vault")?,
+            favorite: flag("favorite"),
+        }),
         "open-app" => client::call(Request::OpenApp { quick: false }),
         other => Err(Failure::new(format!("Unknown message \"{other}\""))),
     }

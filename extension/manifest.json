@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "VisiPass",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Fill, suggest and save logins and two-factor codes from VisiPass. Fills only on the login's own site.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA1xlndh0FPLvMqwav5sm5QmNL8dMguZlwRd/vcE2ZTzE3H0GRqTJLGU2uQi3S1wz1x5xjdvixnmDZzfbZ5o+dWeXq+lwzgA9cLg6WVvFrqEexQzV1Aehqw86eWkXvCNrwB0LrLl0wf7pxjYpsN4oQsMr7lhIbuz8DtAV4yrDJtCn1RZr6rgspOBF4QrdqeCuNLvKj/AID7NuXnJV37GHmNoJHzTbNGI9TONWwzD6sKhf4rEq/zcPS5hx6SmMkWKUe2RII6uKDpiRZMdXwPCMSpjb7dlQ/5qlWx85iaRKhyaSKJm5wovIiFGUs71yLclaNUWKNnJk6wkty9xJL+VTzDwIDAQAB",
   "permissions": [

@@ -1401,7 +1401,19 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 | Request::BrowserAddTotp { .. }
         );
         let mut grant = None;
-        let result = if channel == Channel::Public && request.app_only() {
+        // The extension's popup is a human surface like the app: it may open,
+        // edit, add and archive items, but only through the browser-started host.
+        let popup = matches!(
+            request,
+            Request::Item { .. }
+                | Request::SaveItem { .. }
+                | Request::Archive { .. }
+                | Request::SetFavorite { .. }
+        );
+        let result = if channel == Channel::Public
+            && request.app_only()
+            && !(popup && (self.browser_host)(requester.pid))
+        {
             Err(Failure::new(
                 "Only the VisiPass app can do this. Use vp find, vp run or vp read instead",
             ))
