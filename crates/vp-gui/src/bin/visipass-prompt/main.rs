@@ -9,6 +9,10 @@
 //! prompt. On macOS it is the same overlay, as a borderless pop-up panel over
 //! the main display. Elsewhere it is an ordinary window.
 //!
+//! A secret an agent asks for (`PasteMode::Secret`) is always an ordinary
+//! window: the human has to reach the page or app the value is on to copy it,
+//! and an overlay would cover it and hold the keyboard.
+//!
 //! `visipass-prompt --demo` shows a sample request, for checking the styling;
 //! `--demo-paste`, `--demo-unlock`, `--demo-new` and `--demo-key` show the paste window's modes.
 
@@ -54,7 +58,7 @@ fn read_prompt() -> Option<ApprovalPrompt> {
     serde_json::from_str(&input).ok()
 }
 
-fn options(overlay: bool, cx: &App) -> WindowOptions {
+fn options(overlay: bool, title: &str, cx: &App) -> WindowOptions {
     let size = Size::new(px(600.), px(560.));
     let mut options = WindowOptions {
         titlebar: None,
@@ -95,7 +99,7 @@ fn options(overlay: bool, cx: &App) -> WindowOptions {
         }
     } else {
         options.titlebar = Some(gpui::TitlebarOptions {
-            title: Some("VisiPass approval".into()),
+            title: Some(title.into()),
             ..Default::default()
         });
         options.kind = WindowKind::Normal;
@@ -157,8 +161,13 @@ fn main() {
         }
     };
     let theme = vp_gui::theme::Theme::load();
-    let overlay = cfg!(target_os = "macos")
-        || (cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some());
+    let copying = matches!(
+        prompt.paste.as_ref().map(|p| &p.mode),
+        Some(vp_core::ipc::PasteMode::Secret)
+    );
+    let overlay = !copying
+        && (cfg!(target_os = "macos")
+            || (cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some()));
 
     gpui_platform::application()
         .with_assets(vp_gui::assets::Assets)
@@ -167,18 +176,24 @@ fn main() {
             let open = |overlay: bool, cx: &mut App| -> Result<(), ()> {
                 let (prompt, theme) = (prompt.clone(), theme.clone());
                 if prompt.paste.is_some() {
-                    cx.open_window(options(overlay, cx), move |window, cx| {
-                        cx.new(|cx| paste::PasteView::new(prompt, theme, overlay, window, cx))
-                    })
+                    cx.open_window(
+                        options(overlay, "VisiPass: add a secret", cx),
+                        move |window, cx| {
+                            cx.new(|cx| paste::PasteView::new(prompt, theme, overlay, window, cx))
+                        },
+                    )
                     .map(|_| ())
                     .map_err(|_| ())
                 } else {
-                    cx.open_window(options(overlay, cx), move |window, cx| {
-                        let view = cx.new(|cx| ApprovalView::new(prompt, theme, overlay, cx));
-                        let focus = view.read(cx).focus_handle().clone();
-                        window.focus(&focus, cx);
-                        view
-                    })
+                    cx.open_window(
+                        options(overlay, "VisiPass approval", cx),
+                        move |window, cx| {
+                            let view = cx.new(|cx| ApprovalView::new(prompt, theme, overlay, cx));
+                            let focus = view.read(cx).focus_handle().clone();
+                            window.focus(&focus, cx);
+                            view
+                        },
+                    )
                     .map(|_| ())
                     .map_err(|_| ())
                 }
