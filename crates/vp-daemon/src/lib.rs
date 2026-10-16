@@ -73,6 +73,53 @@ fn summary_of(item: &vp_core::model::Item) -> vp_core::model::ItemSummary {
     }
 }
 
+/// A Proton Pass export's JSON: the file itself, or `data.json` inside the
+/// .zip Proton Pass saves.
+fn read_export(path: &str) -> Result<Vec<u8>, Failure> {
+    use std::io::Read;
+    const MAX: u64 = 256 << 20;
+    let file =
+        std::fs::File::open(path).map_err(|_| Failure::new(format!("Could not open {path}")))?;
+    let mut bytes = Vec::new();
+    file.take(MAX + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| Failure::new(format!("Could not read {path}")))?;
+    if bytes.len() as u64 > MAX {
+        return Err(Failure::new(format!(
+            "{path} is too large to be a Proton Pass export"
+        )));
+    }
+    if !bytes.starts_with(b"PK") {
+        return Ok(bytes);
+    }
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+        .map_err(|_| Failure::new(format!("{path} is not a readable .zip")))?;
+    if zip.file_names().any(|n| n.ends_with(".pgp")) {
+        return Err(Failure::new(
+            "This Proton Pass export is encrypted. Export again and choose ZIP (or CSV)",
+        ));
+    }
+    let name = zip
+        .file_names()
+        .find(|n| n.rsplit('/').next() == Some("data.json"))
+        .map(String::from)
+        .ok_or_else(|| {
+            Failure::new("The .zip has no data.json. Export from Proton Pass and choose ZIP")
+        })?;
+    let entry = zip
+        .by_name(&name)
+        .map_err(|_| Failure::new(format!("Could not read {name} in the .zip")))?;
+    let mut json = Vec::new();
+    entry
+        .take(MAX + 1)
+        .read_to_end(&mut json)
+        .map_err(|_| Failure::new(format!("Could not read {name} in the .zip")))?;
+    if json.len() as u64 > MAX {
+        return Err(Failure::new("The export is too large"));
+    }
+    Ok(json)
+}
+
 /// The built-in field with this purpose (`USERNAME`, `PASSWORD`).
 fn field_value(item: &vp_core::model::Item, purpose: &str) -> Option<String> {
     item.fields
@@ -450,6 +497,9 @@ fn assess(request: &Request, requester: &Requester) -> Assessment {
         } else {
             format!("update {}", item.id)
         })),
+        Request::ImportProton { path } => {
+            none(Some(format!("import the Proton Pass export {path}")))
+        }
         _ => none(None),
     }
 }
@@ -491,7 +541,182 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
         self.grants.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Returns the grant that covers the request: an existing one, or the human's answer.
+    /// Copies a Proton Pass export into the native vault, after asking. Each
+    /// Proton vault goes into the VisiPass vault of the same name, or a new one.
+    /// A login already saved here (same site, username and password) is
+    /// skipped, and so is anything imported before (IDs come from Proton's).
+    async fn import_proton(&self, path: &str, requester: &Requester) -> Result<Value, Failure> {
+        let export = vp_core::proton::parse(&read_export(path)?)?;
+        let existing = self.backend.vaults(None).await?;
+        let listed = self.backend.list(&vp_core::model::Scope::default()).await?;
+        let mut plan = Vec::new();
+        let mut duplicates = 0;
+        for proton in export.vaults {
+            let target = existing
+                .iter()
+                .find(|v| v.id == proton.id || v.name.eq_ignore_ascii_case(&proton.name))
+                .cloned();
+            let new = target.is_none();
+            let vault = target.unwrap_or(vp_core::model::VaultRef {
+                id: proton.id.clone(),
+                name: proton.name.clone(),
+            });
+            let mut items = Vec::new();
+            for mut item in proton.items {
+                if self.already_saved(&item, &listed).await {
+                    duplicates += 1;
+                    continue;
+                }
+                item.vault = vault.clone();
+                items.push(item);
+            }
+            plan.push((vault, new, items));
+        }
+        let total: usize = plan.iter().map(|(_, _, items)| items.len()).sum();
+        if total == 0 {
+            return if duplicates == 0 {
+                Err(Failure::new("The export has no items to import"))
+            } else {
+                Ok(json!({
+                    "imported": [],
+                    "duplicates": duplicates,
+                    "next": "Everything in this export is already in VisiPass. Delete the export file: it holds every password in plain text",
+                }))
+            };
+        }
+        let into: Vec<String> = plan
+            .iter()
+            .filter(|(_, _, items)| !items.is_empty())
+            .map(|(vault, new, items)| {
+                format!(
+                    "{}: {}{}",
+                    vault.name,
+                    plural(items.len(), "item"),
+                    if *new { " (new vault)" } else { "" }
+                )
+            })
+            .collect();
+        let left = &export.left;
+        let mut details = vec![
+            ("File".to_string(), path.to_string()),
+            ("Into".to_string(), into.join("\n")),
+        ];
+        if duplicates > 0 {
+            details.push((
+                "Skipped".into(),
+                format!(
+                    "{} already in VisiPass (same site, username and password)",
+                    plural(duplicates, "login")
+                ),
+            ));
+        }
+        let mut not = Vec::new();
+        if left.trashed > 0 {
+            not.push(format!(
+                "{} in Proton's trash",
+                plural(left.trashed, "item")
+            ));
+        }
+        if left.aliases > 0 {
+            not.push(format!(
+                "{} (they stay in Proton)",
+                plural(left.aliases, "email alias")
+            ));
+        }
+        if left.unknown > 0 {
+            not.push(format!(
+                "{} of a kind VisiPass does not know",
+                plural(left.unknown, "item")
+            ));
+        }
+        if left.passkeys > 0 {
+            not.push(format!(
+                "passkeys on {} (the logins come over, the passkeys do not)",
+                plural(left.passkeys, "login")
+            ));
+        }
+        if left.incomplete > 0 {
+            not.push(format!(
+                "{} (a CSV holds only their names; export as ZIP to bring them)",
+                plural(left.incomplete, "card, identity or SSH key item")
+            ));
+        }
+        if !not.is_empty() {
+            details.push(("Not imported".into(), not.join("\n")));
+        }
+        self.ask_each_time(&Prompt {
+            who: who(requester),
+            action: format!("import {} from Proton Pass", plural(total, "item")),
+            details,
+            secrets: vec![],
+            purpose: None,
+            timeout_secs: approval::TIMEOUT.as_secs(),
+            paste: None,
+        })
+        .await?;
+        let mut report = Vec::new();
+        for (vault, _, items) in plan {
+            if items.is_empty() {
+                continue;
+            }
+            let count = items.len();
+            let (created, skipped) = self.backend.native_import_items(&vault, items).await?;
+            report.push(json!({ "vault": vault.name, "items": count, "created": created, "skipped": skipped }));
+        }
+        Ok(json!({
+            "imported": report,
+            "duplicates": duplicates,
+            "notImported": {
+                "trashed": left.trashed,
+                "aliases": left.aliases,
+                "unknown": left.unknown,
+                "passkeys": left.passkeys,
+                "incomplete": left.incomplete,
+            },
+            "next": "Delete the export file: it holds every password in plain text",
+        }))
+    }
+
+    /// The item was imported before, or a login with the same site, username
+    /// and password is already saved.
+    async fn already_saved(
+        &self,
+        item: &vp_core::model::Item,
+        listed: &[vp_core::model::Listed],
+    ) -> bool {
+        // Imported from this export before.
+        if listed.iter().any(|l| l.summary.id == item.id) {
+            return true;
+        }
+        if item.category != "LOGIN" {
+            return false;
+        }
+        let (Some(url), Some(password)) = (item.urls.first(), field_value(item, "PASSWORD")) else {
+            return false;
+        };
+        let username = field_value(item, "USERNAME").unwrap_or_default();
+        for found in listed.iter().filter(|l| {
+            l.summary.category == "LOGIN"
+                && find::page_match(&url.href, &l.summary).is_some()
+                && l.summary
+                    .additional_information
+                    .as_deref()
+                    .unwrap_or_default()
+                    .trim()
+                    .eq_ignore_ascii_case(username.trim())
+        }) {
+            if let Ok(saved) = self
+                .backend
+                .item(&found.summary.id, &found.summary.vault.id)
+                .await
+                && field_value(&saved, "PASSWORD").as_deref() == Some(password.as_str())
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Asks the human, every time, and never records a grant: for changes to a
     /// saved login that would be lost if a page could make them unasked.
     async fn ask_each_time(&self, prompt: &Prompt) -> Result<(), Failure> {
@@ -733,6 +958,13 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 })
             }
             Request::ImportOp { vault } => self.backend.native_import(vault).await,
+            Request::ImportProton { path } => {
+                let result = self.import_proton(&path, requester).await;
+                if result.is_ok() {
+                    *grant = Some("once".into());
+                }
+                result
+            }
             Request::Find { queries, scope } => {
                 if queries.is_empty() {
                     return Err(Failure::new("Give at least one query"));
@@ -1392,6 +1624,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 | Request::Password { .. }
                 | Request::ImportEnv { .. }
                 | Request::ImportOp { .. }
+                | Request::ImportProton { .. }
                 | Request::SaveItem { .. }
                 | Request::Archive { .. }
                 | Request::SetFavorite { .. }

@@ -115,6 +115,16 @@ pub trait Backend: Send + Sync + 'static {
     ) -> impl Future<Output = Result<serde_json::Value, Failure>> + Send {
         async { Err(Failure::new(NO_NATIVE)) }
     }
+
+    /// Copies items into one native vault, creating it if needed and keeping
+    /// their IDs; an ID already present is skipped. Returns (created, skipped).
+    fn native_import_items(
+        &self,
+        _vault: &VaultRef,
+        _items: Vec<Item>,
+    ) -> impl Future<Output = Result<(usize, usize), Failure>> + Send {
+        async { Err(Failure::new(NO_NATIVE)) }
+    }
 }
 
 /// What the Emergency Kit page shows. The Secret Key goes only to that page.

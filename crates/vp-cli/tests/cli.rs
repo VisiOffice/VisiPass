@@ -1255,6 +1255,75 @@ fn a_vault_created_in_visipass_takes_new_items() {
 }
 
 #[test]
+fn a_proton_pass_export_comes_in_once_after_asking_and_skips_what_is_there() {
+    let world = World::native(&[
+        // init: password, confirmation, Secret Key window
+        Decision::Once,
+        Decision::Once,
+        Decision::Deny,
+        // the import: denied, then allowed
+        Decision::Deny,
+        Decision::Once,
+    ]);
+    clean(&world.vp(&["init"], None));
+    clean(&world.vp(&["import", "op"], None));
+    let export = serde_json::json!({
+        "version": "1.22.0", "encrypted": false,
+        "vaults": {"shareA": {"name": "Personal", "items": [
+            // Already in VisiPass from 1Password: same site, username and password.
+            {"itemId": "a", "state": 1, "data": {"metadata": {"name": "Stripe"}, "type": "login",
+             "content": {"itemEmail": "me@example.com", "password": LOGIN,
+                         "urls": ["https://dashboard.stripe.com/login"]}}},
+            {"itemId": "b", "state": 1, "data": {"metadata": {"name": "Chase", "note": ""}, "type": "login",
+             "content": {"itemUsername": "robert", "password": NEW_KEY, "urls": ["https://chase.com"]}}},
+            {"itemId": "c", "state": 2, "data": {"metadata": {"name": "Trashed"}, "type": "note", "content": {}}}
+        ]}}
+    });
+    let dir = world.path("export");
+    std::fs::create_dir_all(&dir).unwrap();
+    let json_path = dir.join("data.json");
+    std::fs::write(&json_path, export.to_string()).unwrap();
+    // Proton Pass saves a .zip with the JSON inside.
+    let zip_path = dir.join("Proton Pass_export.zip");
+    let zipped = Command::new("python3")
+        .args([
+            "-c",
+            "import sys, zipfile; zipfile.ZipFile(sys.argv[1], 'w', zipfile.ZIP_DEFLATED).write(sys.argv[2], 'Proton Pass/data.json')",
+        ])
+        .arg(&zip_path)
+        .arg(&json_path)
+        .status()
+        .unwrap();
+    assert!(zipped.success());
+    let zip = zip_path.to_str().unwrap();
+
+    let denied = world.vp(&["import", "proton", zip], None);
+    clean(&denied);
+    assert!(!denied.status.success());
+    let none = json(&world.vp(&["find", "Chase"], None));
+    assert_eq!(none["matches"].as_array().map(Vec::len), Some(0), "{none}");
+
+    let imported = world.vp(&["import", "proton", zip], None);
+    clean(&imported);
+    let imported = json(&imported);
+    assert_eq!(imported["imported"][0]["vault"], "Personal", "{imported}");
+    assert_eq!(imported["imported"][0]["created"], 1, "{imported}");
+    assert_eq!(imported["duplicates"], 1, "{imported}");
+    assert_eq!(imported["notImported"]["trashed"], 1, "{imported}");
+    let found = json(&world.vp(&["find", "Chase"], None));
+    assert_eq!(found["matches"][0]["title"], "Chase", "{found}");
+    let asked = world.approver.asked();
+
+    // Again: everything is there, so nothing is asked and nothing is added.
+    let again = world.vp(&["import", "proton", json_path.to_str().unwrap()], None);
+    clean(&again);
+    let again = json(&again);
+    assert_eq!(again["duplicates"], 2, "{again}");
+    assert_eq!(world.approver.asked(), asked);
+    world.assert_contained();
+}
+
+#[test]
 fn the_popup_opens_edits_adds_and_archives_items() {
     let world = World::native_browser(&[Decision::Once, Decision::Once, Decision::Deny]);
     clean(&world.vp(&["init"], None));

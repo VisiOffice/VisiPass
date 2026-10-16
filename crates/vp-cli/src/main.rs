@@ -92,6 +92,13 @@ enum ImportCommands {
         #[arg(long)]
         vault: Option<String>,
     },
+    /// From a Proton Pass export: Settings → Export, choose ZIP (or CSV, which leaves
+    /// out cards, identities and SSH keys). Takes the .zip, the data.json in it, or
+    /// the .csv. Asks you first; importing again skips what is there
+    Proton {
+        /// The export file
+        file: std::path::PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -861,6 +868,13 @@ fn execute(command: Commands) -> Result<i32, Failure> {
         }
         Commands::Import(ImportCommands::Op { vault }) => {
             print(&client::call(Request::ImportOp { vault })?)
+        }
+        Commands::Import(ImportCommands::Proton { file }) => {
+            let path = std::path::absolute(&file)
+                .map_err(|_| Failure::new(format!("{} is not a usable path", file.display())))?;
+            print(&client::call(Request::ImportProton {
+                path: path.to_string_lossy().into_owned(),
+            })?)
         }
         Commands::Doctor => print(&doctor::doctor()),
         Commands::Mcp => mcp::serve(),

@@ -358,6 +358,11 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         vault: Option<String>,
     },
+    /// Copies a Proton Pass export (JSON, or the .zip it comes in) into the
+    /// native vault. Asks the human every time. `path` is absolute.
+    ImportProton {
+        path: String,
+    },
     /// Ask the human to paste a secret that does not exist yet. The agent
     /// gets back only the reference.
     RequestSecret {
@@ -521,6 +526,7 @@ impl Request {
             Request::QuickUnlock { .. } => "vault-quick-unlock",
             Request::EmergencyKit => "vault-emergency-kit",
             Request::ImportOp { .. } => "vault-import",
+            Request::ImportProton { .. } => "vault-import-proton",
         }
     }
 }

@@ -522,12 +522,15 @@ Implemented (2026-10-12), with tests that attack it (`crates/vp-store/tests`, `c
   shows the Secret Key once; neither ever reaches the caller.
 - `vp import op`: copies 1Password vaults, keeping item and vault IDs so `op://` references resolve
   against either backend; never overwrites.
+- `vp import proton FILE`: reads an unencrypted Proton Pass export (the .zip, its data.json, or
+  the CSV, which holds only the names of cards, identities and SSH keys) in the daemon, asks every time, and skips items imported before (IDs derived from Proton's) and logins
+  already saved with the same site, username and password. Passkeys and aliases are not copied.
 
 - §5.1 Emergency Kit (`vp emergency-kit`).
 
 Not yet: §5.2 Recovery Key; §6.1 `PR_SET_DUMPABLE`,
 `memfd_secret`/`mlock`; §6.3 password change and full
-rotation; §7.5 files; §9 fingerprints; §10 log signing; Proton Pass import; §11 everything.
+rotation; §7.5 files; §9 fingerprints; §10 log signing; §11 everything.
 
 ## Changelog
 

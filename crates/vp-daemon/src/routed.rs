@@ -211,4 +211,17 @@ impl<U: Unlock> Backend for Routed<U> {
         }
         Ok(json!({ "imported": report }))
     }
+
+    async fn native_import_items(
+        &self,
+        vault: &VaultRef,
+        items: Vec<Item>,
+    ) -> Result<(usize, usize), Failure> {
+        if !self.native.exists() {
+            return Err(Failure::new(
+                "Create your VisiPass vault first with `vp init`",
+            ));
+        }
+        self.native.import(vault, items).await
+    }
 }

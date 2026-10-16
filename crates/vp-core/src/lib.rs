@@ -14,6 +14,7 @@ pub mod kamal;
 pub mod mask;
 pub mod model;
 pub mod paths;
+pub mod proton;
 pub mod refs;
 pub mod secret;
 pub mod template;
