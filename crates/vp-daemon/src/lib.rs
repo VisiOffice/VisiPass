@@ -406,6 +406,12 @@ fn assess(request: &Request, requester: &Requester) -> Assessment {
         Request::Item { id, .. }
         | Request::Archive { id, .. }
         | Request::SetFavorite { id, .. } => none(Some(id.clone())),
+        Request::Duplicates { .. } => none(None),
+        Request::MergeItems { merges } => none(Some(format!(
+            "keep {}, archive {}",
+            plural(merges.len(), "item"),
+            merges.iter().map(|m| m.archive.len()).sum::<usize>()
+        ))),
         Request::BrowserFill { url, id, .. } => Assessment {
             need: None,
             refs: vec![format!("{}#{id}", find::page_host(url))],
@@ -675,6 +681,77 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
             },
             "next": "Delete the export file: it holds every password in plain text",
         }))
+    }
+
+    /// Logins saved more than once, exact copies first. Each group's items are
+    /// fetched here to compare passwords; only "A"/"B" labels leave.
+    async fn duplicates(&self, scope: &vp_core::model::Scope) -> Result<Value, Failure> {
+        use vp_core::dedupe;
+        let summaries: Vec<_> = self
+            .backend
+            .list(scope)
+            .await?
+            .into_iter()
+            .map(|l| l.summary)
+            .collect();
+        let mut groups = Vec::new();
+        for (site, username, members) in dedupe::candidates(&summaries) {
+            let mut items = Vec::new();
+            for i in members {
+                let s = &summaries[i];
+                items.push(self.backend.item(&s.id, &s.vault.id).await?);
+            }
+            groups.push(dedupe::group(site, username, &items));
+        }
+        groups.sort_by(|a, b| {
+            b.same_password
+                .cmp(&a.same_password)
+                .then(a.site.cmp(&b.site))
+        });
+        let same = groups.iter().filter(|g| g.same_password).count();
+        Ok(json!({
+            "groups": groups,
+            "samePassword": same,
+            "differentPasswords": groups.len() - same,
+        }))
+    }
+
+    /// Keeps one item of each merge, with what only the others had copied onto
+    /// it (saved and read back), then archives the others. Stops at the first
+    /// failure; what was done before it stays done.
+    async fn merge_items(&self, merges: Vec<vp_core::ipc::Merge>) -> Result<Value, Failure> {
+        let mut added = vp_core::dedupe::Added::default();
+        let (mut kept, mut archived) = (0, 0);
+        for merge in merges {
+            if merge.archive.iter().any(|a| a.id == merge.keep.id) {
+                return Err(Failure::new("An item cannot be kept and archived at once"));
+            }
+            let keep = self.backend.item(&merge.keep.id, &merge.keep.vault).await?;
+            let mut others = Vec::new();
+            for key in &merge.archive {
+                others.push(self.backend.item(&key.id, &key.vault).await?);
+            }
+            let (merged, more) = vp_core::dedupe::merge(keep, &others);
+            if more != vp_core::dedupe::Added::default() {
+                self.backend.save_item(&merged).await.map_err(|e| {
+                    Failure::new(format!(
+                        "{} (merged {kept} before this; nothing archived for \"{}\")",
+                        e.0, merged.title
+                    ))
+                })?;
+            }
+            added.passwords += more.passwords;
+            added.urls += more.urls;
+            added.codes += more.codes;
+            added.notes += more.notes;
+            added.fields += more.fields;
+            kept += 1;
+            for key in &merge.archive {
+                self.backend.archive(&key.id, &key.vault).await?;
+                archived += 1;
+            }
+        }
+        Ok(json!({ "kept": kept, "archived": archived, "added": added }))
     }
 
     /// The item was imported before, or a login with the same site, username
@@ -1052,6 +1129,8 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 self.backend.set_favorite(&id, &vault, favorite).await?;
                 Ok(json!({ "id": id, "favorite": favorite }))
             }
+            Request::Duplicates { scope } => self.duplicates(&scope).await,
+            Request::MergeItems { merges } => self.merge_items(merges).await,
             Request::RequestSecret {
                 destination,
                 purpose,
@@ -1628,6 +1707,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 | Request::SaveItem { .. }
                 | Request::Archive { .. }
                 | Request::SetFavorite { .. }
+                | Request::MergeItems { .. }
                 | Request::RequestSecret { .. }
                 | Request::BrowserSave { check: false, .. }
                 | Request::CreateVault { .. }

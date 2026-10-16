@@ -417,6 +417,20 @@ fn registrable(host: &str) -> Option<&str> {
     psl::domain_str(host)
 }
 
+/// The site a saved website belongs to, for grouping: its registrable domain
+/// (`app.payvy.com` -> `payvy.com`), or the host when it has none (localhost,
+/// an IP), with the port when one is given. The scheme is ignored.
+pub fn site_of(href: &str) -> Option<String> {
+    let origin = saved_origin(href)?;
+    let site = registrable(&origin.host)
+        .unwrap_or(&origin.host)
+        .to_string();
+    Some(match origin.port {
+        Some(port) => format!("{site}:{port}"),
+        None => site,
+    })
+}
+
 /// How well an item's websites match a page, for filling: 3 for the exact
 /// host, 2 for the same site (another subdomain), None otherwise. The exact
 /// host wins, so a login saved for admin.payvy.com is offered before one for

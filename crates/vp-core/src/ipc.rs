@@ -260,6 +260,20 @@ impl Answer {
     }
 }
 
+/// An item by ID and vault ID.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemKey {
+    pub id: String,
+    pub vault: String,
+}
+
+/// Keep one item and archive the rest, after copying over what only they have.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Merge {
+    pub keep: ItemKey,
+    pub archive: Vec<ItemKey>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Request {
@@ -333,6 +347,17 @@ pub enum Request {
         id: String,
         vault: String,
         favorite: bool,
+    },
+    /// Logins saved more than once (same site and username), and whether
+    /// their passwords agree. Values stay in the daemon.
+    Duplicates {
+        #[serde(default)]
+        scope: Scope,
+    },
+    /// For each merge: copies what only the others have onto `keep`, saves and
+    /// verifies it, then archives the others.
+    MergeItems {
+        merges: Vec<Merge>,
     },
     // ---- end of app-only requests ----
     // ---- The native vault ----
@@ -483,6 +508,8 @@ impl Request {
                 | Request::SaveItem { .. }
                 | Request::Archive { .. }
                 | Request::SetFavorite { .. }
+                | Request::Duplicates { .. }
+                | Request::MergeItems { .. }
         )
     }
 
@@ -503,6 +530,8 @@ impl Request {
             Request::SaveItem { .. } => "save-item",
             Request::Archive { .. } => "archive",
             Request::SetFavorite { .. } => "favorite",
+            Request::Duplicates { .. } => "duplicates",
+            Request::MergeItems { .. } => "merge",
             Request::RequestSecret { .. } => "request",
             Request::ImportEnv { .. } => "env-import",
             Request::CheckRefs { .. } => "env-check",

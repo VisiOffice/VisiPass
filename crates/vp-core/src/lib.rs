@@ -6,6 +6,7 @@
 
 pub mod audit;
 pub mod backend;
+pub mod dedupe;
 pub mod env;
 pub mod find;
 pub mod generate;

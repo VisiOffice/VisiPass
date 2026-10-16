@@ -9,11 +9,12 @@ use gpui::{
     SharedString, UniformListScrollHandle, Window, deferred, div, prelude::*, px, uniform_list,
 };
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use vp_core::ipc::Request;
+use vp_core::dedupe::Group;
+use vp_core::ipc::{ItemKey, Merge, Request};
 use vp_core::model::{Item, ItemSummary, Scope, VaultRef, kind};
 use vp_core::secret::Secret;
 use vp_core::totp::Totp;
@@ -30,6 +31,7 @@ pub enum Filter {
     Favorites,
     Vault(String),
     Agents,
+    Duplicates,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,6 +68,18 @@ pub struct VisiPassApp {
     confirm_archive: bool,
     grants: Vec<Value>,
     log: Vec<Value>,
+    /// Duplicate logins, once loaded; the item chosen to keep in each group
+    /// (by site and username), and groups the human said are not duplicates.
+    duplicates: Option<Vec<Group>>,
+    keep: HashMap<String, String>,
+    not_duplicates: HashSet<String>,
+    duplicates_shown: usize,
+}
+
+const DUPLICATES_PAGE: usize = 40;
+
+fn group_key(group: &Group) -> String {
+    format!("{}\u{0}{}", group.site, group.username)
 }
 
 pub fn category_name(category: &str) -> String {
@@ -178,6 +192,10 @@ impl VisiPassApp {
             confirm_archive: false,
             grants: Vec::new(),
             log: Vec::new(),
+            duplicates: None,
+            keep: HashMap::new(),
+            not_duplicates: HashSet::new(),
+            duplicates_shown: DUPLICATES_PAGE,
         };
         app.reload(cx);
         app
@@ -246,7 +264,7 @@ impl VisiPassApp {
             .iter()
             .enumerate()
             .filter(|(_, item)| match &self.filter {
-                Filter::All | Filter::Agents => true,
+                Filter::All | Filter::Agents | Filter::Duplicates => true,
                 Filter::Favorites => item.favorite,
                 Filter::Vault(v) => &item.vault.id == v,
             })
@@ -407,6 +425,9 @@ impl VisiPassApp {
         if filter == Filter::Agents {
             self.load_agents(cx);
         }
+        if filter == Filter::Duplicates {
+            self.load_duplicates(cx);
+        }
         self.filter = filter;
         self.menu = None;
         self.apply_filter();
@@ -556,6 +577,105 @@ impl VisiPassApp {
                 this.reload(cx);
             },
         );
+    }
+
+    fn load_duplicates(&mut self, cx: &mut Context<Self>) {
+        self.request(
+            Request::Duplicates {
+                scope: Scope::default(),
+            },
+            cx,
+            |this, value, _| {
+                let groups: Vec<Group> =
+                    serde_json::from_value(value["groups"].clone()).unwrap_or_default();
+                this.keep.retain(|key, id| {
+                    groups
+                        .iter()
+                        .any(|g| &group_key(g) == key && g.items.iter().any(|m| &m.id == id))
+                });
+                this.duplicates = Some(groups);
+            },
+        );
+    }
+
+    /// The groups still to review, in order.
+    fn open_groups(&self) -> Vec<&Group> {
+        self.duplicates
+            .iter()
+            .flatten()
+            .filter(|g| !self.not_duplicates.contains(&group_key(g)))
+            .collect()
+    }
+
+    fn kept_in<'a>(&'a self, group: &'a Group) -> Option<&'a vp_core::dedupe::Member> {
+        let chosen = self.keep.get(&group_key(group));
+        group
+            .items
+            .iter()
+            .find(|m| Some(&m.id) == chosen)
+            .or_else(|| group.items.iter().find(|m| m.suggested))
+    }
+
+    fn merge_for(&self, group: &Group) -> Option<Merge> {
+        let keep = self.kept_in(group)?;
+        let key = |m: &vp_core::dedupe::Member| ItemKey {
+            id: m.id.clone(),
+            vault: m.vault.id.clone(),
+        };
+        Some(Merge {
+            keep: key(keep),
+            archive: group
+                .items
+                .iter()
+                .filter(|m| m.id != keep.id)
+                .map(key)
+                .collect(),
+        })
+    }
+
+    /// Keeps the chosen login of each group, copies over what only the others
+    /// have, and archives the others.
+    fn merge(&mut self, merges: Vec<Merge>, cx: &mut Context<Self>) {
+        if merges.is_empty() {
+            return;
+        }
+        self.request(Request::MergeItems { merges }, cx, |this, value, cx| {
+            let n = |k: &str| value[k].as_u64().unwrap_or(0);
+            let added = &value["added"];
+            let copied: u64 = ["passwords", "urls", "codes", "notes", "fields"]
+                .iter()
+                .map(|k| added[*k].as_u64().unwrap_or(0))
+                .sum();
+            this.toast = Some((
+                format!(
+                    "Kept {}, archived {}{}.",
+                    n("kept"),
+                    n("archived"),
+                    if copied > 0 {
+                        format!(", copied {copied} passwords, websites, codes, notes or fields")
+                    } else {
+                        String::new()
+                    }
+                ),
+                Instant::now() + Duration::from_secs(6),
+            ));
+            this.reload(cx);
+            this.load_duplicates(cx);
+        });
+    }
+
+    fn open_from_duplicates(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(summary) = self.items.iter().find(|i| i.id == id).cloned() else {
+            return;
+        };
+        self.search.update(cx, |input, cx| input.set_text("", cx));
+        self.query.clear();
+        self.set_filter(Filter::All, cx);
+        if let Some(row) = self.visible.iter().position(|&i| self.items[i].id == id) {
+            self.cursor = Some(row);
+            self.scroll.scroll_to_item(row, ScrollStrategy::Center);
+        }
+        self.open(summary, cx);
     }
 
     fn revoke(&mut self, id: String, cx: &mut Context<Self>) {
@@ -719,6 +839,14 @@ impl VisiPassApp {
         sidebar
             .child(div().flex_1().min_h(px(12.)))
             .child(self.nav_row(
+                "nav-duplicates".into(),
+                "\u{f0c5}",
+                "Duplicates".into(),
+                self.duplicates.as_ref().map(|_| self.open_groups().len()),
+                Filter::Duplicates,
+                cx,
+            ))
+            .child(self.nav_row(
                 "nav-agents".into(),
                 "\u{f06a9}",
                 "Agents".into(),
@@ -829,7 +957,7 @@ impl VisiPassApp {
                 // Counts within the current sidebar view, ignoring the category itself.
                 let mut counts: Vec<(String, usize)> = Vec::new();
                 for item in self.items.iter().filter(|item| match &self.filter {
-                    Filter::All | Filter::Agents => true,
+                    Filter::All | Filter::Agents | Filter::Duplicates => true,
                     Filter::Favorites => item.favorite,
                     Filter::Vault(v) => &item.vault.id == v,
                 }) {
@@ -1366,6 +1494,222 @@ impl VisiPassApp {
             .into_any_element()
     }
 
+    fn render_duplicates(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = self.theme.clone();
+        let heading = |text: String| {
+            div()
+                .text_color(t.muted)
+                .text_size(px(t.size(0.917)))
+                .child(text)
+        };
+        let mut page = div()
+            .id("duplicates")
+            .flex_1()
+            .h_full()
+            .overflow_y_scroll()
+            .p(px(24.))
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .child(
+                div()
+                    .text_size(px(t.size(1.333)))
+                    .font_weight(FontWeight::BOLD)
+                    .child("Duplicates"),
+            )
+            .child(div().text_color(t.muted).child(
+                "Logins saved more than once for the same site and username. Keeping one copies \
+                 onto it what only the others have (websites, two-factor codes, notes, fields, and \
+                 a password that differs, as \"other password\"), then archives the others. \
+                 Passwords are compared, never shown here.",
+            ));
+        let Some(_) = &self.duplicates else {
+            return page.child(div().text_color(t.muted).child("Looking for duplicates…"));
+        };
+        let groups = self.open_groups();
+        if groups.is_empty() {
+            return page.child(div().text_color(t.muted).child("No duplicate logins."));
+        }
+        let exact: Vec<Merge> = groups
+            .iter()
+            .filter(|g| g.same_password)
+            .filter_map(|g| self.merge_for(g))
+            .collect();
+        let different = groups.iter().filter(|g| !g.same_password).count();
+        page = page.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .child(div().flex_1().child(format!(
+                    "{} exact copies (same password) · {} with different passwords",
+                    exact.len(),
+                    different
+                )))
+                .when(!exact.is_empty(), |d| {
+                    let label = format!("Merge all {} exact copies", exact.len());
+                    d.child(self.button("merge-exact", label, cx, move |this, _, cx| {
+                        this.merge(exact.clone(), cx)
+                    }))
+                }),
+        );
+        let mut last_kind = None;
+        for group in groups.iter().take(self.duplicates_shown) {
+            if last_kind != Some(group.same_password) {
+                last_kind = Some(group.same_password);
+                page = page.child(heading(if group.same_password {
+                    "SAME PASSWORD · keeping one loses nothing".into()
+                } else {
+                    "DIFFERENT PASSWORDS · choose the one that is current; open them to compare"
+                        .into()
+                }));
+            }
+            page = page.child(self.render_group(group, cx));
+        }
+        if groups.len() > self.duplicates_shown {
+            let more = groups.len() - self.duplicates_shown;
+            page = page.child(self.button(
+                "duplicates-more",
+                format!("Show more ({more} left)"),
+                cx,
+                |this, _, cx| {
+                    this.duplicates_shown += DUPLICATES_PAGE;
+                    cx.notify();
+                },
+            ));
+        }
+        page
+    }
+
+    fn render_group(&self, group: &Group, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = self.theme.clone();
+        let key = group_key(group);
+        let kept = self.kept_in(group).map(|m| m.id.clone());
+        let mut rows = div().flex().flex_col().gap(px(2.));
+        for member in &group.items {
+            let chosen = kept.as_deref() == Some(member.id.as_str());
+            let mut facts = Vec::new();
+            if let Some(p) = &member.password {
+                facts.push(format!("password {p}"));
+            }
+            if member.codes > 0 {
+                facts.push("2FA".into());
+            }
+            if member.notes {
+                facts.push("notes".into());
+            }
+            if member.fields > 0 {
+                facts.push(format!("+{} fields", member.fields));
+            }
+            if member.urls.len() > 1 {
+                facts.push(format!("{} websites", member.urls.len()));
+            }
+            if let Some(at) = &member.updated_at {
+                facts.push(format!("edited {}", at.get(..10).unwrap_or(at)));
+            }
+            let (pick_key, pick_id) = (key.clone(), member.id.clone());
+            let open_id = member.id.clone();
+            rows = rows.child(
+                div()
+                    .id(gpui::ElementId::Name(format!("dup-{}", member.id).into()))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .px(px(8.))
+                    .py(px(6.))
+                    .rounded(px(t.radius))
+                    .cursor_pointer()
+                    .when(chosen, |d| {
+                        d.bg(alpha(t.accent, t.controls.selected_fill_alpha * 0.5))
+                    })
+                    .hover(|s| s.bg(alpha(t.foreground, t.controls.hover_fill_alpha)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.keep.insert(pick_key.clone(), pick_id.clone());
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .w(px(64.))
+                            .text_color(if chosen { t.accent } else { t.muted })
+                            .child(if chosen { "● Keep" } else { "○ Archive" }),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .min_w(px(0.))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .child(format!("{}  ·  {}", member.title, member.vault.name)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(t.size(0.917)))
+                                    .text_color(t.muted)
+                                    .truncate()
+                                    .child(facts.join(" · ")),
+                            ),
+                    )
+                    .child(self.button(
+                        format!("dup-open-{}", member.id),
+                        "Open",
+                        cx,
+                        move |this, _, cx| this.open_from_duplicates(&open_id, cx),
+                    )),
+            );
+        }
+        let merge = self.merge_for(group);
+        let others = group.items.len().saturating_sub(1);
+        let skip_key = key.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .p(px(10.))
+            .rounded(px(t.radius))
+            .bg(t.well)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .font_weight(FontWeight::BOLD)
+                            .truncate()
+                            .child(if group.username.is_empty() {
+                                group.site.clone()
+                            } else {
+                                format!("{} · {}", group.site, group.username)
+                            }),
+                    )
+                    .child(self.button(
+                        format!("dup-skip-{key}"),
+                        "Not duplicates",
+                        cx,
+                        move |this, _, cx| {
+                            this.not_duplicates.insert(skip_key.clone());
+                            cx.notify();
+                        },
+                    ))
+                    .when_some(merge, |d, merge| {
+                        d.child(self.button(
+                            format!("dup-merge-{key}"),
+                            format!(
+                                "Keep selected, archive {others} other{}",
+                                if others == 1 { "" } else { "s" }
+                            ),
+                            cx,
+                            move |this, _, cx| this.merge(vec![merge.clone()], cx),
+                        ))
+                    }),
+            )
+            .child(rows)
+    }
+
     fn render_agents(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme.clone();
         let s = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
@@ -1592,8 +1936,12 @@ impl Render for VisiPassApp {
                     .flex()
                     .overflow_hidden()
                     .child(self.render_sidebar(cx))
-                    .child(self.render_list(cx))
-                    .child(self.render_detail(cx)),
+                    .when(self.filter == Filter::Duplicates, |d| {
+                        d.child(self.render_duplicates(cx))
+                    })
+                    .when(self.filter != Filter::Duplicates, |d| {
+                        d.child(self.render_list(cx)).child(self.render_detail(cx))
+                    }),
             )
             .child({
                 let (text, color) = match (&self.error, slow, &self.toast) {
