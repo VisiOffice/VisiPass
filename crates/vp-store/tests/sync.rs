@@ -316,7 +316,8 @@ fn sync_files_hold_no_plaintext() {
     a.edit("A", "a2");
     let change = a.send();
     for bytes in [&snapshot.bytes, &change.bytes] {
-        for needle in [&b"secret"[..], b"overview", b"Private", b"V1"] {
+        // Long needles only: two bytes like the vault ID "V1" turn up in random ciphertext.
+        for needle in [&b"secret"[..], b"overview", b"Private"] {
             assert!(
                 !bytes.windows(needle.len()).any(|w| w == needle),
                 "{} found",
