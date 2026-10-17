@@ -89,7 +89,7 @@ params   = { m: 262144 KiB (256 MiB), t: 3, p: 4 }, stored in the clear
 pw_key   = Argon2id(NFKD(master_password), salt, params, out = 32 bytes)
 PRK      = HKDF-Extract(salt = secret_key, ikm = pw_key)
 AUK      = HKDF-Expand(PRK, AD("VisiPass account unlock key", 1, account_id), 32)
-auth_key = HKDF-Expand(PRK, AD("VisiPass server auth", 1, account_id), 32)    // sync only, §11.1
+auth_key = HKDF-Expand(PRK, AD("VisiPass server auth", 1, account_id), 32)    // a hosted store only, §11.1
 ```
 
 `account_id` is 16 random bytes fixed at creation. The Argon2 work applies to the password, the
@@ -419,13 +419,126 @@ Constraints the local design keeps possible. Each gets its own design and review
 
 ### 11.1 Sync
 
-The server stores the same ciphertexts, tombstones and signed manifests, and never holds AK, a VK
-or the Secret Key. Clients authenticate with `auth_key` (§4.1), a separate derivation from the
-AUK. It is high-entropy, so OPAQUE (`opaque-ke`) adds little over a simpler token scheme; OPAQUE
-remains acceptable if it does not complicate the web client. Clients verify every manifest,
-refuse sequence or generation rollback, and treat timestamps as hints. The server can withhold
-updates or delete everything; every device keeps a full copy, so the latter is an outage, not a
-loss.
+Designed 2026-10-16; not implemented. **VisiPass runs no sync server.** Each person syncs through
+storage they already have: a folder that a sync service keeps in step (iCloud Drive, Dropbox,
+Google Drive, OneDrive, Syncthing) or an S3-compatible bucket (Cloudflare R2, Backblaze B2, AWS).
+Nobody has to trust the VisiPass project with their data, there is no central store of everyone's
+vaults to attack, and the storage only ever holds what §8 already writes: ciphertexts, signed and
+numbered. A hosted store may come later as a convenience; it would hold the same files.
+
+**Threat model.** The storage provider, and anyone who can write to the storage, may read, add,
+change, reorder, delete or withhold files, and may serve different devices different views. They
+must learn nothing beyond §8.3's shape and the timing of changes, and must not be able to make a
+device accept a forged, replayed or older state. They *can* withhold new changes (indistinguishable
+from a device that has not synced yet) or delete everything (an outage, not a loss: every device
+keeps a full copy). All devices belong to one person and hold the same AK; a device is not a
+security principal. Revoking a device is a full rotation (§6.3).
+
+**Why per-device logs.** Storage of this kind offers no transactions and, for folders, no atomic
+replace that survives a sync service. Two devices writing one file (the SQLite database, or a
+shared index) produce conflict copies or a corrupt file, and a rollback check would rightly refuse
+the older copy. So no file is ever written by two devices, and no file is ever changed after it is
+written:
+
+```
+visipass-sync/<account_id>/
+  accounts/<device_id>-<n>.vpa          account record: clear but signed (below)
+  devices/<device_id>/<seq>.vpc         change file; seq = 1, 2, 3 ... per device, never reused
+  snapshots/<device_id>/<seq>.vps       full state as of that device's seq (for new devices)
+```
+
+`device_id` is 16 random bytes made when a device joins. Names are fixed-width hex.
+
+**Keys.**
+
+```
+sync_key = HKDF-Expand(AK, AD("VisiPass sync", 1, account_id, ak_generation), 32)
+```
+
+**Account records** let a new device unlock before it has AK, so they are not encrypted beyond what
+§4 already does: `{account_id, ak_generation, salt, params, wrapped_AK, keyset_ciphertext,
+wrapped_AK_recovery?, clock}`, CBOR, with an Ed25519 signature by the keyset over
+`AD("VisiPass account record", 1, cbor(record))`. A device writes one when it sets up sync and
+after every password change or rotation. A new device tries records newest `clock` first, accepts
+the first that unlocks with the master password and Secret Key **and** whose signature verifies
+under the keyset it just decrypted, and never accepts an `ak_generation` below one it has seen.
+This reveals what the vault file reveals (§1, goal 1): useless without the Secret Key.
+
+**Change files** carry everything a device committed since its previous one:
+
+```
+plaintext = cbor{ device_id, seq, prev: H(previous change file of this device) | null,
+                  clock,                         // hybrid logical clock: a hint, never trusted
+                  seen: {device_id: seq, ...},   // what this device had merged when writing
+                  changes: [ ... ] }
+file      = "VPC" ‖ format_version ‖ ak_generation (4 bytes) ‖ nonce (24 bytes)
+            ‖ XChaCha20-Poly1305(sync_key, nonce, pad(plaintext),
+                                 AD("VisiPass sync change", 1, account_id, device_id, seq, ak_generation))
+            ‖ Ed25519(keyset, AD("VisiPass sync change signature", 1, H(everything before)))
+```
+
+The outer layer hides which vaults and items changed; the storage sees a device, a number, a padded
+size and a time. Changes are the rows §8.1 already stores, unchanged inside:
+
+- `vault {vault_id, vk_generation, wrapped_VK, vk_commit, attrs_ciphertext}`
+- `item {vault_id, item_id, rev, parents, overview_ciphertext, details_ciphertext}`
+- `tombstone {vault_id, item_id, rev, parents, date}`
+
+**Revisions replace `item_version`.** One counter per item cannot be shared by devices that edit
+offline. A revision is `rev = (device_id, n)`, with `n` from a per-device counter, so revisions are
+unique without coordination. `parents` lists the revisions the writer had as current for that item.
+The item AD (§7.2) carries `rev` where it carried `item_version`. The existing single-device vault
+migrates by giving every row `rev = (this device, item_version)`; that is a format version bump.
+
+**Merging.** For each item, its current revisions are those no other known revision lists as a
+parent. One: that is the item. More than one: a **conflict**. The item shows every version, nothing
+is discarded, and the human picks or combines them in the app, which writes a new revision with all
+of them as parents. A deletion concurrent with an edit keeps the edit and says that it was deleted
+elsewhere. Clocks only order what the app shows; they never decide what wins.
+
+**Reading another device's log.** Before applying change file `seq` from device D:
+
+1. The AEAD opens and the signature verifies under a keyset of this account, at an `ak_generation`
+   not below the newest this device has accepted.
+2. `seq` is exactly one more than the last applied from D, and `prev` is the hash of that file.
+3. Each item and vault row verifies as in §7 (its own AD and `vk_commit`) before it is stored.
+
+Each device records, for every device it has heard from, the last applied `seq` and its hash,
+inside its signed local account manifest (§7.4). A file at or below a recorded `seq` with a
+different hash is a **fork**: sync with that device stops and the app says so. A file that fails
+to verify is ignored and retried, since a sync service may show a file before it has finished
+copying it; one that still fails after an hour is reported. The app shows when each device was last
+heard from, so withheld changes become visible as a device that has gone quiet.
+
+A cloned disk or a restored backup makes two machines with one `device_id`. The first time a device
+finds its own `device_id` forked, it takes a new `device_id` and continues; nothing is lost because
+it still holds everything it wrote.
+
+**Writing.** After each local commit, a device writes its next change file. Folder: write a
+temporary file with a name readers ignore, fsync it, then rename it into place; refuse to replace
+an existing name. S3: `PUT` with `If-None-Match: *`. A name that already exists means another
+machine has this `device_id` (above). Sync runs only while the vault is unlocked, since it needs
+`sync_key`.
+
+**Joining a device.** Point it at the storage, enter the master password and the Secret Key from
+the Emergency Kit. It reads the account records, unlocks, takes the newest snapshot that verifies,
+and replays every device's change files after the `seen` the snapshot records. Snapshots are
+encrypted and signed exactly like change files (`"VPS"`, `AD("VisiPass sync snapshot", ...)`). A
+device writes a new snapshot when its log has grown by about a thousand changes.
+
+**Storage credentials.** A folder needs only a path, kept in local configuration. S3 keys are
+entered on each device when it joins and kept in the vault as an item, so they are themselves
+synced and rotate like any other secret.
+
+**Removing a device** (lost, sold, compromised) is a full rotation (§6.3): new AK, keyset and vault
+keys; every item re-encrypted; new account records; a new snapshot; and removing the device's
+access to the storage itself. Files it could read before stay readable to it; the rotation protects
+only what comes after, as everywhere in §6.3.
+
+Not in this version: deleting old change files once every device has a newer snapshot (a personal
+vault adds a few kilobytes per change, so years of use stay small); history purge across devices;
+real-time push (folders are watched for changes, buckets are polled on unlock, on opening the app,
+and every few minutes).
 
 ### 11.2 Sharing
 
@@ -472,6 +585,10 @@ measured, mobile Safari especially, before the web app is promised.
    baseline? Anything else for keeping keys out of hibernation images?
 10. **Access log (§10).** Signing after every entry: any problem with signing many messages under
     one Ed25519 key in a hash chain?
+11. **Sync (§11.1).** Per-device append-only logs on untrusted storage, signed under the shared
+    keyset, with revisions and parents instead of item versions. Is the fork and rollback handling
+    sufficient, and is anything lost by having no device-level keys while all devices are one
+    person's?
 
 ## 13. Review record
 
@@ -502,7 +619,7 @@ measured, mobile Safari especially, before the web app is promised.
      (§7.5).
 2. **Outside design review**: one paid day with a cryptographer, before any `vp-crypto` code.
 3. Robert's own data moves to the native store after step 2, with 1Password kept as the backup.
-4. **Code audit** of `vp-crypto`, `vp-store`, sync and the server before anyone else's data,
+4. **Code audit** of `vp-crypto`, `vp-store` and `vp-sync` before anyone else's data,
    published in full.
 
 ## 14. Implementation status
@@ -539,3 +656,6 @@ rotation; §7.5 files; §9 fingerprints; §10 log signing; §11 everything.
 - 2026-10-13: §6.2 screen lock on Omarchy by asking Hyprland, since Omarchy has no lock hook;
   sleep and screen lock implemented. §4.3 quick unlock implemented; it is turned on with the
   master password, and every sleep ends its window.
+- 2026-10-16: §11.1 sync rewritten: no VisiPass server. Each person's own storage (a synced folder
+  or an S3-compatible bucket) holds per-device, append-only, signed change files; revisions with
+  parents replace `item_version`, and concurrent edits are kept as conflicts for the human.
