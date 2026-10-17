@@ -131,6 +131,135 @@ pub fn ad(label: &str, parts: &[Part]) -> Vec<u8> {
     out
 }
 
+/// A decoded element of the CBOR subset [`Part`] writes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Value {
+    Text(String),
+    Uint(u64),
+    Bytes(Vec<u8>),
+    List(Vec<Value>),
+}
+
+impl Value {
+    pub fn uint(&self) -> Result<u64> {
+        match self {
+            Value::Uint(n) => Ok(*n),
+            _ => Err(Error("expected a number")),
+        }
+    }
+
+    pub fn bytes(&self) -> Result<&[u8]> {
+        match self {
+            Value::Bytes(b) => Ok(b),
+            _ => Err(Error("expected bytes")),
+        }
+    }
+
+    pub fn fixed<const N: usize>(&self) -> Result<[u8; N]> {
+        self.bytes()?
+            .try_into()
+            .map_err(|_| Error("bytes of the wrong length"))
+    }
+
+    pub fn text(&self) -> Result<&str> {
+        match self {
+            Value::Text(t) => Ok(t),
+            _ => Err(Error("expected text")),
+        }
+    }
+
+    pub fn list(&self) -> Result<&[Value]> {
+        match self {
+            Value::List(l) => Ok(l),
+            _ => Err(Error("expected a list")),
+        }
+    }
+}
+
+const MALFORMED: Error = Error("malformed encoding");
+
+fn decode_value(input: &mut &[u8], depth: usize) -> Result<Value> {
+    if depth > 16 {
+        return Err(MALFORMED);
+    }
+    let (&first, rest) = input.split_first().ok_or(MALFORMED)?;
+    *input = rest;
+    let (major, info) = (first >> 5, first & 31);
+    let take = |input: &mut &[u8], n: usize| -> Result<u64> {
+        if input.len() < n {
+            return Err(MALFORMED);
+        }
+        let (bytes, rest) = input.split_at(n);
+        *input = rest;
+        Ok(bytes.iter().fold(0u64, |acc, b| (acc << 8) | *b as u64))
+    };
+    let n = match info {
+        0..24 => info as u64,
+        24 => take(input, 1)?,
+        25 => take(input, 2)?,
+        26 => take(input, 4)?,
+        27 => take(input, 8)?,
+        _ => return Err(MALFORMED),
+    };
+    // Deterministic encoding uses the shortest head; anything else is refused,
+    // so every value has exactly one encoding.
+    let mut canonical = Vec::new();
+    head(&mut canonical, major, n);
+    if canonical[0] != first {
+        return Err(MALFORMED);
+    }
+    let length = |input: &&[u8]| -> Result<usize> {
+        usize::try_from(n)
+            .ok()
+            .filter(|n| *n <= input.len())
+            .ok_or(MALFORMED)
+    };
+    Ok(match major {
+        0 => Value::Uint(n),
+        2 | 3 => {
+            let len = length(input)?;
+            let (bytes, rest) = input.split_at(len);
+            *input = rest;
+            if major == 2 {
+                Value::Bytes(bytes.to_vec())
+            } else {
+                Value::Text(
+                    std::str::from_utf8(bytes)
+                        .map_err(|_| MALFORMED)?
+                        .to_string(),
+                )
+            }
+        }
+        4 => {
+            // Each element takes at least one byte.
+            let count = length(input)?;
+            let mut items = Vec::with_capacity(count);
+            for _ in 0..count {
+                items.push(decode_value(input, depth + 1)?);
+            }
+            Value::List(items)
+        }
+        _ => return Err(MALFORMED),
+    })
+}
+
+/// Reads what [`ad`] wrote under `label`: the parts after the label and format
+/// version. Refuses another label, another format, or trailing bytes.
+pub fn decode(label: &str, bytes: &[u8]) -> Result<Vec<Value>> {
+    let mut input = bytes;
+    let value = decode_value(&mut input, 0)?;
+    if !input.is_empty() {
+        return Err(MALFORMED);
+    }
+    let Value::List(mut items) = value else {
+        return Err(MALFORMED);
+    };
+    if items.len() < 2 || items[0] != Value::Text(label.into()) || items[1] != Value::Uint(FORMAT) {
+        return Err(Error("unexpected label or format"));
+    }
+    Ok(items.split_off(2))
+}
+
 /// `SHA-256(AD(label, parts...))`.
 pub fn hash(label: &str, parts: &[Part]) -> [u8; 32] {
     Sha256::digest(ad(label, parts)).into()
@@ -437,6 +566,35 @@ mod tests {
         t: 1,
         p: 1,
     };
+
+    #[test]
+    fn decoding_reads_back_what_ad_wrote_and_nothing_else() {
+        let bytes = ad(
+            "l",
+            &[
+                Part::Uint(300),
+                Part::Bytes(&[1, 2]),
+                Part::List(vec![Part::Text("é"), Part::Uint(0)]),
+            ],
+        );
+        assert_eq!(
+            decode("l", &bytes).unwrap(),
+            vec![
+                Value::Uint(300),
+                Value::Bytes(vec![1, 2]),
+                Value::List(vec![Value::Text("é".into()), Value::Uint(0)]),
+            ]
+        );
+        assert!(decode("other", &bytes).is_err());
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(decode("l", &trailing).is_err());
+        assert!(decode("l", &bytes[..bytes.len() - 1]).is_err());
+        // A longer head than needed for 5 is not the deterministic encoding.
+        assert!(decode("l", &[0x83, 0x61, b'l', 0x01, 0x18, 5]).is_err());
+        // A list claiming more elements than there are bytes.
+        assert!(decode("l", &[0x83, 0x61, b'l', 0x01, 0x9a, 0xff, 0xff, 0xff, 0xff]).is_err());
+    }
 
     #[test]
     fn cbor_is_deterministic_and_unambiguous() {

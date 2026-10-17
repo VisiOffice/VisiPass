@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use vp_core::Failure;
 use vp_core::backend::Backend;
 use vp_core::model::{
@@ -20,7 +20,7 @@ use vp_core::model::{
 use vp_core::refs::SecretRef;
 use vp_core::secret::Secret;
 use vp_crypto::{KdfParams, SecretKey};
-use vp_store::{AccountKey, Store, Unlocked, Write};
+use vp_store::{AccountKey, Rev, Store, Unlocked, Write};
 use zeroize::Zeroizing;
 
 /// Asks the human for the master password. `None` if they cancel.
@@ -51,6 +51,8 @@ pub enum Presence {
 }
 
 const UNLOCK_ATTEMPTS: usize = 3;
+/// How often sync looks for other devices' changes while unlocked.
+pub const SYNC_EVERY: Duration = Duration::from_secs(60);
 /// After the human cancels an unlock, requests that were waiting for it (and new
 /// ones) fail at once for this long instead of each opening another prompt.
 pub const QUIET_AFTER_CANCEL: Duration = Duration::from_secs(15);
@@ -178,7 +180,11 @@ type Encoded = (String, Zeroizing<Vec<u8>>, Zeroizing<Vec<u8>>);
 struct Entry {
     vault_id: String,
     item_id: String,
+    /// The current revision shown: the newest when sync brought in a conflict.
+    rev: Rev,
     overview: Overview,
+    /// The item's other current revisions, while it is in conflict.
+    others: Vec<Rev>,
 }
 
 /// Held only while unlocked; dropping it erases the keys (§6.1).
@@ -237,6 +243,8 @@ struct State {
     epoch: u64,
     /// No unlock prompts until then; set when the human cancels one.
     quiet_until: Option<Instant>,
+    /// The last sync round: when, and what it did or why it failed.
+    last_sync: Option<(SystemTime, Result<vp_sync::Report, String>)>,
 }
 
 impl State {
@@ -274,6 +282,9 @@ impl State {
 struct Settings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     quick_unlock_secs: Option<u64>,
+    /// The folder sync writes to (§11.1), if it is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sync_folder: Option<PathBuf>,
 }
 
 /// What the Emergency Kit prints (§5.1).
@@ -300,6 +311,8 @@ struct Inner<U> {
     /// One unlock at a time.
     gate: tokio::sync::Mutex<()>,
     quiet_after_cancel: Duration,
+    /// Woken by every commit, so sync sends it at once.
+    changed: Arc<tokio::sync::Notify>,
 }
 
 impl<U> Inner<U> {
@@ -369,9 +382,11 @@ impl<U: Unlock> NativeBackend<U> {
                 window_end: None,
                 epoch: 0,
                 quiet_until: None,
+                last_sync: None,
             }),
             gate: tokio::sync::Mutex::new(()),
             quiet_after_cancel,
+            changed: Arc::new(tokio::sync::Notify::new()),
         });
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let weak: Weak<Inner<U>> = Arc::downgrade(&inner);
@@ -380,6 +395,21 @@ impl<U: Unlock> NativeBackend<U> {
                     tokio::time::sleep(Duration::from_secs(30)).await;
                     match weak.upgrade() {
                         Some(inner) => inner.expire_if_idle(),
+                        None => break,
+                    }
+                }
+            });
+            // Sync sends each commit at once and looks for other devices'
+            // changes every minute, while the vault is unlocked.
+            let weak: Weak<Inner<U>> = Arc::downgrade(&inner);
+            let changed = inner.changed.clone();
+            runtime.spawn(async move {
+                loop {
+                    let _ = tokio::time::timeout(SYNC_EVERY, changed.notified()).await;
+                    match weak.upgrade() {
+                        Some(inner) => {
+                            let _ = NativeBackend { inner }.sync_round().await;
+                        }
                         None => break,
                     }
                 }
@@ -447,9 +477,12 @@ impl<U: Unlock> NativeBackend<U> {
             self.inner.state().quick_unlock = previous;
             return Err(e);
         }
-        let settings = Settings {
-            quick_unlock_secs: window.map(|w| w.as_secs()),
-        };
+        self.update_settings(|s| s.quick_unlock_secs = window.map(|w| w.as_secs()))
+    }
+
+    fn update_settings(&self, change: impl FnOnce(&mut Settings)) -> Result<(), Failure> {
+        let mut settings = load_settings(&self.inner.paths.settings);
+        change(&mut settings);
         let json = serde_json::to_vec_pretty(&settings).map_err(|e| Failure::new(e.to_string()))?;
         if let Some(dir) = self.inner.paths.settings.parent() {
             private_dir(dir)?;
@@ -682,11 +715,23 @@ impl<U: Unlock> NativeBackend<U> {
         &self,
         f: impl FnOnce(&mut Store, &mut Opened) -> Result<T, Failure>,
     ) -> Result<T, Failure> {
+        let was_unlocked = self.is_unlocked();
         self.open().await?;
+        if !was_unlocked {
+            // Sync waits for the keys; now it has them.
+            self.inner.changed.notify_one();
+        }
         let mut state = self.inner.state();
         let state = &mut *state;
         match (state.store.as_mut(), state.opened.as_mut()) {
-            (Some(store), Some(opened)) => f(store, opened),
+            (Some(store), Some(opened)) => {
+                let before = opened.unlocked.sequence();
+                let result = f(store, opened);
+                if opened.unlocked.sequence() != before {
+                    self.inner.changed.notify_one();
+                }
+                result
+            }
             _ => Err(Failure::new("VisiPass locked while answering; try again")),
         }
     }
@@ -737,16 +782,19 @@ impl<U: Unlock> NativeBackend<U> {
                     item_id: id,
                     overview,
                     details,
+                    replaces: &[],
                 })
                 .collect();
-            store
+            let revs = store
                 .put_items(&mut opened.unlocked, &vault.id, &writes)
                 .map_err(failure)?;
-            for item in fresh {
+            for (item, rev) in fresh.into_iter().zip(revs) {
                 opened.entries.push(Entry {
                     vault_id: vault.id.clone(),
                     item_id: item.id.clone(),
+                    rev,
                     overview: overview_of(item),
+                    others: Vec::new(),
                 });
             }
             Ok((encoded.len(), skipped))
@@ -757,22 +805,7 @@ impl<U: Unlock> NativeBackend<U> {
 
 /// Decrypts every overview after unlock, to build the search index (§7.2).
 fn load(store: &Store, unlocked: Unlocked) -> Result<Opened, Failure> {
-    let mut vaults = Vec::new();
-    let mut entries = Vec::new();
-    for (vault_id, attrs) in store.vaults(&unlocked).map_err(failure)? {
-        let attrs: VaultAttrs = decode(&attrs)?;
-        for overview in store.overviews(&unlocked, &vault_id).map_err(failure)? {
-            entries.push(Entry {
-                vault_id: vault_id.clone(),
-                item_id: overview.item_id,
-                overview: decode(&overview.plaintext)?,
-            });
-        }
-        vaults.push(VaultRef {
-            id: vault_id,
-            name: attrs.name,
-        });
-    }
+    let (vaults, entries) = index(store, &unlocked)?;
     Ok(Opened {
         unlocked,
         vaults,
@@ -780,15 +813,77 @@ fn load(store: &Store, unlocked: Unlocked) -> Result<Opened, Failure> {
     })
 }
 
+/// Every vault and one entry per item. An item in conflict shows its most
+/// recently updated revision and keeps the others beside it.
+fn index(store: &Store, unlocked: &Unlocked) -> Result<(Vec<VaultRef>, Vec<Entry>), Failure> {
+    let mut vaults = Vec::new();
+    let mut entries: Vec<Entry> = Vec::new();
+    for (vault_id, attrs) in store.vaults(unlocked).map_err(failure)? {
+        let attrs: VaultAttrs = decode(&attrs)?;
+        for overview in store.overviews(unlocked, &vault_id).map_err(failure)? {
+            let decoded: Overview = decode(&overview.plaintext)?;
+            match entries.last_mut() {
+                Some(entry) if entry.vault_id == vault_id && entry.item_id == overview.item_id => {
+                    if (&decoded.updated_at, overview.rev) > (&entry.overview.updated_at, entry.rev)
+                    {
+                        entry.others.push(entry.rev);
+                        entry.rev = overview.rev;
+                        entry.overview = decoded;
+                    } else {
+                        entry.others.push(overview.rev);
+                    }
+                }
+                _ => entries.push(Entry {
+                    vault_id: vault_id.clone(),
+                    item_id: overview.item_id,
+                    rev: overview.rev,
+                    overview: decoded,
+                    others: Vec::new(),
+                }),
+            }
+        }
+        vaults.push(VaultRef {
+            id: vault_id,
+            name: attrs.name,
+        });
+    }
+    Ok((vaults, entries))
+}
+
+/// After sync changed the vault underneath.
+fn reindex(store: &Store, opened: &mut Opened) -> Result<(), Failure> {
+    let (vaults, entries) = index(store, &opened.unlocked)?;
+    opened.vaults = vaults;
+    opened.entries = entries;
+    Ok(())
+}
+
+/// The details of the revision an item's entry shows.
 fn details(
     store: &Store,
     opened: &Opened,
     vault_id: &str,
     item_id: &str,
 ) -> Result<Details, Failure> {
+    let rev = opened
+        .entries
+        .iter()
+        .find(|e| e.vault_id == vault_id && e.item_id == item_id)
+        .map(|e| e.rev)
+        .ok_or_else(|| Failure::new(format!("No item {item_id} in that vault")))?;
+    details_at(store, opened, vault_id, item_id, &rev)
+}
+
+fn details_at(
+    store: &Store,
+    opened: &Opened,
+    vault_id: &str,
+    item_id: &str,
+    rev: &Rev,
+) -> Result<Details, Failure> {
     decode(
         &store
-            .details(&opened.unlocked, vault_id, item_id)
+            .details(&opened.unlocked, vault_id, item_id, rev)
             .map_err(failure)?,
     )
 }
@@ -810,6 +905,8 @@ fn assemble(vault: &VaultRef, item_id: &str, overview: &Overview, details: Detai
 }
 
 /// Writes one item and reads it back: values, title and category must match.
+/// An existing item's new revision replaces the one its entry shows, so a
+/// conflict's other side stays until the human settles it.
 fn save(
     store: &mut Store,
     opened: &mut Opened,
@@ -817,6 +914,24 @@ fn save(
     item_id: &str,
     overview: Overview,
     fields: Details,
+) -> Result<Item, Failure> {
+    let replaces: Vec<Rev> = opened
+        .entries
+        .iter()
+        .find(|e| e.vault_id == vault.id && e.item_id == item_id)
+        .map(|e| vec![e.rev])
+        .unwrap_or_default();
+    save_replacing(store, opened, vault, item_id, overview, fields, &replaces)
+}
+
+fn save_replacing(
+    store: &mut Store,
+    opened: &mut Opened,
+    vault: &VaultRef,
+    item_id: &str,
+    overview: Overview,
+    fields: Details,
+    replaces: &[Rev],
 ) -> Result<Item, Failure> {
     let expected: Vec<(String, Option<String>)> = fields
         .fields
@@ -835,13 +950,14 @@ fn save(
             .collect::<Vec<_>>()
             .join("\u{1}"),
     );
-    store
+    let rev = store
         .put_item(
             &mut opened.unlocked,
             &vault.id,
             item_id,
             &encode(&overview),
             &encode(&fields),
+            replaces,
         )
         .map_err(failure)?;
     let unverified = || {
@@ -849,7 +965,7 @@ fn save(
             "The save is unverified: the item read back differently. Check it before retrying",
         )
     };
-    let back = details(store, opened, &vault.id, item_id).map_err(|_| unverified())?;
+    let back = details_at(store, opened, &vault.id, item_id, &rev).map_err(|_| unverified())?;
     let got = Zeroizing::new(
         back.fields
             .iter()
@@ -868,11 +984,17 @@ fn save(
     }
     let item = assemble(vault, item_id, &overview, back);
     match opened.entry_mut(&vault.id, item_id) {
-        Some(entry) => entry.overview = overview,
+        Some(entry) => {
+            entry.rev = rev;
+            entry.overview = overview;
+            entry.others.retain(|r| !replaces.contains(r));
+        }
         None => opened.entries.push(Entry {
             vault_id: vault.id.clone(),
             item_id: item_id.to_string(),
+            rev,
             overview,
+            others: Vec::new(),
         }),
     }
     Ok(item)
@@ -1329,4 +1451,255 @@ fn resolve_one(store: &Store, opened: &Opened, r: &SecretRef) -> Result<Secret, 
         return Ok(Secret::new(totp.now().0));
     }
     Ok(value)
+}
+
+// ---- Sync (§11.1) ---------------------------------------------------------------
+
+fn unix(time: SystemTime) -> u64 {
+    time.duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn sync_folder_checked(folder: &std::path::Path) -> Result<PathBuf, Failure> {
+    folder.canonicalize().ok().filter(|f| f.is_dir()).ok_or_else(|| {
+        Failure::new(format!(
+            "{} is not a folder. Choose the folder your sync service keeps in step on every device, such as ~/Dropbox or a Syncthing folder",
+            folder.display()
+        ))
+    })
+}
+
+impl<U: Unlock> NativeBackend<U> {
+    /// The folder sync goes through, if it is on.
+    pub fn sync_folder(&self) -> Option<PathBuf> {
+        load_settings(&self.inner.paths.settings).sync_folder
+    }
+
+    /// Turns sync on through `folder` on the device that has the vault: writes
+    /// the account record and a snapshot there, then syncs.
+    pub async fn sync_setup(&self, folder: &std::path::Path) -> Result<vp_sync::Report, Failure> {
+        let folder = sync_folder_checked(folder)?;
+        if let Some(current) = self.sync_folder()
+            && current != folder
+        {
+            return Err(Failure::new(format!(
+                "Sync already goes through {}. Turn it off first with `vp sync off`",
+                current.display()
+            )));
+        }
+        self.open_for(Some(&format!("turn on sync through {}", folder.display())))
+            .await?;
+        let storage = vp_sync::Folder::new(&folder);
+        let report = self
+            .with(|store, opened| {
+                let report =
+                    vp_sync::setup(store, &mut opened.unlocked, &storage).map_err(failure)?;
+                if report.applied > 0 {
+                    reindex(store, opened)?;
+                }
+                Ok(report)
+            })
+            .await?;
+        self.update_settings(|s| s.sync_folder = Some(folder))?;
+        self.inner.state().last_sync = Some((SystemTime::now(), Ok(report.clone())));
+        Ok(report)
+    }
+
+    /// Makes this device's vault from another device's sync folder, given the
+    /// Secret Key and master password, and turns sync on. Refused if this
+    /// device already has a vault.
+    pub async fn sync_join(
+        &self,
+        folder: &std::path::Path,
+        secret: SecretKey,
+        password: Secret,
+    ) -> Result<vp_sync::Report, Failure> {
+        let folder = sync_folder_checked(folder)?;
+        let _gate = self.inner.gate.lock().await;
+        let paths = self.inner.paths.clone();
+        if paths.exists() || paths.secret_key.exists() {
+            return Err(Failure::new(format!(
+                "This device already has a VisiPass vault at {}. Joining makes a new one, so it was refused",
+                paths.vault.display()
+            )));
+        }
+        for dir in [paths.vault.parent(), paths.sequence.parent()]
+            .into_iter()
+            .flatten()
+        {
+            private_dir(dir)?;
+        }
+        write_private(
+            &paths.secret_key,
+            format!("{}\n", *secret.display()).as_bytes(),
+        )?;
+        let inner = self.inner.clone();
+        let from = folder.clone();
+        let joined = tokio::task::spawn_blocking(move || {
+            let paths = &inner.paths;
+            let (store, unlocked, report) = vp_sync::join(
+                &vp_sync::Folder::new(&from),
+                &paths.vault,
+                &paths.sequence,
+                password.expose(),
+                &secret,
+            )
+            .map_err(failure)?;
+            let opened = load(&store, unlocked)?;
+            let mut state = inner.state();
+            state.store = Some(store);
+            state.opened_with_password(opened);
+            state.last_sync = Some((SystemTime::now(), Ok(report.clone())));
+            Ok::<_, Failure>(report)
+        })
+        .await
+        .map_err(|_| Failure::new("Joining failed"))
+        .and_then(|r| r);
+        match joined {
+            Ok(report) => {
+                self.update_settings(|s| s.sync_folder = Some(folder))?;
+                Ok(report)
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&paths.secret_key);
+                Err(e)
+            }
+        }
+    }
+
+    /// One sync round, if sync is on and the vault is unlocked. Never asks to
+    /// unlock: sync needs the keys, and waits for the human to unlock.
+    pub async fn sync_round(&self) -> Option<Result<vp_sync::Report, Failure>> {
+        let folder = self.sync_folder()?;
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut state = inner.state();
+            let state = &mut *state;
+            let (Some(store), Some(opened)) = (state.store.as_mut(), state.opened.as_mut()) else {
+                return None;
+            };
+            let result =
+                vp_sync::round(store, &mut opened.unlocked, &vp_sync::Folder::new(&folder))
+                    .map_err(failure)
+                    .and_then(|report| {
+                        if report.applied > 0 {
+                            reindex(store, opened)?;
+                        }
+                        Ok(report)
+                    });
+            state.last_sync = Some((SystemTime::now(), result.clone().map_err(|e| e.0.clone())));
+            Some(result)
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    /// Stops syncing on this device. The files already in the folder stay.
+    pub fn sync_off(&self) -> Result<(), Failure> {
+        self.update_settings(|s| s.sync_folder = None)
+    }
+
+    /// Sync on this device, for `vp sync status`. Holds no values.
+    pub fn sync_status(&self) -> serde_json::Value {
+        use serde_json::json;
+        let folder = self.sync_folder();
+        let state = self.inner.state();
+        let mut status = json!({
+            "on": folder.is_some(),
+            "folder": folder,
+            "unlocked": state.opened.is_some(),
+        });
+        if let Some(opened) = &state.opened {
+            let position = opened.unlocked.position();
+            status["device"] = json!(vp_store::hex(&position.device));
+            status["sent"] = json!(position.seq);
+            status["conflicts"] = json!(
+                opened
+                    .entries
+                    .iter()
+                    .filter(|e| !e.others.is_empty())
+                    .count()
+            );
+        }
+        if let Some((at, result)) = &state.last_sync {
+            status["lastRound"] = match result {
+                Ok(report) => json!({
+                    "at": vp_core::time::rfc3339(unix(*at)),
+                    "written": report.written,
+                    "applied": report.applied,
+                    "newDeviceId": report.new_device_id,
+                    "devices": report.devices.iter().map(|d| json!({
+                        "device": vp_store::hex(&d.device),
+                        "applied": d.seq,
+                        "available": d.available,
+                        "heard": d.heard.map(|t| vp_core::time::rfc3339(unix(t))),
+                        "forked": d.forked,
+                        "refused": d.refused,
+                    })).collect::<Vec<_>>(),
+                }),
+                Err(e) => json!({ "at": vp_core::time::rfc3339(unix(*at)), "error": e }),
+            };
+        }
+        status
+    }
+
+    /// Every item in conflict, each version in full (the shown one first),
+    /// with the revision that names it. For the app only: it carries values.
+    pub async fn conflicts(&self) -> Result<Vec<Vec<(String, Item)>>, Failure> {
+        self.with(|store, opened| {
+            let mut out = Vec::new();
+            for entry in opened.entries.iter().filter(|e| !e.others.is_empty()) {
+                let vault = opened.vault(&entry.vault_id)?.clone();
+                let mut versions = Vec::new();
+                for rev in std::iter::once(entry.rev).chain(entry.others.iter().copied()) {
+                    let overview: Overview = decode(
+                        &store
+                            .overview(&opened.unlocked, &vault.id, &entry.item_id, &rev)
+                            .map_err(failure)?,
+                    )?;
+                    let d = details_at(store, opened, &vault.id, &entry.item_id, &rev)?;
+                    versions.push((
+                        rev.to_string(),
+                        assemble(&vault, &entry.item_id, &overview, d),
+                    ));
+                }
+                out.push(versions);
+            }
+            Ok(out)
+        })
+        .await
+    }
+
+    /// Settles a conflict: the version `keep` becomes the item, replacing
+    /// every current version, which stay in its history.
+    pub async fn resolve_conflict(
+        &self,
+        id: &str,
+        vault: &str,
+        keep: &str,
+    ) -> Result<Item, Failure> {
+        let (id, vault) = (id.to_string(), vault.to_string());
+        let keep: Rev = keep.parse().map_err(failure)?;
+        self.with(move |store, opened| {
+            let vault = opened.vault(&vault)?.clone();
+            let item_id = opened.entry(&vault.id, &id)?.item_id.clone();
+            let heads = opened.unlocked.heads(&vault.id, &item_id);
+            if !heads.contains(&keep) {
+                return Err(Failure::new(
+                    "That version is no longer current (perhaps it was settled on another device); look again",
+                ));
+            }
+            let mut overview: Overview = decode(
+                &store
+                    .overview(&opened.unlocked, &vault.id, &item_id, &keep)
+                    .map_err(failure)?,
+            )?;
+            overview.updated_at = Some(vp_core::time::now_rfc3339());
+            let d = details_at(store, opened, &vault.id, &item_id, &keep)?;
+            save_replacing(store, opened, &vault, &item_id, overview, d, &heads)
+        })
+        .await
+    }
 }

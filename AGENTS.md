@@ -26,6 +26,7 @@ cargo fmt --all
 ```
 crates/vp-core     pure: refs, env files, find scoring, audit, masking, IPC types, Backend trait
 crates/vp-op       Backend over 1Password's op (ported from 2password)
+crates/vp-sync     sync through the person's own folder (§11.1); the files' crypto is vp-store/src/sync.rs
 crates/vp-daemon   visipassd: grants, approval prompt, access log, process identification
 crates/vp-cli      vp: parse flags, call visipassd, print JSON; no logic
 crates/vp-gui   visipass-prompt: GPUI approval window (layer-shell overlay on Wayland), themed from Omarchy;

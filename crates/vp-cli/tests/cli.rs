@@ -87,6 +87,8 @@ else:
 struct Scripted(
     Arc<Mutex<(VecDeque<Decision>, usize)>>,
     Arc<Mutex<Vec<String>>>,
+    /// What the next pastes type, before falling back to NEW_KEY.
+    Arc<Mutex<VecDeque<String>>>,
 );
 
 impl Scripted {
@@ -110,7 +112,13 @@ impl Approver for Scripted {
         state.1 += 1;
         Ok(match state.0.pop_front() {
             Some(Decision::Deny) | None => None,
-            Some(_) => Some(vp_core::secret::Secret::new(NEW_KEY.to_string())),
+            Some(_) => Some(vp_core::secret::Secret::new(
+                self.2
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or_else(|| NEW_KEY.to_string()),
+            )),
         })
     }
     async fn show_page(&self, html: &str) -> Result<(), Failure> {
@@ -193,6 +201,7 @@ impl World {
 
         let approver = Scripted(
             Arc::new(Mutex::new((decisions.iter().copied().collect(), 0))),
+            Arc::default(),
             Arc::default(),
         );
         let socket = dir.path().join("vp.sock");
@@ -1644,4 +1653,73 @@ fn kamal_fetch_is_one_approval_in_kamals_format_and_fails_closed() {
     assert!(text(&stray.stderr).contains("--allow-empty SENTRY_DSN names a secret"));
     assert!(text(&stray.stdout).is_empty());
     world.assert_contained();
+}
+
+#[test]
+fn a_second_device_joins_through_a_shared_folder_and_follows_changes() {
+    let shared = tempfile::tempdir().unwrap();
+    let folder = shared.path().to_str().unwrap();
+    // init: password, confirmation, Secret Key window; then a read.
+    let first = World::native(&[Decision::Once, Decision::Once, Decision::Deny]);
+    clean(&first.vp(&["init"], None));
+    clean(&first.vp(&["import", "op"], None));
+    let set_up = first.vp(&["sync", "setup", folder], None);
+    clean(&set_up);
+    assert_eq!(json(&set_up)["on"], true);
+    let key = std::fs::read_to_string(first.path("data/secret-key")).unwrap();
+    let key = key.trim().to_string();
+
+    // join: the Secret Key, then the master password; then a read.
+    let second = World::native(&[Decision::Once, Decision::Once, Decision::Once]);
+    second.approver.2.lock().unwrap().push_back(key.clone());
+    let joined = second.vp(&["sync", "join", folder], None);
+    clean(&joined);
+    assert_eq!(json(&joined)["on"], true);
+    for stream in [&joined.stdout, &joined.stderr] {
+        assert!(
+            !text(stream).contains(&key),
+            "the Secret Key never reaches the caller"
+        );
+    }
+    let read = second.vp(&["read", "op://Dev/OpenAI API Key/credential"], None);
+    assert_eq!(text(&read.stdout), OPENAI);
+    assert!(
+        second.calls().is_empty(),
+        "1Password is never asked on the second device"
+    );
+
+    // Joining again is refused before any window opens.
+    let asked = second.approver.asked();
+    let again = second.vp(&["sync", "join", folder], None);
+    assert!(text(&again.stderr).contains("already has a VisiPass vault"));
+    assert_eq!(second.approver.asked(), asked);
+
+    let status = json(&second.vp(&["sync", "now"], None));
+    assert_eq!(status["conflicts"], 0);
+    assert_eq!(status["lastRound"]["devices"][0]["forked"], false);
+    for world in [&first, &second] {
+        world.assert_contained();
+        let log = std::fs::read_to_string(world.path("state/access.log")).unwrap_or_default();
+        assert!(!log.contains(&key));
+    }
+}
+
+#[test]
+fn an_agent_cannot_turn_on_sync_or_join() {
+    let shared = tempfile::tempdir().unwrap();
+    let folder = shared.path().to_str().unwrap();
+    let world = World::native_agent(&[Decision::Once, Decision::Once, Decision::Deny]);
+    clean(&world.vp(&["init"], None));
+    let asked = world.approver.asked();
+    for args in [["sync", "setup", folder], ["sync", "join", folder]] {
+        let refused = world.vp(&args, None);
+        assert!(
+            text(&refused.stderr).contains("Only the human"),
+            "{}",
+            text(&refused.stderr)
+        );
+    }
+    assert_eq!(world.approver.asked(), asked, "no window opened");
+    assert!(std::fs::read_dir(shared.path()).unwrap().next().is_none());
+    assert_eq!(json(&world.vp(&["sync"], None))["on"], false);
 }

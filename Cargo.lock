@@ -6367,8 +6367,10 @@ dependencies = [
  "tempfile",
  "tokio",
  "vp-core",
+ "vp-crypto",
  "vp-native",
  "vp-op",
+ "vp-sync",
  "zbus",
  "zeroize",
  "zip",
@@ -6399,6 +6401,7 @@ dependencies = [
  "vp-core",
  "vp-crypto",
  "vp-store",
+ "vp-sync",
  "zeroize",
 ]
 
@@ -6421,6 +6424,15 @@ dependencies = [
  "tempfile",
  "vp-crypto",
  "zeroize",
+]
+
+[[package]]
+name = "vp-sync"
+version = "0.10.3"
+dependencies = [
+ "tempfile",
+ "vp-crypto",
+ "vp-store",
 ]
 
 [[package]]

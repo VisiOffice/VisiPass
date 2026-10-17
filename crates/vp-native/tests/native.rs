@@ -496,3 +496,117 @@ async fn requests_waiting_on_a_cancelled_unlock_do_not_each_prompt() {
     }
     assert_eq!(unlock.asked(), 1, "one prompt, not five");
 }
+
+#[tokio::test]
+async fn two_devices_sync_through_a_folder_and_settle_a_conflict() {
+    let (one, two, shared) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    let a = NativeBackend::with_params(paths(&one), Scripted::new(vec![]), CHEAP);
+    let shown = a.init(Secret::new(PASSWORD.into())).await.unwrap();
+    let item = login("o2kmam7av67ewmcgxllw2t7dda", "Example", &private(), "first");
+    a.import(&private(), vec![item]).await.unwrap();
+    a.sync_setup(shared.path()).await.unwrap();
+    assert!(a.sync_folder().is_some());
+
+    let b = NativeBackend::with_params(paths(&two), Scripted::new(vec![]), CHEAP);
+    let secret = vp_crypto::SecretKey::parse(&shown).unwrap();
+    b.sync_join(shared.path(), secret, Secret::new(PASSWORD.into()))
+        .await
+        .unwrap();
+    let password = |backend: &NativeBackend<Scripted>| {
+        let backend = backend.clone();
+        async move {
+            backend
+                .resolve(&[SecretRef::parse("op://Private/Example/password").unwrap()])
+                .await
+                .unwrap()[0]
+                .expose()
+                .to_string()
+        }
+    };
+    assert_eq!(password(&b).await, "first");
+    // Joining again, or on a device with a vault, is refused.
+    let error = b
+        .sync_join(
+            shared.path(),
+            vp_crypto::SecretKey::parse(&shown).unwrap(),
+            Secret::new(PASSWORD.into()),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.0.contains("already has a VisiPass vault"),
+        "{}",
+        error.0
+    );
+
+    // An edit on A reaches B.
+    let mut edited = a.item("Example", "Private").await.unwrap();
+    edited.fields[1].value = Some(Secret::new("second".into()));
+    a.save_item(&edited).await.unwrap();
+    a.sync_round().await.unwrap().unwrap();
+    assert_eq!(b.sync_round().await.unwrap().unwrap().applied, 1);
+    assert_eq!(password(&b).await, "second");
+
+    // Both edit offline: a conflict on both, newest shown, nothing lost.
+    for (backend, value) in [(&a, "from a"), (&b, "from b")] {
+        let mut item = backend.item("Example", "Private").await.unwrap();
+        item.fields[1].value = Some(Secret::new(value.into()));
+        backend.save_item(&item).await.unwrap();
+        backend.sync_round().await.unwrap().unwrap();
+    }
+    a.sync_round().await.unwrap().unwrap();
+    let conflicts = a.conflicts().await.unwrap();
+    assert_eq!(conflicts.len(), 1);
+    let mut values: Vec<String> = conflicts[0]
+        .iter()
+        .map(|(_, item)| item.fields[1].value.as_ref().unwrap().expose().to_string())
+        .collect();
+    values.sort();
+    assert_eq!(values, vec!["from a", "from b"]);
+    assert_eq!(b.conflicts().await.unwrap().len(), 1);
+    assert_eq!(a.sync_status()["conflicts"], 1);
+
+    // Keep B's version on A; B follows.
+    let keep = conflicts[0]
+        .iter()
+        .find(|(_, item)| item.fields[1].value.as_ref().unwrap().expose() == "from b")
+        .unwrap()
+        .0
+        .clone();
+    a.resolve_conflict("Example", "Private", &keep)
+        .await
+        .unwrap();
+    assert!(a.conflicts().await.unwrap().is_empty());
+    a.sync_round().await.unwrap().unwrap();
+    b.sync_round().await.unwrap().unwrap();
+    assert!(b.conflicts().await.unwrap().is_empty());
+    assert_eq!(password(&b).await, "from b");
+    assert_eq!(password(&a).await, "from b");
+
+    // The folder holds no values or names.
+    let mut stack = vec![shared.path().to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let bytes = std::fs::read(&path).unwrap();
+            for needle in ["from b", "second", "Example", "robert", "Private"] {
+                assert!(
+                    !bytes.windows(needle.len()).any(|w| w == needle.as_bytes()),
+                    "{needle} in {}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    b.sync_off().unwrap();
+    assert!(b.sync_round().await.is_none());
+}

@@ -116,6 +116,14 @@ pub trait Backend: Send + Sync + 'static {
         async { Err(Failure::new(NO_NATIVE)) }
     }
 
+    /// Sync through the person's own storage (§11.1).
+    fn native_sync(
+        &self,
+        _op: SyncOp,
+    ) -> impl Future<Output = Result<serde_json::Value, Failure>> + Send {
+        async { Err(Failure::new(NO_NATIVE)) }
+    }
+
     /// Copies items into one native vault, creating it if needed and keeping
     /// their IDs; an ID already present is skipped. Returns (created, skipped).
     fn native_import_items(
@@ -125,6 +133,30 @@ pub trait Backend: Send + Sync + 'static {
     ) -> impl Future<Output = Result<(usize, usize), Failure>> + Send {
         async { Err(Failure::new(NO_NATIVE)) }
     }
+}
+
+/// What [`Backend::native_sync`] does.
+pub enum SyncOp {
+    Setup {
+        folder: std::path::PathBuf,
+    },
+    /// `secret_key` is as the Emergency Kit prints it.
+    Join {
+        folder: std::path::PathBuf,
+        secret_key: Secret,
+        password: Secret,
+    },
+    /// A round now, then the status.
+    Round,
+    Status,
+    Off,
+    /// Every version of every item in conflict, values included: the app's.
+    Conflicts,
+    Resolve {
+        id: String,
+        vault: String,
+        keep: String,
+    },
 }
 
 /// What the Emergency Kit page shows. The Secret Key goes only to that page.

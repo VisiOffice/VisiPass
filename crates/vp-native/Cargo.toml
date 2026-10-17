@@ -12,6 +12,7 @@ tokio.workspace = true
 vp-core.workspace = true
 vp-crypto.workspace = true
 vp-store.workspace = true
+vp-sync.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]

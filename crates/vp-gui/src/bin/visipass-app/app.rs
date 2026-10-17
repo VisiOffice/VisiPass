@@ -32,6 +32,7 @@ pub enum Filter {
     Vault(String),
     Agents,
     Duplicates,
+    Conflicts,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,6 +75,11 @@ pub struct VisiPassApp {
     keep: HashMap<String, String>,
     not_duplicates: HashSet<String>,
     duplicates_shown: usize,
+    /// Items sync found edited on two devices at once: each version (its
+    /// revision and contents), the one shown everywhere else first.
+    conflicts: Vec<Vec<(String, Item)>>,
+    /// Conflicts whose concealed values are shown, until.
+    conflicts_revealed: HashMap<String, Instant>,
 }
 
 const DUPLICATES_PAGE: usize = 40;
@@ -127,13 +133,8 @@ impl VisiPassApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let search = cx.new(|cx| {
-            TextInput::new(
-                theme.clone(),
-                "Search · \"exact\" url: user: tag: vault: type:",
-                cx,
-            )
-        });
+        let search =
+            cx.new(|cx| TextInput::new(theme.clone(), "Search · url: user: tag: vault:", cx));
         cx.subscribe(&search, |this, input, event: &InputEvent, cx| match event {
             InputEvent::Changed => {
                 this.query = input.read(cx).text().to_lowercase();
@@ -196,6 +197,8 @@ impl VisiPassApp {
             keep: HashMap::new(),
             not_duplicates: HashSet::new(),
             duplicates_shown: DUPLICATES_PAGE,
+            conflicts: Vec::new(),
+            conflicts_revealed: HashMap::new(),
         };
         app.reload(cx);
         app
@@ -245,6 +248,71 @@ impl VisiPassApp {
                 this.apply_filter();
             },
         );
+        self.load_conflicts(cx);
+    }
+
+    /// Conflicts exist only with VisiPass's own vault and sync; anything else
+    /// answers with an error, which is not the human's concern here.
+    fn load_conflicts(&mut self, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { client.call(Request::Conflicts) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let conflicts: Vec<Vec<(String, Item)>> = result
+                    .ok()
+                    .and_then(|v| v["conflicts"].as_array().cloned())
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|versions| {
+                        versions
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|v| {
+                                Some((
+                                    v["version"].as_str()?.to_string(),
+                                    serde_json::from_value(v["item"].clone()).ok()?,
+                                ))
+                            })
+                            .collect()
+                    })
+                    .filter(|versions: &Vec<(String, Item)>| versions.len() > 1)
+                    .collect();
+                this.conflicts = conflicts;
+                if this.conflicts.is_empty() && this.filter == Filter::Conflicts {
+                    this.filter = Filter::All;
+                    this.apply_filter();
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Settles a conflict: `keep` becomes the item on every device.
+    fn keep_version(&mut self, item: &Item, keep: String, cx: &mut Context<Self>) {
+        let edited = item.updated_at.clone().unwrap_or_default();
+        self.request(
+            Request::ResolveConflict {
+                id: item.id.clone(),
+                vault: item.vault.id.clone(),
+                keep,
+            },
+            cx,
+            move |this, _, cx| {
+                this.toast = Some((
+                    format!(
+                        "Kept the version edited {}; the other stays in its history.",
+                        edited.get(..10).unwrap_or(&edited)
+                    ),
+                    Instant::now() + Duration::from_secs(6),
+                ));
+                this.reload(cx);
+            },
+        );
     }
 
     fn load_agents(&mut self, cx: &mut Context<Self>) {
@@ -264,7 +332,7 @@ impl VisiPassApp {
             .iter()
             .enumerate()
             .filter(|(_, item)| match &self.filter {
-                Filter::All | Filter::Agents | Filter::Duplicates => true,
+                Filter::All | Filter::Agents | Filter::Duplicates | Filter::Conflicts => true,
                 Filter::Favorites => item.favorite,
                 Filter::Vault(v) => &item.vault.id == v,
             })
@@ -838,6 +906,16 @@ impl VisiPassApp {
         }
         sidebar
             .child(div().flex_1().min_h(px(12.)))
+            .when(!self.conflicts.is_empty(), |d| {
+                d.child(self.nav_row(
+                    "nav-conflicts".into(),
+                    "\u{f071}",
+                    "Conflicts".into(),
+                    Some(self.conflicts.len()),
+                    Filter::Conflicts,
+                    cx,
+                ))
+            })
             .child(self.nav_row(
                 "nav-duplicates".into(),
                 "\u{f0c5}",
@@ -957,7 +1035,7 @@ impl VisiPassApp {
                 // Counts within the current sidebar view, ignoring the category itself.
                 let mut counts: Vec<(String, usize)> = Vec::new();
                 for item in self.items.iter().filter(|item| match &self.filter {
-                    Filter::All | Filter::Agents | Filter::Duplicates => true,
+                    Filter::All | Filter::Agents | Filter::Duplicates | Filter::Conflicts => true,
                     Filter::Favorites => item.favorite,
                     Filter::Vault(v) => &item.vault.id == v,
                 }) {
@@ -1710,6 +1788,218 @@ impl VisiPassApp {
             .child(rows)
     }
 
+    fn render_conflicts(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = self.theme.clone();
+        let mut page = div()
+            .id("conflicts")
+            .flex_1()
+            .h_full()
+            .overflow_y_scroll()
+            .p(px(24.))
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .child(
+                div()
+                    .text_size(px(t.size(1.333)))
+                    .font_weight(FontWeight::BOLD)
+                    .child("Conflicts"),
+            )
+            .child(div().text_color(t.muted).child(
+                "These items were changed on two devices before they synced. Nothing was \
+                 discarded: until you choose, VisiPass uses the most recent version and keeps the \
+                 other. Keeping one makes it the item on every device; the other stays in its history.",
+            ));
+        if self.conflicts.is_empty() {
+            return page.child(div().text_color(t.muted).child("No conflicts."));
+        }
+        for versions in &self.conflicts {
+            page = page.child(self.render_conflict(versions, cx));
+        }
+        page
+    }
+
+    fn render_conflict(
+        &self,
+        versions: &[(String, Item)],
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let t = self.theme.clone();
+        let first = &versions[0].1;
+        let key = format!("{}/{}", first.vault.id, first.id);
+        let revealed = self
+            .conflicts_revealed
+            .get(&key)
+            .is_some_and(|until| Instant::now() < *until);
+        // What a version says for each thing that differs between them.
+        // (label, value, concealed)
+        type Row = (String, Box<dyn Fn(&Item) -> Option<String>>, bool);
+        let mut rows: Vec<Row> = vec![
+            (
+                "Title".into(),
+                Box::new(|i: &Item| Some(i.title.clone())),
+                false,
+            ),
+            (
+                "Websites".into(),
+                Box::new(|i: &Item| {
+                    Some(
+                        i.urls
+                            .iter()
+                            .map(|u| u.href.clone())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    )
+                }),
+                false,
+            ),
+            (
+                "Tags".into(),
+                Box::new(|i: &Item| Some(i.tags.join(", "))),
+                false,
+            ),
+        ];
+        let mut labels: Vec<(String, bool)> = Vec::new();
+        for (_, item) in versions {
+            for f in &item.fields {
+                let label = f.display_label();
+                if !labels.iter().any(|(l, _)| *l == label) {
+                    labels.push((label, f.concealed()));
+                }
+            }
+        }
+        let mut concealed_differs = false;
+        for (label, concealed) in labels {
+            let wanted = label.clone();
+            let value = move |i: &Item| {
+                i.fields
+                    .iter()
+                    .find(|f| f.display_label() == wanted)
+                    .map(|f| {
+                        f.value
+                            .as_ref()
+                            .map(|v| v.expose().to_string())
+                            .unwrap_or_default()
+                    })
+            };
+            let differs = versions
+                .iter()
+                .map(|(_, i)| value(i))
+                .collect::<HashSet<_>>()
+                .len()
+                > 1;
+            if differs && concealed {
+                concealed_differs = true;
+            }
+            rows.push((label, Box::new(value), concealed));
+        }
+        let differing: Vec<&Row> = rows
+            .iter()
+            .filter(|(_, get, _)| {
+                versions
+                    .iter()
+                    .map(|(_, i)| get(i))
+                    .collect::<HashSet<_>>()
+                    .len()
+                    > 1
+            })
+            .collect();
+        let mut columns = div().flex().gap(px(12.));
+        for (n, (rev, item)) in versions.iter().enumerate() {
+            let edited = item.updated_at.clone().unwrap_or_default();
+            let mut column = div()
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .p(px(10.))
+                .rounded(px(t.radius))
+                .bg(alpha(t.foreground, 0.04))
+                .child(div().font_weight(FontWeight::BOLD).child(format!(
+                    "Edited {}{}",
+                    edited.get(..16).unwrap_or(&edited).replace('T', " "),
+                    if n == 0 { " · in use now" } else { "" }
+                )));
+            for (label, get, concealed) in &differing {
+                let shown = get(item).map(|v| {
+                    if *concealed && !revealed && !v.is_empty() {
+                        "••••••••".to_string()
+                    } else {
+                        v
+                    }
+                });
+                column = column.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_size(px(t.size(0.917)))
+                                .text_color(t.muted)
+                                .child(label.clone()),
+                        )
+                        .child(
+                            div()
+                                .truncate()
+                                .child(shown.unwrap_or_else(|| "(none)".into())),
+                        ),
+                );
+            }
+            let (item, rev) = (item.clone(), rev.clone());
+            column = column.child(self.button(
+                format!("conflict-keep-{rev}"),
+                "Keep this version",
+                cx,
+                move |this, _, cx| this.keep_version(&item, rev.clone(), cx),
+            ));
+            columns = columns.child(column);
+        }
+        let reveal_key = key.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .p(px(10.))
+            .rounded(px(t.radius))
+            .bg(t.well)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .font_weight(FontWeight::BOLD)
+                            .truncate()
+                            .child(format!("{}  ·  {}", first.title, first.vault.name)),
+                    )
+                    .when(concealed_differs, |d| {
+                        d.child(self.button(
+                            format!("conflict-show-{key}"),
+                            if revealed { "Hide" } else { "Show" },
+                            cx,
+                            move |this, _, cx| {
+                                if this.conflicts_revealed.remove(&reveal_key).is_none() {
+                                    this.conflicts_revealed
+                                        .insert(reveal_key.clone(), Instant::now() + REVEAL_FOR);
+                                }
+                                cx.notify();
+                            },
+                        ))
+                    }),
+            )
+            .when(differing.is_empty(), |d| {
+                d.child(
+                    div()
+                        .text_color(t.muted)
+                        .child("The versions hold the same values; keeping either settles it."),
+                )
+            })
+            .child(columns)
+    }
+
     fn render_agents(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme.clone();
         let s = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
@@ -1939,9 +2229,13 @@ impl Render for VisiPassApp {
                     .when(self.filter == Filter::Duplicates, |d| {
                         d.child(self.render_duplicates(cx))
                     })
-                    .when(self.filter != Filter::Duplicates, |d| {
-                        d.child(self.render_list(cx)).child(self.render_detail(cx))
-                    }),
+                    .when(self.filter == Filter::Conflicts, |d| {
+                        d.child(self.render_conflicts(cx))
+                    })
+                    .when(
+                        !matches!(self.filter, Filter::Duplicates | Filter::Conflicts),
+                        |d| d.child(self.render_list(cx)).child(self.render_detail(cx)),
+                    ),
             )
             .child({
                 let (text, color) = match (&self.error, slow, &self.toast) {

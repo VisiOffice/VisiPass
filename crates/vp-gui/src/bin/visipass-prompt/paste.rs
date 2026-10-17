@@ -44,6 +44,7 @@ impl PasteView {
             Some(PasteMode::Unlock { .. }) | Some(PasteMode::NewPassword { .. }) => {
                 "Master password"
             }
+            Some(PasteMode::SecretKey) => "Secret Key (VP1-…)",
             _ => "Paste the secret here (Ctrl+V)",
         };
         let field = cx.new(|cx| {
@@ -262,6 +263,7 @@ impl Render for PasteView {
             PasteMode::Unlock { .. } => "Unlock VisiPass".to_string(),
             PasteMode::NewPassword { .. } => "Create your VisiPass vault".to_string(),
             PasteMode::ShowKey { .. } => "Your Secret Key".to_string(),
+            PasteMode::SecretKey => "Open your vault on this device".to_string(),
         };
         let highlight = if matches!(mode, PasteMode::Secret) {
             self.prompt.who.len()

@@ -419,7 +419,7 @@ Constraints the local design keeps possible. Each gets its own design and review
 
 ### 11.1 Sync
 
-Designed 2026-10-16; not implemented. **VisiPass runs no sync server.** Each person syncs through
+Designed 2026-10-16; folders implemented 2026-10-17 (`crates/vp-sync`, the storage half in `vp-store/src/sync.rs`), buckets not yet; see "As built" at the end of this section. **VisiPass runs no sync server.** Each person syncs through
 storage they already have: a folder that a sync service keeps in step (iCloud Drive, Dropbox,
 Google Drive, OneDrive, Syncthing) or an S3-compatible bucket (Cloudflare R2, Backblaze B2, AWS).
 Nobody has to trust the VisiPass project with their data, there is no central store of everyone's
@@ -540,6 +540,53 @@ vault adds a few kilobytes per change, so years of use stay small); history purg
 real-time push (folders are watched for changes, buckets are polled on unlock, on opening the app,
 and every few minutes).
 
+**As built (2026-10-17).** Where the code settles what the text above leaves open:
+
+- *Schema, not format.* The database layout is versioned in the account row (`format_version` 2);
+  the encodings and ciphertext headers keep `format_version` 1. A schema-1 file is checked exactly
+  as written, copied to `vault.vpdb.schema1-backup` (SQLite `VACUUM INTO`), then migrated in one
+  transaction: every item and history row re-sealed under `rev = (device, item_version)` with
+  `parents = [(device, item_version - 1)]`. One `revision` table replaces `item` and `history`
+  (a `head` flag marks current revisions; history now keeps its overview, so it can be sent).
+  The vault manifest lists every revision as `(item_id, rev, parents, head, H(overview),
+  H(details))`; the account manifest adds `H(device state)`: device IDs, revision counter,
+  own log position, snapshot position, and each followed device's `(seq, hash, forked)`.
+- *Heads.* A revision is a head unless a known revision lists it as a parent, and each new
+  revision makes the heads it lists history. The same rule for local writes and for revisions
+  sync brings in, in any order, so devices that have seen the same revisions agree. A local save
+  names the revision it edited (the app shows the most recently updated head), so editing one
+  side of a conflict leaves the other in place; a write naming a revision that is no longer
+  current is refused ("changed since it was read").
+- *Change file contents.* `[account_id, device_id, seq, prev, clock, seen, writers, vaults,
+  revisions]`. `writers` is the writing device's ID; a revision whose device is not in it is
+  refused. `vaults` carries `[vault_id, vk_generation, wrapped_VK, attrs]` for every vault created
+  since the last file or referenced by its revisions, so each file carries the keys to check it.
+  The signature is over `H(header ‖ ciphertext)`.
+- *Outbox.* A change file is committed to an `outbox` table in the same transaction that advances
+  the device's log, before anything is written to the folder, and confirmed (deleted) once the
+  folder holds those exact bytes. A crash can neither lose a change file nor give its number to
+  different contents. Folder writes are a temporary dot-file, `fsync`, then `link(2)` into place
+  (which fails if the name exists), falling back to rename where a synced folder cannot hard-link.
+- *A vault made on two devices before they synced* (two imports of the same export derive the same
+  vault ID) keeps the key it has on each device; the other device's revisions are opened under the
+  key their file carries and re-sealed under the local one.
+- *Clones.* A device that finds files under its own ID that it did not write, or finds its next
+  name taken by other bytes, takes a new ID and follows the old one from the last file it knows is
+  its own. Revisions in change files not yet in the folder move to the new ID, re-sealed, before
+  they go out again: the other machine counts on from the same numbers, and two different
+  revisions must never share an ID.
+- *Joining* tries at most 16 account records, newest first, each only after its KDF parameters
+  pass the §4.1 bounds. A device that joined writes no snapshot until its own log has grown by a
+  thousand changes. If anything fails, the new vault file and Secret Key file are removed.
+- *A missing folder.* A round refuses a folder that does not hold this account's record, so an
+  unmounted drive cannot quietly become a second, separate sync folder.
+- *When.* Every commit wakes sync; otherwise it runs every minute and on unlock, only while the
+  vault is unlocked. `vp sync setup` and `vp sync join` are refused to agents; the Secret Key and
+  master password for joining are typed in the VisiPass window.
+- *Not yet:* S3-compatible buckets; deleting change files covered by a newer snapshot;
+  tombstones (items are archived, an ordinary edit, never deleted); rotation, so the only keyset
+  is the first.
+
 ### 11.2 Sharing
 
 - Each account adds an **X-Wing** (X25519 + ML-KEM-768) key pair to its keyset, cross-signed by
@@ -645,9 +692,13 @@ Implemented (2026-10-12), with tests that attack it (`crates/vp-store/tests`, `c
 
 - §5.1 Emergency Kit (`vp emergency-kit`).
 
+- §11.1 sync through a folder (2026-10-17), with schema 2 (revisions and parents) and the
+  migration from schema 1; conflicts are shown in the app's Conflicts view and settled there.
+  Tests in `crates/vp-store/tests/sync.rs`, `crates/vp-sync/tests` and `crates/vp-cli/tests`.
+
 Not yet: §5.2 Recovery Key; §6.1 `PR_SET_DUMPABLE`,
 `memfd_secret`/`mlock`; §6.3 password change and full
-rotation; §7.5 files; §9 fingerprints; §10 log signing; §11 everything.
+rotation; §7.5 files; §9 fingerprints; §10 log signing; §11.1 buckets; §11.2, §11.3.
 
 ## Changelog
 
@@ -659,3 +710,5 @@ rotation; §7.5 files; §9 fingerprints; §10 log signing; §11 everything.
 - 2026-10-16: §11.1 sync rewritten: no VisiPass server. Each person's own storage (a synced folder
   or an S3-compatible bucket) holds per-device, append-only, signed change files; revisions with
   parents replace `item_version`, and concurrent edits are kept as conflicts for the human.
+- 2026-10-17: §11.1 built for folders ("As built" records the details); schema 2 replaces
+  `item_version` with revisions, migrating schema-1 files after a backup.

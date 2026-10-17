@@ -703,6 +703,8 @@ impl Render for TextInput {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .w_full()
+            // Clip text (and a long placeholder) to the box.
+            .overflow_hidden()
             .px(px(8.))
             .py(px(5.))
             .rounded(px(t.radius))

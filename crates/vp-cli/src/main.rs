@@ -84,6 +84,23 @@ enum QuickUnlockCommands {
 }
 
 #[derive(Subcommand)]
+enum SyncCommands {
+    /// Sync on this device (the default)
+    Status,
+    /// Sync now instead of within the minute
+    Now,
+    /// Turn sync on through a folder your sync service keeps on every device
+    /// (Dropbox, iCloud Drive, Google Drive, OneDrive, Syncthing). Only encrypted,
+    /// signed files go there; VisiPass runs no server
+    Setup { folder: PathBuf },
+    /// Open your vault on this device from that folder: asks for your Secret Key
+    /// and master password in the VisiPass window
+    Join { folder: PathBuf },
+    /// Stop syncing on this device; the folder's files stay
+    Off,
+}
+
+#[derive(Subcommand)]
 enum ImportCommands {
     /// From 1Password, through `op`: every vault, or one. Items keep their IDs, so
     /// op:// references keep working; items already imported are skipped
@@ -249,6 +266,11 @@ enum Commands {
     /// Copy items into your VisiPass vault from another password manager
     #[command(subcommand)]
     Import(ImportCommands),
+    /// Keep your vault in step across devices through your own synced folder
+    Sync {
+        #[command(subcommand)]
+        command: Option<SyncCommands>,
+    },
     /// Check the setup without authenticating or prompting; safe to paste into an issue
     Doctor,
     /// Serve VisiPass to an agent over MCP (stdio). No tool ever returns a secret value
@@ -875,6 +897,22 @@ fn execute(command: Commands) -> Result<i32, Failure> {
             print(&client::call(Request::ImportProton {
                 path: path.to_string_lossy().into_owned(),
             })?)
+        }
+        Commands::Sync { command } => {
+            let folder = |folder: PathBuf| {
+                std::path::absolute(&folder)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .map_err(|_| Failure::new(format!("{} is not a usable path", folder.display())))
+            };
+            print(&client::call(
+                match command.unwrap_or(SyncCommands::Status) {
+                    SyncCommands::Status => Request::Sync { now: false },
+                    SyncCommands::Now => Request::Sync { now: true },
+                    SyncCommands::Setup { folder: f } => Request::SyncSetup { folder: folder(f)? },
+                    SyncCommands::Join { folder: f } => Request::SyncJoin { folder: folder(f)? },
+                    SyncCommands::Off => Request::SyncOff,
+                },
+            )?)
         }
         Commands::Doctor => print(&doctor::doctor()),
         Commands::Mcp => mcp::serve(),

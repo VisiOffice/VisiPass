@@ -1,0 +1,13 @@
+[package]
+name = "vp-sync"
+description = "VisiPass sync through each person's own storage: a synced folder, never a VisiPass server (docs/crypto-design.md §11.1)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vp-crypto.workspace = true
+vp-store.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

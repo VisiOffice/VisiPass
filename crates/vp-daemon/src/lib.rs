@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use vp_core::backend::Backend;
+use vp_core::backend::{Backend, SyncOp};
 use vp_core::ipc::{Envelope, Operation, PROTOCOL_VERSION, PasteMode, Request, Response, Usage};
 use vp_core::{Failure, audit, find, time};
 
@@ -1034,6 +1034,87 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                     None => json!({ "quickUnlock": false }),
                 })
             }
+            Request::SyncSetup { folder } => {
+                // Where the vault's files go is the human's choice, never an agent's.
+                if requester.agent.is_some() {
+                    return Err(Failure::new(
+                        "Only the human can turn on sync: ask them to run `vp sync setup <folder>` in their own terminal",
+                    ));
+                }
+                let _turn = self.approvals.lock().await;
+                self.backend
+                    .native_sync(SyncOp::Setup {
+                        folder: folder.into(),
+                    })
+                    .await
+            }
+            Request::SyncJoin { folder } => {
+                if requester.agent.is_some() {
+                    return Err(Failure::new(
+                        "Only the human can join this device to a vault: ask them to run `vp sync join <folder>` in their own terminal",
+                    ));
+                }
+                if self.backend.native_status().is_some_and(|s| s.exists) {
+                    return Err(Failure::new(
+                        "This device already has a VisiPass vault; joining makes a new one, so it was refused",
+                    ));
+                }
+                // The Secret Key and master password go between the window and
+                // visipassd only, never to the caller.
+                let window = |mode| Prompt {
+                    who: "VisiPass".into(),
+                    action: "open your vault on this device".into(),
+                    details: vec![("Sync folder".into(), folder.clone())],
+                    secrets: vec![],
+                    purpose: None,
+                    timeout_secs: approval::TIMEOUT.as_secs(),
+                    paste: Some(vp_core::ipc::PasteSpec {
+                        mode,
+                        ..Default::default()
+                    }),
+                };
+                let cancelled = || Failure::new("Joining was cancelled; nothing was changed");
+                let _turn = self.approvals.lock().await;
+                let secret_key = self
+                    .approver
+                    .paste(&window(PasteMode::SecretKey))
+                    .await?
+                    .ok_or_else(cancelled)?;
+                let password = self
+                    .approver
+                    .paste(&window(PasteMode::Unlock {
+                        retry: false,
+                        purpose: Some("open your vault on this device".into()),
+                    }))
+                    .await?
+                    .ok_or_else(cancelled)?;
+                self.backend
+                    .native_sync(SyncOp::Join {
+                        folder: folder.into(),
+                        secret_key,
+                        password,
+                    })
+                    .await
+            }
+            Request::Sync { now } => {
+                self.backend
+                    .native_sync(if now { SyncOp::Round } else { SyncOp::Status })
+                    .await
+            }
+            Request::SyncOff => {
+                if requester.agent.is_some() {
+                    return Err(Failure::new(
+                        "Only the human can turn off sync: ask them to run `vp sync off`",
+                    ));
+                }
+                self.backend.native_sync(SyncOp::Off).await
+            }
+            Request::Conflicts => self.backend.native_sync(SyncOp::Conflicts).await,
+            Request::ResolveConflict { id, vault, keep } => {
+                self.backend
+                    .native_sync(SyncOp::Resolve { id, vault, keep })
+                    .await
+            }
             Request::ImportOp { vault } => self.backend.native_import(vault).await,
             Request::ImportProton { path } => {
                 let result = self.import_proton(&path, requester).await;
@@ -1690,6 +1771,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
         let quiet = matches!(
             request,
             Request::Status
+                | Request::Sync { now: false }
                 | Request::Grants
                 | Request::Log { .. }
                 | Request::BrowserMatch { unlock: false, .. }
@@ -1708,6 +1790,8 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 | Request::Archive { .. }
                 | Request::SetFavorite { .. }
                 | Request::MergeItems { .. }
+                | Request::ResolveConflict { .. }
+                | Request::SyncJoin { .. }
                 | Request::RequestSecret { .. }
                 | Request::BrowserSave { check: false, .. }
                 | Request::CreateVault { .. }

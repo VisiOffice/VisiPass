@@ -160,6 +160,8 @@ pub enum PasteMode {
     NewPassword { confirm: bool },
     /// Shows the new Secret Key once, for the Emergency Kit. Answers Cancel.
     ShowKey { key: Secret },
+    /// The Secret Key from the Emergency Kit, to open the vault on a new device.
+    SecretKey,
 }
 
 impl PasteSpec {
@@ -198,6 +200,10 @@ impl PasteSpec {
                 "Create vault",
             ),
             PasteMode::ShowKey { .. } => (KEY_INSTRUCTIONS.into(), "Done"),
+            PasteMode::SecretKey => (
+                "Enter the Secret Key from your Emergency Kit (it starts with VP1-). With your master password it opens your vault on this device.".into(),
+                "Continue",
+            ),
         }
     }
 }
@@ -359,6 +365,14 @@ pub enum Request {
     MergeItems {
         merges: Vec<Merge>,
     },
+    /// Items that sync found edited on two devices at once, every version in full.
+    Conflicts,
+    /// Settles a conflict: the version `keep` becomes the item.
+    ResolveConflict {
+        id: String,
+        vault: String,
+        keep: String,
+    },
     // ---- end of app-only requests ----
     // ---- The native vault ----
     /// Creates VisiPass's own vault; the master password is typed in the VisiPass window.
@@ -378,6 +392,23 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hours: Option<u64>,
     },
+    /// Turns sync on through a folder each device can see (§11.1). Only the
+    /// human, never an agent. `folder` is absolute.
+    SyncSetup {
+        folder: String,
+    },
+    /// Makes this device's vault from a sync folder. The Secret Key and the
+    /// master password are typed in the VisiPass window.
+    SyncJoin {
+        folder: String,
+    },
+    /// Sync on this device; with `now`, after a round.
+    Sync {
+        #[serde(default)]
+        now: bool,
+    },
+    /// Stops syncing on this device.
+    SyncOff,
     /// Copies items from 1Password into the native vault, keeping their IDs.
     ImportOp {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -510,6 +541,8 @@ impl Request {
                 | Request::SetFavorite { .. }
                 | Request::Duplicates { .. }
                 | Request::MergeItems { .. }
+                | Request::Conflicts
+                | Request::ResolveConflict { .. }
         )
     }
 
@@ -532,6 +565,12 @@ impl Request {
             Request::SetFavorite { .. } => "favorite",
             Request::Duplicates { .. } => "duplicates",
             Request::MergeItems { .. } => "merge",
+            Request::Conflicts => "conflicts",
+            Request::ResolveConflict { .. } => "resolve-conflict",
+            Request::SyncSetup { .. } => "sync-setup",
+            Request::SyncJoin { .. } => "sync-join",
+            Request::Sync { .. } => "sync",
+            Request::SyncOff => "sync-off",
             Request::RequestSecret { .. } => "request",
             Request::ImportEnv { .. } => "env-import",
             Request::CheckRefs { .. } => "env-check",

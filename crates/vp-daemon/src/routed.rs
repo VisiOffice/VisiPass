@@ -5,7 +5,7 @@
 use crate::approval::{self, Approver, Prompt};
 use serde_json::{Value, json};
 use vp_core::Failure;
-use vp_core::backend::{Backend, EmergencyKit, NativeStatus};
+use vp_core::backend::{Backend, EmergencyKit, NativeStatus, SyncOp};
 use vp_core::ipc::{PasteMode, PasteSpec};
 use vp_core::model::{
     Destination, Item, ItemDetail, Listed, PasswordOutcome, PasswordRequest, Receipt, Scope,
@@ -210,6 +210,67 @@ impl<U: Unlock> Backend for Routed<U> {
             }));
         }
         Ok(json!({ "imported": report }))
+    }
+
+    async fn native_sync(&self, op: SyncOp) -> Result<Value, Failure> {
+        let native = &self.native;
+        if !native.exists() && !matches!(op, SyncOp::Join { .. } | SyncOp::Status) {
+            return Err(Failure::new(
+                "Create your VisiPass vault first with `vp init`, or join one with `vp sync join <folder>`",
+            ));
+        }
+        let report = |r: vp_sync::Report| json!({ "written": r.written, "applied": r.applied, "newDeviceId": r.new_device_id });
+        match op {
+            SyncOp::Setup { folder } => {
+                let r = native.sync_setup(&folder).await?;
+                let mut status = native.sync_status();
+                status["round"] = report(r);
+                status["next"] = json!(
+                    "On each other device: install VisiPass, make sure this folder is synced there, then run `vp sync join <folder>` and enter your Secret Key and master password"
+                );
+                Ok(status)
+            }
+            SyncOp::Join {
+                folder,
+                secret_key,
+                password,
+            } => {
+                let secret = vp_crypto::SecretKey::parse(secret_key.expose()).map_err(|e| {
+                    Failure::new(format!(
+                        "That Secret Key is not right ({e}); nothing was changed"
+                    ))
+                })?;
+                let r = native.sync_join(&folder, secret, password).await?;
+                let mut status = native.sync_status();
+                status["round"] = report(r);
+                Ok(status)
+            }
+            SyncOp::Round => {
+                if let Some(result) = native.sync_round().await {
+                    result?;
+                }
+                Ok(native.sync_status())
+            }
+            SyncOp::Status => Ok(native.sync_status()),
+            SyncOp::Off => {
+                native.sync_off()?;
+                Ok(
+                    json!({ "on": false, "note": "This device stops syncing; the files in the folder stay, and other devices go on syncing" }),
+                )
+            }
+            SyncOp::Conflicts => {
+                let conflicts = native.conflicts().await?;
+                Ok(json!({
+                    "conflicts": conflicts.into_iter().map(|versions| {
+                        versions.into_iter().map(|(rev, item)| json!({ "version": rev, "item": item })).collect::<Vec<_>>()
+                    }).collect::<Vec<_>>()
+                }))
+            }
+            SyncOp::Resolve { id, vault, keep } => {
+                let item = native.resolve_conflict(&id, &vault, &keep).await?;
+                Ok(json!({ "settled": item.id, "item": item }))
+            }
+        }
     }
 
     async fn native_import_items(
