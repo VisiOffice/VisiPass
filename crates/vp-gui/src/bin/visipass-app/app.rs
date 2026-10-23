@@ -573,6 +573,7 @@ impl VisiPassApp {
             return;
         };
         let item = Item {
+            passkeys: Vec::new(),
             id: String::new(),
             title: String::new(),
             category: category.into(),

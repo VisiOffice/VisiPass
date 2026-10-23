@@ -14,6 +14,7 @@ pub mod ipc;
 pub mod kamal;
 pub mod mask;
 pub mod model;
+pub mod passkey;
 pub mod paths;
 pub mod proton;
 pub mod refs;

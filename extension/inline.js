@@ -8,6 +8,11 @@
 // the username and password go to the background worker, which asks VisiPass
 // whether they are new or changed and has the top frame show a save card.
 //
+// Passkeys: in the top frame, passkey-page.js hands the page's WebAuthn
+// requests here. Saving one, or signing in with one from a card, takes a real
+// click on VisiPass's own card; a sign-in the page offers in autofill
+// (conditional mediation) shows as passkey rows at the top of this menu.
+//
 // Everything is drawn in a closed shadow root, so the page cannot read the list.
 // Only real input picks a login: events the page dispatches itself
 // (isTrusted false) are ignored, and nothing is picked unless Chrome reports the
@@ -40,6 +45,8 @@
     '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l18 18M10.6 5.1A10 10 0 0 1 12 5c6.5 0 10 7 10 7a17 17 0 0 1-3.2 4M6.6 6.6A17 17 0 0 0 2 12s3.5 7 10 7a10 10 0 0 0 5.4-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>';
   const SEARCH =
     '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>';
+  const PASSKEY =
+    '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="4"/><path d="M2 21a7 7 0 0 1 11-5.7"/><circle cx="17" cy="14" r="2.5"/><path d="M17 16.5V22l1.5-1.2M17 19.5l1.5-1"/></svg>';
   const LOCK =
     '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>';
 
@@ -293,6 +300,10 @@
       if (entry.kind === "option") {
         text.append(el("div", "title", entry.title), el("div", "sub", entry.sub));
         row.append(avatar(entry.title, null, entry.glyph), text);
+      } else if (entry.kind === "passkey") {
+        const p = entry.passkey;
+        text.append(el("div", "title", p.user_name || p.title), el("div", "sub", `Passkey · ${p.title}`));
+        row.append(avatar(p.title, null, PASSKEY), text);
       } else if (entry.kind === "generate") {
         text.append(el("div", "title", "Use a strong password"), el("div", "sub secret", entry.password));
         row.append(avatar("password", null, KEY), text);
@@ -318,7 +329,7 @@
   function entries() {
     if (options) return optionEntries();
     if (mode === "new") return suggestion ? [{ kind: "generate", password: suggestion }] : [];
-    return (logins || []).map((login) => ({ kind: "login", login }));
+    return [...passkeyEntries(), ...(logins || []).map((login) => ({ kind: "login", login }))];
   }
 
   // The ⋮ menu. Each acts only from a real click or key on the visible menu,
@@ -397,7 +408,8 @@
       locked = Boolean(result.locked);
       logins = result.logins || [];
       selected = 0;
-      if (!logins.length) return renderMenu("No saved logins for this site.");
+      await refreshPasskeys();
+      if (!entries().length) return renderMenu("No saved logins for this site.");
       updateMark();
       renderMenu();
     } catch (error) {
@@ -411,8 +423,9 @@
     mark.title = locked ? "VisiPass is locked: click to unlock" : "VisiPass";
     mark.style.opacity = locked ? "0.55" : "1";
     const count = mark.querySelector(".count");
-    count.textContent = !locked && logins.length > 1 ? String(logins.length) : "";
-    count.style.display = !locked && logins.length > 1 ? "block" : "none";
+    const n = logins.length + passkeyEntries().length;
+    count.textContent = !locked && n > 1 ? String(n) : "";
+    count.style.display = !locked && n > 1 ? "block" : "none";
   }
 
   async function choose(i) {
@@ -432,6 +445,7 @@
       return;
     }
     if (entry.kind === "generate") return useSuggestion(entry.password);
+    if (entry.kind === "passkey") return signConditional(entry.passkey);
     const login = entry.login;
     renderMenu("Filling… approve in VisiPass if it asks.");
     try {
@@ -479,6 +493,7 @@
       console.debug("VisiPass:", error.message);
       return;
     }
+    if (mode === "login") await refreshPasskeys();
     if (field !== target) return;
     locked = Boolean(result.locked);
     logins = result.logins || [];
@@ -631,6 +646,17 @@
       button:hover { background: var(--surface-2); }
       button.primary { background: var(--accent); color: var(--bg); border-color: transparent; }
       button.primary:hover { filter: brightness(1.08); }
+      .choices { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
+      button.choice { display: flex; align-items: center; gap: 10px; width: 100%; height: auto; padding: 7px 8px; border: 0; border-radius: 9px;
+        background: transparent; text-align: left; font-weight: 400; }
+      button.choice:hover { background: var(--surface); }
+      .choice .text { min-width: 0; flex: 1; }
+      .choice .title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .choice .sub { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .avatar { --h: 200; width: 32px; height: 32px; border-radius: 8px; flex: none; display: grid; place-items: center; overflow: hidden;
+        font-weight: 700; font-size: 14px; background: hsl(var(--h) 55% 50% / .18); color: color-mix(in srgb, hsl(var(--h) 60% 55%) 75%, var(--fg)); }
+      .avatar.glyph { background: var(--surface-2); color: var(--fg); }
+      .avatar svg { width: 17px; height: 17px; }
     </style><div class="card"></div>`;
     (document.documentElement || document.body).append(card);
     new IntersectionObserver(
@@ -661,6 +687,8 @@
 
   function renderCard(c) {
     if (!c) return;
+    // Another card takes the place of a passkey request's: the page hears "not allowed".
+    if (pk && !String(c.status).startsWith("passkey")) settle(pk.request.id, { error: "NotAllowedError" });
     ensureCard();
     clearTimeout(cardTimer);
     const box = cardRoot.querySelector(".card");
@@ -703,6 +731,8 @@
       lines.push(el("div", "line", [c.title, c.saved].filter(Boolean).join(" · ")));
       if (c.generated) lines.push(el("div", "line", "Finish signing up; VisiPass adds the username when you submit."));
       cardTimer = setTimeout(closeCard, 6000);
+    } else if (String(c.status).startsWith("passkey")) {
+      passkeyCard(c, head, lines, buttons);
     } else if (c.status === "totp") {
       head.append(`Two-factor code added to ${c.title}`);
       lines.push(el("div", "code", c.code || ""), el("div", "line", "Enter this code on the page to finish turning on two-factor."));
@@ -714,6 +744,242 @@
       buttons.append(button("Close", false, closeCard));
     }
     box.replaceChildren(head, ...lines, ...(buttons.children.length ? [buttons] : []));
+  }
+
+  // ---- Passkeys ----
+  //
+  // Requests arrive from passkey-page.js as JSON on a DOM event, which the page
+  // can also send: all it can do with that is show this card, since saving and
+  // signing need a real click on it. The page's origin comes from Chrome.
+  const REQUEST = "visipass-passkey-request";
+  const ANSWER = "visipass-passkey-answer";
+  // The request on the card: { request, ... }.
+  let pk = null;
+  // The page's autofill sign-in request, and the passkeys it can offer.
+  let conditional = null;
+  let conditionalPasskeys = [];
+
+  function settle(id, answer) {
+    if (pk && pk.request.id === id) pk = null;
+    if (conditional && conditional.id === id) {
+      conditional = null;
+      conditionalPasskeys = [];
+    }
+    document.dispatchEvent(new CustomEvent(ANSWER, { detail: JSON.stringify({ ...answer, id }) }));
+  }
+
+  function passkeyEntries() {
+    if (!conditional || mode !== "login") return [];
+    return conditionalPasskeys.map((passkey) => ({ kind: "passkey", passkey }));
+  }
+
+  // The passkeys for the page's autofill request; without any, the browser's own.
+  async function refreshPasskeys() {
+    const request = conditional;
+    if (!request) return;
+    let result;
+    try {
+      result = await send({ kind: "page-passkeys", rp_id: request.rp_id, allow: request.allow });
+    } catch {
+      return settle(request.id, { fallback: true });
+    }
+    if (conditional !== request || result.locked) return;
+    if (!result.passkeys.length) return settle(request.id, { fallback: true });
+    conditionalPasskeys = result.passkeys;
+  }
+
+  async function signConditional(passkey) {
+    const request = conditional;
+    if (!request) return;
+    renderMenu("Signing in… approve in VisiPass if it asks.");
+    try {
+      const result = await send({
+        kind: "page-passkey-get",
+        rp_id: request.rp_id,
+        credential_id: passkey.credential_id,
+        challenge: request.challenge,
+      });
+      settle(request.id, { result });
+      if (field) dismissed.add(field);
+      closeMenu();
+    } catch (error) {
+      renderMenu(error.message, true);
+    }
+  }
+
+  // A sign-in the page asked for outright: a card with its passkeys.
+  async function offerSignIn(request, unlock = false) {
+    let result;
+    try {
+      result = await send({ kind: "page-passkeys", rp_id: request.rp_id, allow: request.allow, unlock });
+    } catch (error) {
+      if (unlock && pk?.request === request) return renderCard({ status: "passkey-error", error: error.message });
+      return settle(request.id, { fallback: true });
+    }
+    if (pk && pk.request !== request) return;
+    if (result.locked) {
+      pk = { request };
+      return renderCard({ status: "passkey-locked", rp_id: request.rp_id });
+    }
+    if (!result.passkeys.length) {
+      if (pk) closeCard();
+      return settle(request.id, { fallback: true });
+    }
+    pk = { request };
+    renderCard({ status: "passkey-get", rp_id: request.rp_id, passkeys: result.passkeys });
+  }
+
+  // A site asking to make a passkey: a card to save it in VisiPass.
+  async function offerSave(request, unlock = false) {
+    let offer;
+    try {
+      offer = await send({ kind: "page-passkey-offer", rp_id: request.rp_id, user_name: request.user_name, unlock });
+    } catch (error) {
+      if (unlock && pk?.request === request) return renderCard({ status: "passkey-error", error: error.message });
+      return settle(request.id, { fallback: true });
+    }
+    if (pk && pk.request !== request) return;
+    pk = { request, offer };
+    renderCard({ status: offer.locked ? "passkey-locked" : "passkey-save", rp_id: request.rp_id, create: true });
+  }
+
+  async function savePasskey(vault) {
+    const { request, offer } = pk;
+    renderCard({ status: "passkey-working", line: "Saving the passkey in VisiPass…" });
+    try {
+      const result = await send({
+        kind: "page-passkey-create",
+        rp_id: request.rp_id,
+        challenge: request.challenge,
+        user_handle: request.user_handle,
+        user_name: request.user_name,
+        user_display_name: request.user_display_name,
+        exclude: request.exclude,
+        vault: offer.login ? offer.login.vault : vault,
+        item: offer.login?.id,
+      });
+      if (result.excluded) {
+        settle(request.id, { error: "InvalidStateError", message: "A passkey for this account is already saved." });
+        return renderCard({ status: "passkey-done", title: "This passkey is already in VisiPass", line: request.user_name });
+      }
+      settle(request.id, { result });
+      renderCard({ status: "passkey-done", title: "Passkey saved in VisiPass", line: [request.user_name, result.vault].filter(Boolean).join(" · ") });
+    } catch (error) {
+      settle(request.id, { error: "NotAllowedError" });
+      renderCard({ status: "passkey-error", error: error.message });
+    }
+  }
+
+  async function signIn(passkey) {
+    const { request } = pk;
+    renderCard({ status: "passkey-working", line: "Signing in… approve in VisiPass if it asks." });
+    try {
+      const result = await send({
+        kind: "page-passkey-get",
+        rp_id: request.rp_id,
+        credential_id: passkey.credential_id,
+        challenge: request.challenge,
+      });
+      settle(request.id, { result });
+      closeCard();
+    } catch (error) {
+      settle(request.id, { error: "NotAllowedError" });
+      renderCard({ status: "passkey-error", error: error.message });
+    }
+  }
+
+  function passkeyCard(c, head, lines, buttons) {
+    const request = pk?.request;
+    const elsewhere = () => button("Use another device", false, () => {
+      closeCard();
+      settle(request.id, { fallback: true });
+    });
+    const cancel = () => button("Cancel", false, () => {
+      closeCard();
+      settle(request.id, { error: "NotAllowedError" });
+    });
+    if (c.status === "passkey-save") {
+      const { offer } = pk;
+      head.append(`Save a passkey for ${c.rp_id}?`);
+      lines.push(el("div", "line", request.user_name || request.user_display_name || "No username"));
+      let select = null;
+      if (offer.login) lines.push(el("div", "line", `Adds it to your “${offer.login.title}” login`));
+      else {
+        select = el("select");
+        for (const v of offer.vaults || []) {
+          const option = el("option", "", v.name);
+          option.value = v.id;
+          option.selected = v.id === offer.vault;
+          select.append(option);
+        }
+        lines.push(select);
+      }
+      buttons.append(button("Save passkey", true, () => savePasskey(select?.value)), elsewhere(), cancel());
+    } else if (c.status === "passkey-locked") {
+      head.append(c.create ? `Save a passkey for ${c.rp_id}?` : `Sign in to ${c.rp_id} with a passkey?`);
+      lines.push(el("div", "line", "VisiPass is locked."));
+      buttons.append(
+        button("Unlock VisiPass", true, () => {
+          renderCard({ status: "passkey-working", line: "Unlock in the VisiPass window…" });
+          (c.create ? offerSave : offerSignIn)(request, true);
+        }),
+        elsewhere(),
+        cancel(),
+      );
+    } else if (c.status === "passkey-get") {
+      head.append(`Sign in to ${c.rp_id}`);
+      const choices = el("div", "choices");
+      for (const p of c.passkeys) {
+        const row = button("", false, () => signIn(p));
+        row.className = "choice";
+        const text = el("div", "text");
+        text.append(el("div", "title", p.user_name || p.title), el("div", "sub", `Passkey · ${p.title}`));
+        row.append(avatar(p.title, null, PASSKEY), text);
+        choices.append(row);
+      }
+      lines.push(choices);
+      buttons.append(elsewhere(), cancel());
+    } else if (c.status === "passkey-working") {
+      lines.push(el("div", "line", c.line));
+    } else if (c.status === "passkey-done") {
+      head.append(c.title);
+      if (c.line) lines.push(el("div", "line", c.line));
+      cardTimer = setTimeout(closeCard, 6000);
+    } else {
+      head.append("VisiPass");
+      lines.push(el("div", "line error", c.error || "Something went wrong"));
+      buttons.append(button("Close", false, closeCard));
+    }
+  }
+
+  if (window === window.top) {
+    document.addEventListener(REQUEST, (e) => {
+      let request;
+      try {
+        request = JSON.parse(e.detail);
+      } catch {
+        return;
+      }
+      if (!request || typeof request.id !== "string") return;
+      if (request.kind === "cancel") {
+        if (pk?.request.id === request.id) closeCard();
+        if (pk?.request.id === request.id || conditional?.id === request.id) settle(request.id, {});
+        return;
+      }
+      document.dispatchEvent(new CustomEvent(ANSWER, { detail: JSON.stringify({ id: request.id, ack: true }) }));
+      // One request on the card at a time: a newer one replaces it.
+      if ((request.kind === "create" || request.kind === "get") && pk) settle(pk.request.id, { error: "NotAllowedError" });
+      if (request.kind === "create") offerSave(request);
+      else if (request.kind === "get") offerSignIn(request);
+      else if (request.kind === "conditional") {
+        if (conditional) settle(conditional.id, { error: "AbortError" });
+        conditional = request;
+        conditionalPasskeys = [];
+        refreshPasskeys().then(() => {
+          if (field && conditional === request && mode === "login") show(field);
+        });
+      } else settle(request.id, { fallback: true });
+    });
   }
 
   if (window === window.top) {

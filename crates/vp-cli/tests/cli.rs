@@ -1509,6 +1509,184 @@ fn the_browser_saves_new_logins_and_asks_before_changing_one() {
 }
 
 #[test]
+fn passkeys_are_made_on_their_site_and_sign_in_only_after_the_fill_approval() {
+    use p256::ecdsa::signature::Verifier;
+    use p256::pkcs8::DecodePublicKey;
+    use sha2::Digest;
+    use vp_core::passkey::{b64, unb64};
+
+    let world = World::native_browser(&[
+        // init: password, confirmation, Secret Key window
+        Decision::Once,
+        Decision::Once,
+        Decision::Deny,
+        // the first sign-in: denied, then allowed for good
+        Decision::Deny,
+        Decision::Always,
+    ]);
+    clean(&world.vp(&["init"], None));
+    clean(&world.vp(&["import", "op"], None));
+    let asked = world.approver.asked();
+    let vault = host(&world, serde_json::json!({"id": 1, "type": "vaults"}))["result"]["vaults"][0]
+        ["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let challenge = b64(b"a challenge from the site, 32 by");
+    let create = |url: &str, rp_id: &str, exclude: serde_json::Value| {
+        host(
+            &world,
+            serde_json::json!({"id": 2, "type": "passkey-create", "url": url, "rp_id": rp_id,
+                "challenge": challenge, "user_handle": b64(b"user-1"), "user_name": "robert@example.com",
+                "user_display_name": "Robert", "exclude": exclude, "vault": vault}),
+        )
+    };
+
+    // Only for the page's own site, and only on https.
+    for (url, rp_id) in [
+        ("https://app.example.com/signup", "other.com"),
+        ("https://app.example.com/signup", "com"),
+        ("http://app.example.com/signup", "example.com"),
+    ] {
+        let refused = create(url, rp_id, serde_json::json!([]));
+        assert_eq!(refused["ok"], false, "{url} {rp_id}: {refused}");
+    }
+
+    let made = create(
+        "https://app.example.com/signup",
+        "example.com",
+        serde_json::json!([]),
+    );
+    let made = &made["result"];
+    let credential_id = made["credential_id"].as_str().unwrap().to_string();
+    let client: serde_json::Value =
+        serde_json::from_slice(&unb64(made["client_data_json"].as_str().unwrap()).unwrap())
+            .unwrap();
+    assert_eq!(client["type"], "webauthn.create");
+    assert_eq!(client["origin"], "https://app.example.com");
+    assert_eq!(client["challenge"], challenge);
+    assert_eq!(made["public_key_algorithm"], -7);
+    assert_eq!(
+        world.approver.asked(),
+        asked,
+        "saving a passkey never prompts"
+    );
+
+    // The site already has this one: nothing new is made.
+    let again = create(
+        "https://app.example.com/signup",
+        "example.com",
+        serde_json::json!([credential_id]),
+    );
+    assert_eq!(again["result"]["excluded"], true, "{again}");
+
+    let list = |url: &str, allow: serde_json::Value| {
+        host(
+            &world,
+            serde_json::json!({"id": 3, "type": "passkeys", "url": url, "rp_id": "example.com", "allow": allow}),
+        )["result"]["passkeys"]
+            .clone()
+    };
+    let found = list("https://login.example.com/", serde_json::json!([]));
+    assert_eq!(found.as_array().unwrap().len(), 1, "{found}");
+    assert_eq!(found[0]["credential_id"], credential_id.as_str());
+    assert_eq!(found[0]["user_name"], "robert@example.com");
+    assert_eq!(found[0]["title"], "example.com");
+    assert!(
+        found[0].get("key").is_none(),
+        "no private key leaves visipassd"
+    );
+    assert_eq!(
+        list("https://login.example.com/", serde_json::json!(["b3RoZXI"])),
+        serde_json::json!([])
+    );
+
+    // Signing in asks as a fill does; the answer verifies against the public key.
+    let get = |url: &str| {
+        host(
+            &world,
+            serde_json::json!({"id": 4, "type": "passkey-get", "url": url, "rp_id": "example.com",
+                "credential_id": credential_id, "challenge": challenge}),
+        )
+    };
+    let denied = get("https://login.example.com/");
+    assert_eq!(denied["ok"], false, "{denied}");
+    let signed = get("https://login.example.com/");
+    let signed = &signed["result"];
+    assert_eq!(signed["user_handle"], b64(b"user-1"));
+    let auth = unb64(signed["authenticator_data"].as_str().unwrap()).unwrap();
+    let client_json = unb64(signed["client_data_json"].as_str().unwrap()).unwrap();
+    let client: serde_json::Value = serde_json::from_slice(&client_json).unwrap();
+    assert_eq!(client["type"], "webauthn.get");
+    assert_eq!(client["origin"], "https://login.example.com");
+    let public = p256::ecdsa::VerifyingKey::from_public_key_der(
+        &unb64(made["public_key"].as_str().unwrap()).unwrap(),
+    )
+    .unwrap();
+    let signature =
+        p256::ecdsa::Signature::from_der(&unb64(signed["signature"].as_str().unwrap()).unwrap())
+            .unwrap();
+    let mut message = auth.clone();
+    message.extend_from_slice(&sha2::Sha256::digest(&client_json));
+    public.verify(&message, &signature).unwrap();
+    assert_eq!(world.approver.asked(), asked + 2);
+
+    // Editing the login in the popup keeps the passkey, whatever the edit sends.
+    let opened = host(
+        &world,
+        serde_json::json!({"id": 5, "type": "item", "item": made["item"], "vault": vault}),
+    );
+    let mut item = opened["result"].clone();
+    assert_eq!(item["passkeys"][0]["credential_id"], credential_id.as_str());
+    item["title"] = "Example".into();
+    item["passkeys"] = serde_json::json!([]);
+    let saved = host(
+        &world,
+        serde_json::json!({"id": 6, "type": "save-item", "data": item}),
+    );
+    assert_eq!(
+        saved["result"]["passkeys"][0]["credential_id"],
+        credential_id.as_str(),
+        "{saved}"
+    );
+    let after = get("https://login.example.com/settings");
+    assert_eq!(after["ok"], true, "{after}");
+    assert_eq!(
+        world.approver.asked(),
+        asked + 2,
+        "the standing grant covers it"
+    );
+
+    // A page load on a locked vault learns nothing and prompts for nothing.
+    world.vp(&["lock"], None);
+    let asked = world.approver.asked();
+    let locked = host(
+        &world,
+        serde_json::json!({"id": 7, "type": "passkeys", "url": "https://example.com/", "rp_id": "example.com"}),
+    );
+    assert_eq!(locked["result"]["locked"], true, "{locked}");
+    assert_eq!(world.approver.asked(), asked);
+
+    // Only the browser's host.
+    let agent = World::native(&[Decision::Always]);
+    let (replies, _) = native(
+        &agent,
+        ORIGIN,
+        &[
+            serde_json::json!({"id": 1, "type": "passkeys", "url": "https://example.com/", "rp_id": "example.com"}),
+        ],
+    );
+    assert!(
+        replies[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("browser extension"),
+        "{replies:?}"
+    );
+    world.assert_contained();
+}
+
+#[test]
 fn a_two_factor_code_is_added_only_after_asking_and_then_fills() {
     let world = World::native_browser(&[
         Decision::Once,

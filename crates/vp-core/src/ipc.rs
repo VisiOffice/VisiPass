@@ -510,6 +510,42 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         key: Option<Secret>,
     },
+    /// Passkeys saved for `rp_id`, asked by the page at `url`. Metadata only.
+    /// `allow` narrows to the credential IDs the site listed. Like BrowserMatch,
+    /// without `unlock` a locked vault answers `"locked": true`.
+    BrowserPasskeys {
+        url: String,
+        rp_id: String,
+        #[serde(default)]
+        allow: Vec<String>,
+        #[serde(default)]
+        unlock: bool,
+    },
+    /// A new passkey for the page at `url`, saved into `item` (a login) or a
+    /// new login in `vault`. Answers `"excluded": true`, creating nothing, when
+    /// one of `exclude` (the site's existing credential IDs) is already saved.
+    BrowserPasskeyCreate {
+        url: String,
+        rp_id: String,
+        challenge: String,
+        user_handle: String,
+        #[serde(default)]
+        user_name: String,
+        #[serde(default)]
+        user_display_name: String,
+        #[serde(default)]
+        exclude: Vec<String>,
+        vault: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item: Option<String>,
+    },
+    /// Signs in to the page at `url` with one saved passkey.
+    BrowserPasskeyGet {
+        url: String,
+        rp_id: String,
+        credential_id: String,
+        challenge: String,
+    },
     Grants,
     Revoke {
         #[serde(default)]
@@ -586,6 +622,9 @@ impl Request {
             Request::BrowserSave { check: true, .. } => "browser-check",
             Request::BrowserSave { .. } => "browser-save",
             Request::BrowserAddTotp { .. } => "browser-add-totp",
+            Request::BrowserPasskeys { .. } => "browser-passkeys",
+            Request::BrowserPasskeyCreate { .. } => "browser-passkey-create",
+            Request::BrowserPasskeyGet { .. } => "browser-passkey-get",
             Request::Grants => "grants",
             Request::Revoke { .. } => "revoke",
             Request::Log { .. } => "log",

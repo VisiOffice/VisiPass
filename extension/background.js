@@ -239,6 +239,65 @@ async function handle(message, sender) {
       if (topFrame) setScheme(message.scheme);
       return {};
     }
+    // Passkeys, from the top frame's content script. The page's URL is Chrome's
+    // (sender.url); visipassd checks the RP ID against it and builds what the
+    // site verifies from it.
+    case "page-passkeys": {
+      if (!topFrame) throw new Error("Not the page");
+      const result = await ask({
+        type: "passkeys",
+        url: sender.url,
+        rp_id: String(message.rp_id || ""),
+        allow: Array.isArray(message.allow) ? message.allow.map(String) : [],
+        unlock: Boolean(message.unlock),
+      });
+      return { passkeys: result.passkeys || [], locked: Boolean(result.locked) };
+    }
+    // What the save card needs: where the passkey goes. A login already saved
+    // for this site and username takes it; else the vault new logins go to.
+    case "page-passkey-offer": {
+      if (!topFrame) throw new Error("Not the page");
+      // Checks the RP ID before anything shows.
+      const check = await ask({ type: "passkeys", url: sender.url, rp_id: String(message.rp_id || ""), unlock: Boolean(message.unlock) });
+      if (check.locked) return { locked: true };
+      const { logins } = await matchFor(sender.url, Boolean(message.unlock));
+      const name = String(message.user_name || "").toLowerCase();
+      const same = name
+        ? (logins || []).filter((l) => l.exact && l.category === "LOGIN" && (l.username || "").toLowerCase() === name)
+        : [];
+      const login = same.length === 1 ? { id: same[0].id, vault: same[0].vault, title: same[0].title } : null;
+      if (login) return { login };
+      const { vault, vaults } = await saveVault();
+      return { vault: vault.id, vaults };
+    }
+    case "page-passkey-create": {
+      if (!topFrame) throw new Error("Not the page");
+      const result = await ask({
+        type: "passkey-create",
+        url: sender.url,
+        rp_id: String(message.rp_id || ""),
+        challenge: String(message.challenge || ""),
+        user_handle: String(message.user_handle || ""),
+        user_name: String(message.user_name || ""),
+        user_display_name: String(message.user_display_name || ""),
+        exclude: Array.isArray(message.exclude) ? message.exclude.map(String) : [],
+        vault: String(message.vault || ""),
+        ...(message.item ? { item: String(message.item) } : {}),
+      });
+      if (!message.item && message.vault) await chrome.storage.local.set({ saveVault: String(message.vault) });
+      matches.delete(new URL(sender.url).origin);
+      return result;
+    }
+    case "page-passkey-get": {
+      if (!topFrame) throw new Error("Not the page");
+      return await ask({
+        type: "passkey-get",
+        url: sender.url,
+        rp_id: String(message.rp_id || ""),
+        credential_id: String(message.credential_id || ""),
+        challenge: String(message.challenge || ""),
+      });
+    }
     case "theme":
       theme ??= await ask({ type: "theme" }).catch(() => ({}));
       return theme;

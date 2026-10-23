@@ -14,9 +14,11 @@ use std::time::{Duration, Instant, SystemTime};
 use vp_core::Failure;
 use vp_core::backend::Backend;
 use vp_core::model::{
-    Destination, Field, FieldMeta, Item, ItemDetail, ItemSummary, Listed, PasswordOutcome,
-    PasswordRequest, Receipt, Scope, SectionMeta, SectionRef, Url, UrlEntry, VaultRef,
+    Destination, Field, FieldMeta, Item, ItemDetail, ItemSummary, Listed, PasskeyInfo,
+    PasswordOutcome, PasswordRequest, Receipt, Scope, SectionMeta, SectionRef, Url, UrlEntry,
+    VaultRef,
 };
+use vp_core::passkey;
 use vp_core::refs::SecretRef;
 use vp_core::secret::Secret;
 use vp_crypto::{KdfParams, SecretKey};
@@ -106,14 +108,34 @@ struct Overview {
     updated_at: Option<String>,
     #[serde(default)]
     archived: bool,
+    /// Public descriptions of the item's passkeys, so a page's request finds
+    /// them without decrypting every item's details.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    passkeys: Vec<PasskeyInfo>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 struct Details {
     #[serde(default)]
     sections: Vec<SectionRef>,
     #[serde(default)]
     fields: Vec<Field>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    passkeys: Vec<StoredPasskey>,
+}
+
+/// A passkey with its private key, inside the item's details. Changed only by
+/// the browser's requests: an item save carries the stored ones over.
+#[derive(Clone, Serialize, Deserialize)]
+struct StoredPasskey {
+    credential_id: String,
+    rp_id: String,
+    /// base64url, the site's opaque ID for the account.
+    user_handle: String,
+    #[serde(default)]
+    user_display_name: String,
+    /// The P-256 scalar, base64url.
+    key: Secret,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -138,6 +160,7 @@ fn overview_of(item: &Item) -> Overview {
         created_at: item.created_at.clone(),
         updated_at: item.updated_at.clone(),
         archived: false,
+        passkeys: Vec::new(),
     }
 }
 
@@ -772,6 +795,7 @@ impl<U: Unlock> NativeBackend<U> {
                         encode(&Details {
                             sections: item.sections.clone(),
                             fields: item.fields.clone(),
+                            passkeys: Vec::new(),
                         }),
                     )
                 })
@@ -890,6 +914,7 @@ fn details_at(
 
 fn assemble(vault: &VaultRef, item_id: &str, overview: &Overview, details: Details) -> Item {
     Item {
+        passkeys: overview.passkeys.clone(),
         id: item_id.to_string(),
         title: overview.title.clone(),
         category: overview.category.clone(),
@@ -947,6 +972,12 @@ fn save_replacing(
         expected
             .into_iter()
             .map(|(i, v)| format!("{i}\u{0}{}", v.unwrap_or_default()))
+            .chain(
+                fields
+                    .passkeys
+                    .iter()
+                    .map(|p| format!("{}\u{0}{}", p.credential_id, p.key.expose())),
+            )
             .collect::<Vec<_>>()
             .join("\u{1}"),
     );
@@ -976,6 +1007,11 @@ fn save_replacing(
                     f.value.as_ref().map(|v| v.expose()).unwrap_or_default()
                 )
             })
+            .chain(
+                back.passkeys
+                    .iter()
+                    .map(|p| format!("{}\u{0}{}", p.credential_id, p.key.expose())),
+            )
             .collect::<Vec<_>>()
             .join("\u{1}"),
     );
@@ -1206,6 +1242,7 @@ impl<U: Unlock> Backend for NativeBackend<U> {
                 created_at: Some(now.clone()),
                 updated_at: Some(now),
                 archived: false,
+                passkeys: Vec::new(),
             };
             let id = new_id();
             save(
@@ -1217,6 +1254,7 @@ impl<U: Unlock> Backend for NativeBackend<U> {
                 Details {
                     sections: Vec::new(),
                     fields,
+                    passkeys: Vec::new(),
                 },
             )?;
             Ok(Receipt {
@@ -1290,15 +1328,26 @@ impl<U: Unlock> Backend for NativeBackend<U> {
                 })?
                 .clone();
             let now = vp_core::time::now_rfc3339();
-            let (id, created_at) = if item.id.is_empty() {
-                (new_id(), Some(now.clone()))
+            let (id, created_at, passkeys) = if item.id.is_empty() {
+                (new_id(), Some(now.clone()), Vec::new())
             } else {
                 let entry = opened.entry(&vault.id, &item.id)?;
-                (entry.item_id.clone(), entry.overview.created_at.clone())
+                (
+                    entry.item_id.clone(),
+                    entry.overview.created_at.clone(),
+                    entry.overview.passkeys.clone(),
+                )
+            };
+            // Passkeys change only through the browser; keep the stored ones.
+            let stored = if passkeys.is_empty() {
+                Vec::new()
+            } else {
+                details(store, opened, &vault.id, &id)?.passkeys
             };
             let mut overview = overview_of(&item);
             overview.created_at = created_at;
             overview.updated_at = Some(now);
+            overview.passkeys = passkeys;
             save(
                 store,
                 opened,
@@ -1308,6 +1357,7 @@ impl<U: Unlock> Backend for NativeBackend<U> {
                 Details {
                     sections: item.sections.clone(),
                     fields: item.fields.clone(),
+                    passkeys: stored,
                 },
             )
         })
@@ -1393,6 +1443,139 @@ impl<U: Unlock> NativeBackend<U> {
             let d = details(store, opened, &vault.id, &item_id)?;
             change(&mut overview);
             save(store, opened, &vault, &item_id, overview, d).map(|_| ())
+        })
+        .await
+    }
+}
+
+// ---- Passkeys -------------------------------------------------------------------
+
+impl<U: Unlock> NativeBackend<U> {
+    /// The passkeys saved for `rp_id`, outside the archive. Reads overviews only.
+    pub async fn passkeys(&self, rp_id: &str) -> Result<Vec<passkey::Found>, Failure> {
+        let rp_id = rp_id.to_string();
+        self.with(move |_, opened| {
+            let mut found = Vec::new();
+            for entry in opened.entries.iter().filter(|e| !e.overview.archived) {
+                let Ok(vault) = opened.vault(&entry.vault_id) else {
+                    continue;
+                };
+                for p in entry.overview.passkeys.iter().filter(|p| p.rp_id == rp_id) {
+                    found.push(passkey::Found {
+                        passkey: p.clone(),
+                        item: entry.item_id.clone(),
+                        vault: vault.name.clone(),
+                        title: entry.overview.title.clone(),
+                    });
+                }
+            }
+            Ok(found)
+        })
+        .await
+    }
+
+    /// Makes a passkey and saves it: into `creation.item` when given (a login
+    /// in that vault), otherwise into a new login named for the site.
+    pub async fn create_passkey(
+        &self,
+        creation: &passkey::Creation,
+    ) -> Result<passkey::Registration, Failure> {
+        let creation = creation.clone();
+        self.with(move |store, opened| {
+            let vault = opened.vault(&creation.vault)?.clone();
+            let now = vp_core::time::now_rfc3339();
+            let (item_id, mut overview, mut d) = match creation.item.as_deref() {
+                Some(item) => {
+                    let entry = opened.entry(&vault.id, item)?;
+                    if entry.overview.category != "LOGIN" || entry.overview.archived {
+                        return Err(Failure::new("A passkey can be added only to a login"));
+                    }
+                    let (item_id, overview) = (entry.item_id.clone(), entry.overview.clone());
+                    let d = details(store, opened, &vault.id, &item_id)?;
+                    (item_id, overview, d)
+                }
+                None => {
+                    let mut fields = vp_core::model::template("LOGIN");
+                    if let Some(f) = fields
+                        .iter_mut()
+                        .find(|f| f.purpose.as_deref() == Some("USERNAME"))
+                    {
+                        f.value = Some(Secret::new(creation.user_name.clone()));
+                    }
+                    let overview = Overview {
+                        title: creation.rp_id.clone(),
+                        category: "LOGIN".into(),
+                        tags: Vec::new(),
+                        urls: vec![UrlEntry {
+                            href: creation.origin.clone(),
+                            label: None,
+                            primary: true,
+                        }],
+                        favorite: false,
+                        username: Some(creation.user_name.clone()).filter(|u| !u.is_empty()),
+                        created_at: Some(now.clone()),
+                        updated_at: None,
+                        archived: false,
+                        passkeys: Vec::new(),
+                    };
+                    (
+                        new_id(),
+                        overview,
+                        Details {
+                            fields,
+                            ..Details::default()
+                        },
+                    )
+                }
+            };
+            let key = passkey::Key::generate()?;
+            let credential_id = passkey::new_credential_id()?;
+            overview.passkeys.push(PasskeyInfo {
+                credential_id: credential_id.clone(),
+                rp_id: creation.rp_id.clone(),
+                user_name: creation.user_name.clone(),
+                created_at: Some(now.clone()),
+            });
+            overview.updated_at = Some(now);
+            d.passkeys.push(StoredPasskey {
+                credential_id: credential_id.clone(),
+                rp_id: creation.rp_id.clone(),
+                user_handle: creation.user_handle.clone(),
+                user_display_name: creation.user_display_name.clone(),
+                key: Secret::new(key.export().to_string()),
+            });
+            save(store, opened, &vault, &item_id, overview, d)?;
+            passkey::register(&key, &credential_id, &creation, &item_id, &vault.name)
+        })
+        .await
+    }
+
+    /// Signs a sign-in with the saved passkey `request.credential_id` for `request.rp_id`.
+    pub async fn sign_passkey(
+        &self,
+        request: &passkey::Request,
+    ) -> Result<passkey::Assertion, Failure> {
+        let request = request.clone();
+        self.with(move |store, opened| {
+            let missing = || Failure::new("That passkey is not in VisiPass");
+            let entry = opened
+                .entries
+                .iter()
+                .filter(|e| !e.overview.archived)
+                .find(|e| {
+                    e.overview.passkeys.iter().any(|p| {
+                        p.credential_id == request.credential_id && p.rp_id == request.rp_id
+                    })
+                })
+                .ok_or_else(missing)?;
+            let d = details(store, opened, &entry.vault_id, &entry.item_id)?;
+            let stored = d
+                .passkeys
+                .iter()
+                .find(|p| p.credential_id == request.credential_id && p.rp_id == request.rp_id)
+                .ok_or_else(missing)?;
+            let key = passkey::Key::import(stored.key.expose())?;
+            Ok(passkey::assert(&key, &request, &stored.user_handle))
         })
         .await
     }

@@ -23,3 +23,5 @@ vp-daemon.workspace = true
 vp-op.workspace = true
 vp-native.workspace = true
 vp-crypto.workspace = true
+p256.workspace = true
+sha2.workspace = true

@@ -133,6 +133,30 @@ pub trait Backend: Send + Sync + 'static {
     ) -> impl Future<Output = Result<(usize, usize), Failure>> + Send {
         async { Err(Failure::new(NO_NATIVE)) }
     }
+
+    /// The passkeys saved for `rp_id`, outside the archive. No private key.
+    fn native_passkeys(
+        &self,
+        _rp_id: &str,
+    ) -> impl Future<Output = Result<Vec<crate::passkey::Found>, Failure>> + Send {
+        async { Err(Failure::new(NO_NATIVE)) }
+    }
+
+    /// Makes a passkey, saves its key in the vault and returns the page's response.
+    fn native_passkey_create(
+        &self,
+        _creation: &crate::passkey::Creation,
+    ) -> impl Future<Output = Result<crate::passkey::Registration, Failure>> + Send {
+        async { Err(Failure::new(NO_NATIVE)) }
+    }
+
+    /// Signs a sign-in with a saved passkey; the key never leaves the backend.
+    fn native_passkey_sign(
+        &self,
+        _request: &crate::passkey::Request,
+    ) -> impl Future<Output = Result<crate::passkey::Assertion, Failure>> + Send {
+        async { Err(Failure::new(NO_NATIVE)) }
+    }
 }
 
 /// What [`Backend::native_sync`] does.

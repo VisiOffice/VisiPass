@@ -356,6 +356,39 @@ ciphertext hash are stored in the item's details, and the file is listed in the 
 so an older attachment cannot be swapped back in. The exact chunk format is specified when
 attachments are built.
 
+### 7.6 Passkeys
+
+VisiPass is a WebAuthn authenticator for web pages, in the native vault only (1Password's `op`
+cannot sign).
+
+- **Keys.** One P-256 key per passkey (ES256, COSE −7, the only algorithm offered), generated
+  from the OS generator by rejection sampling. The 32-byte scalar is stored base64url in the
+  item's **details** with the credential ID (16 random bytes), RP ID and the site's user handle.
+  The **overview** carries only the public description (credential ID, RP ID, username, date), so
+  a page's request is answered without decrypting every item. The key is read back after every
+  write, like field values, and is signed with inside visipassd: it never reaches `vp`, the
+  extension, the page or the log.
+- **What a site sees.** Attestation `none`; a fixed AAGUID (`105fa24a-9fb9-4085-a436-f880b76f5a60`);
+  flags UP, UV, BE and BS (backup eligible and backed up, since passkeys sync with the vault);
+  a signature counter of 0, as synced passkeys report.
+- **User verification and presence.** An unlocked VisiPass is the verification; there is no
+  extra prompt per use. Presence is a real click (`isTrusted`) on VisiPass's own card or inline
+  menu while Chrome reports it visible, the same rule as filling. Signing in also needs the same
+  approval as filling that login's password on that page (`{page}#{item}`), so a passkey is
+  never easier to use than the password beside it. Saving a new passkey asks nothing beyond the
+  click, like saving a new login.
+- **Origin and RP ID.** The page's URL comes from Chrome (`sender.url`), never from the page.
+  visipassd accepts https pages, and http only on `localhost`, refuses IP hosts and URLs with
+  credentials, and requires the RP ID to be the page's host or a registrable parent of it,
+  never a public suffix (PSL, including private sections such as `github.io`). It builds
+  `clientDataJSON` itself from that origin and the page's challenge; only top-frame requests
+  are handled, so `crossOrigin` is always false.
+- **Edits cannot remove one.** An item save keeps the stored passkeys whatever the client sends;
+  merging duplicates refuses to archive an item that holds a passkey, since the site knows a
+  passkey only by its ID and the key cannot move to another item.
+- **Not covered.** Passkeys in 1Password or Proton Pass exports are not copied (they cannot be
+  exported); each site's passkey is registered again. No PRF, largeBlob or other extensions.
+
 ## 8. Storage
 
 ### 8.1 Layout
@@ -712,3 +745,5 @@ rotation; §7.5 files; §9 fingerprints; §10 log signing; §11.1 buckets; §11.
   parents replace `item_version`, and concurrent edits are kept as conflicts for the human.
 - 2026-10-17: §11.1 built for folders ("As built" records the details); schema 2 replaces
   `item_version` with revisions, migrating schema-1 files after a backup.
+- 2026-10-23: §7.6 passkeys: VisiPass creates and signs with ES256 passkeys for web pages,
+  keys in the native vault's details, an unlocked vault as user verification.

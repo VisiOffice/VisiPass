@@ -30,7 +30,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use vp_core::backend::{Backend, SyncOp};
 use vp_core::ipc::{Envelope, Operation, PROTOCOL_VERSION, PasteMode, Request, Response, Usage};
-use vp_core::{Failure, audit, find, time};
+use vp_core::{Failure, audit, find, passkey, time};
 
 const MAX_REQUEST_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -275,6 +275,13 @@ fn creates_in(vault: &str) -> String {
     format!("create in {vault}")
 }
 
+/// The page's origin and the RP ID it may use, or why it may not.
+fn passkey_page(url: &str, rp_id: &str) -> Result<(String, String), Failure> {
+    let (origin, host) = passkey::origin_of(url)?;
+    let rp_id = passkey::check_rp_id(&host, rp_id)?;
+    Ok((origin, rp_id))
+}
+
 fn assess(request: &Request, requester: &Requester) -> Assessment {
     let none = |detail: Option<String>| Assessment {
         need: None,
@@ -444,6 +451,26 @@ fn assess(request: &Request, requester: &Requester) -> Assessment {
                 (false, Some(id)) => format!("update {id} from {page}"),
             }))
         }
+        Request::BrowserPasskeys { url, rp_id, .. } => none(Some(format!(
+            "passkeys for {rp_id} on {}",
+            find::page_host(url)
+        ))),
+        Request::BrowserPasskeyCreate {
+            url, rp_id, item, ..
+        } => none(Some(match item {
+            Some(id) => format!(
+                "add a passkey for {rp_id} to {id} on {}",
+                find::page_host(url)
+            ),
+            None => format!(
+                "save a new passkey for {rp_id} from {}",
+                find::page_host(url)
+            ),
+        })),
+        Request::BrowserPasskeyGet { url, rp_id, .. } => none(Some(format!(
+            "sign in with a {rp_id} passkey on {}",
+            find::page_host(url)
+        ))),
         Request::BrowserAddTotp { url, id, .. } => Assessment {
             need: None,
             refs: vec![format!("{}#{id}", find::page_host(url))],
@@ -730,6 +757,14 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
             let mut others = Vec::new();
             for key in &merge.archive {
                 others.push(self.backend.item(&key.id, &key.vault).await?);
+            }
+            // A passkey's key cannot move between items: the site knows it by
+            // its ID alone, so archiving its item would lose the sign-in.
+            if let Some(other) = others.iter().find(|o| !o.passkeys.is_empty()) {
+                return Err(Failure::new(format!(
+                    "\"{}\" has a passkey; keep that one and archive the others (merged {kept} before this)",
+                    other.title
+                )));
             }
             let (merged, more) = vp_core::dedupe::merge(keep, &others);
             if more != vp_core::dedupe::Added::default() {
@@ -1568,6 +1603,132 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 })?;
                 Ok(json!({ "password": password.expose() }))
             }
+            Request::BrowserPasskeys {
+                url,
+                rp_id,
+                allow,
+                unlock,
+            } => {
+                let (_, rp_id) = passkey_page(&url, &rp_id)?;
+                if !unlock
+                    && self
+                        .backend
+                        .native_status()
+                        .is_some_and(|s| s.exists && !s.unlocked)
+                {
+                    return Ok(json!({ "passkeys": [], "locked": true }));
+                }
+                let found: Vec<passkey::Found> = self
+                    .backend
+                    .native_passkeys(&rp_id)
+                    .await?
+                    .into_iter()
+                    .filter(|f| allow.is_empty() || allow.contains(&f.passkey.credential_id))
+                    .collect();
+                Ok(json!({ "rp_id": rp_id, "passkeys": found }))
+            }
+            Request::BrowserPasskeyCreate {
+                url,
+                rp_id,
+                challenge,
+                user_handle,
+                user_name,
+                user_display_name,
+                exclude,
+                vault,
+                item,
+            } => {
+                let (origin, rp_id) = passkey_page(&url, &rp_id)?;
+                let handle = passkey::unb64(&user_handle)?;
+                if handle.is_empty() || handle.len() > 64 {
+                    return Err(Failure::new("The site sent an invalid user ID"));
+                }
+                passkey::unb64(&challenge)?;
+                let text = |t: String| -> String {
+                    t.chars().filter(|c| !c.is_control()).take(256).collect()
+                };
+                if !exclude.is_empty()
+                    && self
+                        .backend
+                        .native_passkeys(&rp_id)
+                        .await?
+                        .iter()
+                        .any(|f| exclude.contains(&f.passkey.credential_id))
+                {
+                    return Ok(json!({ "excluded": true }));
+                }
+                let registration = self
+                    .backend
+                    .native_passkey_create(&passkey::Creation {
+                        origin,
+                        top_origin: None,
+                        rp_id,
+                        challenge,
+                        user_handle,
+                        user_name: text(user_name),
+                        user_display_name: text(user_display_name),
+                        vault,
+                        item,
+                    })
+                    .await?;
+                Ok(json!(registration))
+            }
+            Request::BrowserPasskeyGet {
+                url,
+                rp_id,
+                credential_id,
+                challenge,
+            } => {
+                let (origin, rp_id) = passkey_page(&url, &rp_id)?;
+                passkey::unb64(&challenge)?;
+                let found = self
+                    .backend
+                    .native_passkeys(&rp_id)
+                    .await?
+                    .into_iter()
+                    .find(|f| f.passkey.credential_id == credential_id)
+                    .ok_or_else(|| Failure::new("That passkey is not in VisiPass"))?;
+                // The same approval as filling the login's password on this page:
+                // a passkey is never easier to use than the password beside it.
+                let page = find::page_host(&url);
+                let need = Need {
+                    operation: Operation::Fill,
+                    refs: BTreeSet::from([format!("{page}#{}", found.item)]),
+                    vaults: BTreeSet::new(),
+                };
+                let prompt = Prompt {
+                    who: who(requester),
+                    action: format!("sign in to {page} with your \"{}\" passkey", found.title),
+                    details: vec![
+                        ("Website".to_string(), page.clone()),
+                        (
+                            "Passkey".to_string(),
+                            if found.passkey.user_name.is_empty() {
+                                found.title.clone()
+                            } else {
+                                format!("{}  ({})", found.title, found.passkey.user_name)
+                            },
+                        ),
+                        ("Vault".to_string(), found.vault.clone()),
+                    ],
+                    secrets: vec![],
+                    purpose: None,
+                    timeout_secs: approval::TIMEOUT.as_secs(),
+                    paste: None,
+                };
+                *grant = Some(self.authorize(requester, &need, &prompt).await?);
+                let assertion = self
+                    .backend
+                    .native_passkey_sign(&passkey::Request {
+                        origin,
+                        top_origin: None,
+                        rp_id,
+                        challenge,
+                        credential_id,
+                    })
+                    .await?;
+                Ok(json!(assertion))
+            }
             Request::BrowserVaults => {
                 let vaults = self.backend.vaults(None).await?;
                 Ok(json!({
@@ -1615,6 +1776,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                         set_field(&mut fields, "USERNAME", &username);
                         set_field(&mut fields, "PASSWORD", password.expose());
                         let item = vp_core::model::Item {
+                            passkeys: Vec::new(),
                             id: String::new(),
                             title: page.clone(),
                             category: "LOGIN".into(),
@@ -1775,6 +1937,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 | Request::Grants
                 | Request::Log { .. }
                 | Request::BrowserMatch { unlock: false, .. }
+                | Request::BrowserPasskeys { unlock: false, .. }
                 | Request::BrowserGenerate
                 | Request::BrowserVaults
         ) || (channel == Channel::App
@@ -1796,6 +1959,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 | Request::BrowserSave { check: false, .. }
                 | Request::CreateVault { .. }
                 | Request::BrowserAddTotp { .. }
+                | Request::BrowserPasskeyCreate { .. }
         );
         let mut grant = None;
         // The extension's popup is a human surface like the app: it may open,
@@ -1824,6 +1988,9 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                     | Request::BrowserVaults
                     | Request::BrowserSave { .. }
                     | Request::BrowserAddTotp { .. }
+                    | Request::BrowserPasskeys { .. }
+                    | Request::BrowserPasskeyCreate { .. }
+                    | Request::BrowserPasskeyGet { .. }
             )
             && !(self.browser_host)(requester.pid)
         {

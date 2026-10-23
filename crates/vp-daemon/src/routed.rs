@@ -11,6 +11,7 @@ use vp_core::model::{
     Destination, Item, ItemDetail, Listed, PasswordOutcome, PasswordRequest, Receipt, Scope,
     VaultRef,
 };
+use vp_core::passkey;
 use vp_core::refs::SecretRef;
 use vp_core::secret::Secret;
 use vp_native::{NativeBackend, Unlock};
@@ -285,4 +286,34 @@ impl<U: Unlock> Backend for Routed<U> {
         }
         self.native.import(vault, items).await
     }
+
+    async fn native_passkeys(&self, rp_id: &str) -> Result<Vec<passkey::Found>, Failure> {
+        if !self.native.exists() {
+            return Ok(Vec::new());
+        }
+        self.native.passkeys(rp_id).await
+    }
+
+    async fn native_passkey_create(
+        &self,
+        creation: &passkey::Creation,
+    ) -> Result<passkey::Registration, Failure> {
+        if !self.native.exists() {
+            return Err(Failure::new(PASSKEYS_NEED_NATIVE));
+        }
+        self.native.create_passkey(creation).await
+    }
+
+    async fn native_passkey_sign(
+        &self,
+        request: &passkey::Request,
+    ) -> Result<passkey::Assertion, Failure> {
+        if !self.native.exists() {
+            return Err(Failure::new(PASSKEYS_NEED_NATIVE));
+        }
+        self.native.sign_passkey(request).await
+    }
 }
+
+const PASSKEYS_NEED_NATIVE: &str =
+    "Passkeys are kept in VisiPass's own vault; create it first with `vp init`";

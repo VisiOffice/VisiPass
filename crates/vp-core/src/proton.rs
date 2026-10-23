@@ -248,6 +248,7 @@ fn parse_csv(text: &str) -> Result<Export, Failure> {
             name: vault_name.clone(),
         };
         let item = Item {
+            passkeys: Vec::new(),
             id,
             title,
             category: category.into(),
@@ -609,6 +610,7 @@ fn item(raw: &Value, vault: &VaultRef, left: &mut Left) -> Option<Item> {
             .map(crate::time::rfc3339)
     };
     Some(Item {
+        passkeys: Vec::new(),
         id: String::new(),
         title: text_of(&metadata, "name").unwrap_or_else(|| "Untitled".into()),
         category: category.into(),

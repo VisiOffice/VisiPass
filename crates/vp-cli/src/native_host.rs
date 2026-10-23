@@ -79,6 +79,18 @@ fn handle(message: &Value) -> Result<Value, Failure> {
     let text = |key: &str| message.get(key).and_then(Value::as_str).map(String::from);
     let required = |key: &str| text(key).ok_or_else(|| Failure::new(format!("Missing \"{key}\"")));
     let flag = |key: &str| message.get(key).and_then(Value::as_bool).unwrap_or(false);
+    let strings = |key: &str| -> Vec<String> {
+        message
+            .get(key)
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
     match message.get("type").and_then(Value::as_str).unwrap_or("") {
         "ping" => Ok(json!({ "version": env!("CARGO_PKG_VERSION") })),
         "theme" => Ok(theme()),
@@ -117,6 +129,29 @@ fn handle(message: &Value) -> Result<Value, Failure> {
             vault: required("vault")?,
             image: text("image"),
             key: text("key").map(Secret::new),
+        }),
+        "passkeys" => client::call(Request::BrowserPasskeys {
+            url: required("url")?,
+            rp_id: required("rp_id")?,
+            allow: strings("allow"),
+            unlock: flag("unlock"),
+        }),
+        "passkey-create" => client::call(Request::BrowserPasskeyCreate {
+            url: required("url")?,
+            rp_id: required("rp_id")?,
+            challenge: required("challenge")?,
+            user_handle: required("user_handle")?,
+            user_name: text("user_name").unwrap_or_default(),
+            user_display_name: text("user_display_name").unwrap_or_default(),
+            exclude: strings("exclude"),
+            vault: required("vault")?,
+            item: text("item"),
+        }),
+        "passkey-get" => client::call(Request::BrowserPasskeyGet {
+            url: required("url")?,
+            rp_id: required("rp_id")?,
+            credential_id: required("credential_id")?,
+            challenge: required("challenge")?,
         }),
         // From the popup only: the extension never lets a page send these.
         "item" => client::call(Request::Item {

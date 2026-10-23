@@ -167,6 +167,22 @@ pub struct Item {
     pub sections: Vec<SectionRef>,
     #[serde(default)]
     pub fields: Vec<Field>,
+    /// The login's passkeys, described. Their private keys never leave
+    /// visipassd, and a save ignores this list: passkeys change only through
+    /// the browser.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub passkeys: Vec<PasskeyInfo>,
+}
+
+/// A passkey's public description; see [`crate::passkey`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PasskeyInfo {
+    pub credential_id: String,
+    pub rp_id: String,
+    #[serde(default)]
+    pub user_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
 }
 
 /// The categories the app can create in M1, with their built-in fields.
