@@ -206,10 +206,13 @@
     const mark = root.querySelector(".mark");
     mark.style.left = `${r.right - 28}px`;
     mark.style.top = `${r.top + (r.height - 22) / 2}px`;
+    // Hang the menu off the field's right edge, under the mark, so the field
+    // and the ones below it stay visible and clickable; slide it left only as
+    // far as the window needs.
     const menu = root.querySelector(".menu");
-    const width = Math.max(Math.min(r.width, 340), 280);
+    const width = 272;
     menu.style.width = `${width}px`;
-    menu.style.left = `${Math.max(4, Math.min(r.right - width, innerWidth - width - 4))}px`;
+    menu.style.left = `${Math.max(4, Math.min(r.right - 40, innerWidth - width - 4))}px`;
     const below = r.bottom + 4;
     menu.style.top = below + 320 < innerHeight ? `${below}px` : `${Math.max(4, r.top - 4 - menu.offsetHeight)}px`;
   }
