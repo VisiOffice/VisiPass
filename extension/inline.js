@@ -20,6 +20,43 @@
   const MARK =
     '<svg viewBox="0 0 512 512" aria-hidden="true"><path fill="currentColor" fill-rule="evenodd" d="M76,0 H436 A76,76 0 0 1 512,76 V436 A76,76 0 0 1 436,512 H76 A76,76 0 0 1 0,436 V76 A76,76 0 0 1 76,0 Z M228,400 H284 V287.2 A84,84 0 1 0 228,287.2 Z"/></svg>';
 
+  // Shared by the menu and the save card. The theme's font is monospace, so it
+  // only sets passwords and codes; text uses the system's interface font.
+  const BASE = `
+      :host { --bg:#1a1b26; --fg:#c0caf5; --accent:#7aa2f7; --muted:#9aa5ce; --danger:#f7768e;
+        --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+        --mono: ui-monospace, monospace;
+        --surface: color-mix(in srgb, var(--fg) 6%, var(--bg)); --surface-2: color-mix(in srgb, var(--fg) 11%, var(--bg));
+        --line: color-mix(in srgb, var(--fg) 14%, transparent); }
+      * { box-sizing: border-box; }`;
+  const KEY =
+    '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="4.5"/><path d="m10.7 12.3 9.3-9.3M17 6l3 3M14.5 8.5l2 2"/></svg>';
+  const LOCK =
+    '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>';
+
+  // A stable colour per title, for letter avatars (as in the popup).
+  function hue(text) {
+    let h = 0;
+    for (const c of text || "?") h = (h * 31 + c.codePointAt(0)) % 360;
+    return h;
+  }
+
+  // The site's icon (from the background worker, out of Chrome's favicon
+  // cache), else the title's first letter; or one of the menu's own glyphs.
+  function avatar(title, src, glyph) {
+    const box = el("div", "avatar");
+    box.style.setProperty("--h", hue(title));
+    if (glyph) box.innerHTML = glyph;
+    else if (src && /^data:image\//.test(src)) {
+      const img = el("img");
+      img.src = src;
+      img.alt = "";
+      box.append(img);
+      box.classList.add("icon");
+    } else box.textContent = (title || "?").trim().charAt(0).toUpperCase() || "?";
+    return box;
+  }
+
   const send = (message) =>
     chrome.runtime.sendMessage(message).then((reply) => {
       if (!reply || !reply.ok) throw new Error((reply && reply.error) || "VisiPass did not answer");
@@ -107,25 +144,30 @@
       "all: initial !important; position: fixed !important; top: 0 !important; left: 0 !important; z-index: 2147483647 !important;";
     root = host.attachShadow({ mode: "closed" });
     root.innerHTML = `<style>
-      :host { --bg:#1a1b26; --fg:#c0caf5; --accent:#7aa2f7; --muted:#9aa5ce; --danger:#f7768e; --font: ui-monospace, monospace; }
-      * { box-sizing: border-box; }
+      ${BASE}
       .mark { position: fixed; width: 22px; height: 22px; padding: 3px; border: 0; background: transparent; color: var(--accent); cursor: pointer; display: none; }
       .mark svg { width: 100%; height: 100%; display: block; }
-      .mark .count { position: absolute; right: -4px; bottom: -4px; min-width: 14px; height: 14px; padding: 0 3px; border-radius: 7px;
-        background: var(--accent); color: var(--bg); font: 600 9px/14px var(--font); text-align: center; }
-      .menu { position: fixed; width: 280px; max-height: 300px; overflow-y: auto; display: none; background: var(--bg); color: var(--fg);
-        border: 1px solid color-mix(in srgb, var(--fg) 18%, transparent); border-radius: 8px; box-shadow: 0 8px 28px rgba(0,0,0,.35);
-        font: 12px/1.4 var(--font); padding: 4px 0; }
-      .head { display: flex; align-items: center; gap: 6px; padding: 6px 12px; color: var(--muted); font-size: 11px; }
-      .head svg { width: 12px; height: 12px; color: var(--accent); }
-      .item { padding: 6px 12px; cursor: pointer; border-left: 2px solid transparent; }
-      .item.selected, .item:hover { background: color-mix(in srgb, var(--fg) 8%, transparent); }
-      .item.selected { border-left-color: var(--accent); }
-      .title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .sub { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .status { padding: 6px 12px; color: var(--muted); font-size: 11px; }
+      .mark .count { position: absolute; right: -5px; bottom: -5px; min-width: 15px; height: 15px; padding: 0 4px; border-radius: 8px;
+        background: var(--accent); color: var(--bg); font: 700 9.5px/15px var(--font); text-align: center; box-shadow: 0 0 0 2px var(--bg); }
+      .menu { position: fixed; width: 300px; max-height: 320px; overflow-y: auto; display: none; background: var(--bg); color: var(--fg);
+        border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 32px rgba(0,0,0,.35), 0 2px 6px rgba(0,0,0,.2);
+        font: 13px/1.4 var(--font); padding: 6px; scrollbar-width: thin; }
+      .head { display: flex; align-items: center; gap: 7px; padding: 6px 8px 8px; color: var(--muted); font-size: 12px; font-weight: 600; }
+      .head svg { width: 14px; height: 14px; color: var(--accent); }
+      .item { display: flex; align-items: center; gap: 10px; padding: 7px 8px; cursor: pointer; border-radius: 9px; }
+      .item:hover { background: var(--surface); }
+      .item.selected { background: var(--surface-2); }
+      .text { min-width: 0; flex: 1; }
+      .title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .sub { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .status { padding: 6px 8px 4px; color: var(--muted); font-size: 12px; }
       .status.error { color: var(--danger); }
-      .sub.secret { color: var(--accent); font-size: 12px; letter-spacing: .02em; }
+      .sub.secret { color: var(--accent); font: 13px/1.4 var(--mono); letter-spacing: .02em; }
+      .avatar { --h: 200; width: 32px; height: 32px; border-radius: 8px; flex: none; display: grid; place-items: center; overflow: hidden;
+        font-weight: 700; font-size: 14px; background: hsl(var(--h) 50% 55% / .2); color: hsl(var(--h) 65% 74%); }
+      .avatar.icon { background: #fff; }
+      .avatar img { width: 20px; height: 20px; display: block; }
+      .avatar svg { width: 17px; height: 17px; }
     </style>
     <button class="mark" title="VisiPass">${MARK}<span class="count"></span></button>
     <div class="menu" role="listbox"></div>`;
@@ -150,8 +192,8 @@
       .then((theme) => {
         for (const [key, value] of Object.entries(theme || {})) {
           if (!value) continue;
-          const name = key === "background" ? "bg" : key === "foreground" ? "fg" : key;
-          target.style.setProperty(`--${name}`, key === "font" ? `"${value}", monospace` : value);
+          const name = { background: "bg", foreground: "fg", font: "mono" }[key] || key;
+          target.style.setProperty(`--${name}`, key === "font" ? `"${value}", ui-monospace, monospace` : value);
         }
       })
       .catch(() => {});
@@ -165,11 +207,11 @@
     mark.style.left = `${r.right - 28}px`;
     mark.style.top = `${r.top + (r.height - 22) / 2}px`;
     const menu = root.querySelector(".menu");
-    const width = Math.max(Math.min(r.width, 340), 240);
+    const width = Math.max(Math.min(r.width, 340), 280);
     menu.style.width = `${width}px`;
     menu.style.left = `${Math.max(4, Math.min(r.right - width, innerWidth - width - 4))}px`;
     const below = r.bottom + 4;
-    menu.style.top = below + 300 < innerHeight ? `${below}px` : `${Math.max(4, r.top - 4 - menu.offsetHeight)}px`;
+    menu.style.top = below + 320 < innerHeight ? `${below}px` : `${Math.max(4, r.top - 4 - menu.offsetHeight)}px`;
   }
 
   function hide() {
@@ -195,7 +237,9 @@
     if (locked) {
       const row = el("div", "item selected");
       row.setAttribute("role", "option");
-      row.append(el("div", "title", "Unlock VisiPass"), el("div", "sub", "Then pick a login for this site"));
+      const text = el("div", "text");
+      text.append(el("div", "title", "Unlock VisiPass"), el("div", "sub", "Then pick a login for this site"));
+      row.append(avatar("VisiPass", null, LOCK), text);
       row.addEventListener("mousedown", (e) => {
         if (!e.isTrusted) return;
         e.preventDefault();
@@ -208,11 +252,14 @@
     const rows = entries().map((entry, i) => {
       const row = el("div", `item${i === selected ? " selected" : ""}`);
       row.setAttribute("role", "option");
+      const text = el("div", "text");
       if (entry.kind === "generate") {
-        row.append(el("div", "title", "Use a strong password"), el("div", "sub secret", entry.password));
+        text.append(el("div", "title", "Use a strong password"), el("div", "sub secret", entry.password));
+        row.append(avatar("password", null, KEY), text);
       } else {
         const login = entry.login;
-        row.append(el("div", "title", login.title), el("div", "sub", [login.username, login.host].filter(Boolean).join(" · ")));
+        text.append(el("div", "title", login.title), el("div", "sub", login.username || login.host || ""));
+        row.append(avatar(login.title, login.icon), text);
       }
       row.addEventListener("mousedown", (e) => {
         if (!e.isTrusted) return;
@@ -469,22 +516,24 @@
       "all: initial !important; position: fixed !important; top: 16px !important; right: 16px !important; z-index: 2147483647 !important;";
     cardRoot = card.attachShadow({ mode: "closed" });
     cardRoot.innerHTML = `<style>
-      :host { --bg:#1a1b26; --fg:#c0caf5; --accent:#7aa2f7; --muted:#9aa5ce; --danger:#f7768e; --font: ui-monospace, monospace; }
-      * { box-sizing: border-box; }
-      .card { width: 320px; background: var(--bg); color: var(--fg); font: 12px/1.45 var(--font); padding: 12px 14px;
-        border: 1px solid color-mix(in srgb, var(--fg) 18%, transparent); border-radius: 8px; box-shadow: 0 8px 28px rgba(0,0,0,.35); }
-      .head { display: flex; align-items: center; gap: 8px; font-weight: 600; margin-bottom: 6px; }
-      .head svg { width: 14px; height: 14px; color: var(--accent); flex: none; }
+      ${BASE}
+      .card { width: 340px; background: var(--bg); color: var(--fg); font: 13px/1.45 var(--font); padding: 14px 16px 16px;
+        border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 12px 32px rgba(0,0,0,.35), 0 2px 6px rgba(0,0,0,.2); }
+      .head { display: flex; align-items: center; gap: 10px; font-weight: 650; font-size: 14px; margin-bottom: 8px; }
+      .head svg { width: 26px; height: 26px; color: var(--accent); flex: none; }
       .line { color: var(--muted); word-break: break-all; }
-      .code { font-size: 22px; letter-spacing: .15em; color: var(--accent); margin: 6px 0; }
+      .code { font: 26px/1.3 var(--mono); letter-spacing: .15em; color: var(--accent); margin: 8px 0; }
       .error { color: var(--danger); }
-      select { width: 100%; margin-top: 8px; background: transparent; color: var(--fg); font: inherit; padding: 4px;
-        border: 1px solid color-mix(in srgb, var(--fg) 25%, transparent); }
+      select { width: 100%; height: 34px; margin-top: 10px; background: var(--surface); color: var(--fg); font: inherit; padding: 0 8px;
+        border: 1px solid var(--line); border-radius: 8px; outline: none; }
+      select:focus { border-color: var(--accent); }
       option { background: var(--bg); }
-      .buttons { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
-      button { font: inherit; padding: 4px 10px; cursor: pointer; background: transparent; color: var(--fg);
-        border: 1px solid color-mix(in srgb, var(--fg) 25%, transparent); border-radius: 4px; }
-      button.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+      .buttons { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+      button { font: 600 13px/1 var(--font); height: 32px; padding: 0 14px; cursor: pointer; background: var(--surface); color: var(--fg);
+        border: 1px solid var(--line); border-radius: 999px; }
+      button:hover { background: var(--surface-2); }
+      button.primary { background: var(--accent); color: var(--bg); border-color: transparent; }
+      button.primary:hover { filter: brightness(1.08); }
     </style><div class="card"></div>`;
     (document.documentElement || document.body).append(card);
     new IntersectionObserver(

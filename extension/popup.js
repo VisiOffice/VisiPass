@@ -1,21 +1,26 @@
 import { ask } from "./native.js";
+import { MARK, hue, icon, siteIcon } from "./icons.js";
 
-// The toolbar popup: logins for this site (or a search), and for each one a
-// details view and an editor, like the app's. The popup is the extension's own
-// page, which no website can reach, so it shows values and saves changes
-// without asking, as the desktop app does. Fills and new two-factor codes run
-// in the background worker, which outlives the popup.
+// The toolbar popup: logins for this site (or a search) on the left, and the
+// selected one's details and editor on the right, like the app's. The popup is
+// the extension's own page, which no website can reach, so it shows values and
+// saves changes without asking, as the desktop app does. Fills and new
+// two-factor codes run in the background worker, which outlives the popup.
 
 const list = document.getElementById("logins");
 const search = document.getElementById("search");
+const clear = document.getElementById("clear");
 const status = document.getElementById("status");
 const site = document.getElementById("site");
-const listView = document.getElementById("list-view");
-const itemView = document.getElementById("item-view");
+const pane = document.getElementById("item-view");
 let tab = null;
 let logins = [];
 let selected = 0;
 let ticker = null;
+// The login whose details the pane shows ("vault/id"), and items already read.
+let shown = null;
+const items = new Map();
+let previewTimer = null;
 
 function say(text, isError = false) {
   status.textContent = text;
@@ -35,7 +40,59 @@ function button(label, cls, act) {
   return b;
 }
 
+// A button with an icon and an optional label.
+function iconButton(name, label, cls, act, title = label) {
+  const b = el("button", cls);
+  b.innerHTML = icon(name);
+  if (label) b.append(label);
+  if (title) b.title = title;
+  b.addEventListener("click", act);
+  return b;
+}
+
 const onPage = () => tab && /^https?:/.test(tab.url || "");
+const keyOf = (login) => `${login.vault}/${login.id}`;
+
+function hostOf(login, item) {
+  if (login?.host) return login.host;
+  const href = item?.urls?.[0]?.href;
+  if (!href) return "";
+  try {
+    return new URL(/^[a-z][a-z0-9+.-]*:/i.test(href) ? href : `https://${href}`).host.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
+// The site's icon, or the title's first letter on a colour of its own.
+function avatar(title, host, large = false) {
+  const box = el("div", `avatar${large ? " large" : ""}`, (title || "?").trim().charAt(0).toUpperCase() || "?");
+  box.style.setProperty("--h", hue(title));
+  siteIcon(host).then((src) => {
+    if (!src) return;
+    const img = el("img");
+    img.src = src;
+    img.alt = "";
+    box.replaceChildren(img);
+    box.classList.add("icon");
+  });
+  return box;
+}
+
+function setPane(...children) {
+  clearInterval(ticker);
+  pane.replaceChildren(...children);
+  pane.scrollTop = 0;
+}
+
+function empty(text) {
+  shown = null;
+  const box = el("div", "empty");
+  const mark = el("span", "brand");
+  mark.innerHTML = MARK;
+  box.append(mark, el("div", "", text));
+  setPane(box);
+}
 
 // ---- The list ----
 
@@ -43,15 +100,25 @@ function render() {
   list.replaceChildren(
     ...logins.map((login, i) => {
       const li = el("li", i === selected ? "selected" : "");
-      const title = el("div", "title", login.title);
-      if (login.exact) title.append(el("span", "exact", "this site"));
-      const sub = el("div", "sub", [login.username, login.host, login.vaultName].filter(Boolean).join(" · "));
-      li.append(title, sub);
-      li.addEventListener("click", () => openItem(login));
+      const text = el("div", "text");
+      const title = el("div", "title");
+      if (login.exact) title.insertAdjacentHTML("beforeend", icon("home"));
+      title.append(el("span", "", login.title));
+      if (login.exact) title.title = "Saved for this site";
+      text.append(title, el("div", "sub", login.username || login.host || login.vaultName || ""));
+      li.append(avatar(login.title, login.host), text);
+      li.addEventListener("click", () => select(i));
+      li.addEventListener("dblclick", () => choose(login));
       return li;
     }),
   );
   list.children[selected]?.scrollIntoView({ block: "nearest" });
+}
+
+function select(i) {
+  selected = i;
+  render();
+  preview(logins[i]);
 }
 
 async function choose(login, force = false) {
@@ -77,16 +144,23 @@ async function choose(login, force = false) {
 
 let timer = null;
 search.addEventListener("input", () => {
+  clear.hidden = !search.value;
   clearTimeout(timer);
   timer = setTimeout(load, 150);
 });
 search.addEventListener("keydown", (e) => {
-  if (e.key === "ArrowDown") { selected = Math.min(selected + 1, logins.length - 1); render(); e.preventDefault(); }
-  if (e.key === "ArrowUp") { selected = Math.max(selected - 1, 0); render(); e.preventDefault(); }
+  if (e.key === "ArrowDown" && logins.length) { select(Math.min(selected + 1, logins.length - 1)); e.preventDefault(); }
+  if (e.key === "ArrowUp" && logins.length) { select(Math.max(selected - 1, 0)); e.preventDefault(); }
   if (e.key === "Enter") { choose(logins[selected]); e.preventDefault(); }
-  if (e.key === "ArrowRight" && logins[selected]) { openItem(logins[selected]); e.preventDefault(); }
-  if (e.key === "Escape" && search.value) { search.value = ""; load(); e.preventDefault(); }
+  if (e.key === "Escape" && search.value) { resetSearch(); e.preventDefault(); }
 });
+function resetSearch() {
+  search.value = "";
+  clear.hidden = true;
+  load();
+  search.focus();
+}
+clear.addEventListener("click", resetSearch);
 document.getElementById("open").addEventListener("click", (e) => {
   e.preventDefault();
   ask({ type: "open-app" }).then(() => window.close()).catch((error) => say(error.message, true));
@@ -98,16 +172,20 @@ async function load() {
   if (!query && !onPage()) {
     logins = [];
     render();
-    site.textContent = "Search your logins above, or + to add one.";
+    site.textContent = "Search";
+    empty("Search your logins above, or + to add one.");
     return;
   }
   try {
     const result = query ? await ask({ type: "search", query }) : await ask({ type: "match", url: tab.url, unlock: true });
     logins = result.logins;
-    selected = 0;
-    site.textContent = query ? `Search results for “${query}”` : logins.length ? `Logins for ${result.host}` : `No saved logins for ${result.host || "this page"}. Search above, or + to add one.`;
+    // Keep the login the pane shows selected when the list reloads.
+    selected = Math.max(0, logins.findIndex((l) => keyOf(l) === shown));
+    site.textContent = query ? `Results for “${query}”` : `Logins for ${result.host || "this page"}`;
     say("");
     render();
+    if (logins.length) preview(logins[selected]);
+    else empty(query ? "Nothing matches. Try another search, or + to add a login." : `No saved logins for ${result.host || "this page"}. Search above, or + to add one.`);
   } catch (error) {
     say(error.message, true);
   }
@@ -123,113 +201,152 @@ const isCustom = (f) => !isUser(f) && !isPassword(f) && !isNotes(f) && !isOtp(f)
 const concealed = (f) => f.type === "CONCEALED" || isPassword(f);
 const value = (item, test) => item.fields?.find(test)?.value || "";
 
-function show(view) {
-  clearInterval(ticker);
-  listView.hidden = view !== "list";
-  itemView.hidden = view === "list";
-  if (view === "list") search.focus();
+// Shows `login` in the pane: its header at once, the full item once the
+// selection has settled, so arrowing through the list does not read every item.
+function preview(login) {
+  clearTimeout(previewTimer);
+  if (!login) return;
+  const key = keyOf(login);
+  if (shown === key && pane.querySelector(".item-head")) return;
+  shown = key;
+  if (items.has(key)) return details(items.get(key), login);
+  setPane(head(login.title, hostOf(login), [login.vaultName, "Login"]), actions(login, null));
+  previewTimer = setTimeout(() => openItem(login), 180);
 }
 
 async function openItem(login) {
-  show("item");
-  itemView.replaceChildren(el("div", "note", "Opening…"));
+  const key = keyOf(login);
   try {
-    details(await ask({ type: "item", item: login.id, vault: login.vault }), login);
+    const item = await ask({ type: "item", item: login.id, vault: login.vault });
+    items.set(key, item);
+    if (shown === key) details(item, login);
   } catch (error) {
-    itemView.replaceChildren(back(), el("div", "note error", error.message));
+    if (shown === key) setPane(head(login.title, hostOf(login), []), el("div", "note error", error.message));
   }
 }
 
-function back(label = "‹ Back", act = () => show("list")) {
-  return button(label, "back", act);
+function head(title, host, meta, extra = null) {
+  const box = el("div", "item-head");
+  const text = el("div", "text");
+  text.append(el("div", "item-title", title), el("div", "meta", meta.filter(Boolean).join(" · ")));
+  box.append(avatar(title, host, true), text);
+  if (extra) box.append(extra);
+  return box;
 }
 
-function copy(text, note) {
-  navigator.clipboard.writeText(text).then(
-    () => flash(note, "Copied"),
-    () => flash(note, "Could not copy"),
-  );
+function actions(login, item) {
+  const tools = el("div", "tools");
+  if (onPage()) tools.append(iconButton("key", "Fill", "pill primary", () => choose(login), "Fill this login on the page"));
+  if (item) tools.append(iconButton("edit", "Edit", "pill", () => editor(item)));
+  return tools;
 }
 
-function flash(target, text) {
-  const was = target.textContent;
-  target.textContent = text;
-  setTimeout(() => (target.textContent = was), 1200);
+function copy(text, target) {
+  const was = target.innerHTML;
+  const done = (ok) => {
+    target.innerHTML = icon(ok ? "check" : "close");
+    target.classList.add("done");
+    setTimeout(() => {
+      target.innerHTML = was;
+      target.classList.remove("done");
+    }, 1200);
+  };
+  navigator.clipboard.writeText(text).then(() => done(true), () => done(false));
 }
 
-// A labelled value with Copy, and Show for a hidden one.
-function row(label, text, hidden = false) {
+// One line of a card: an icon, a label over its value, and Copy (and Show for
+// a hidden value).
+function row(iconName, label, text, { hidden = false, link = null } = {}) {
   const box = el("div", "field");
-  const name = el("div", "label", label);
-  const shown = el("div", hidden ? "value mono" : "value", hidden ? "••••••••••" : text);
-  const actions = el("div", "actions");
+  box.insertAdjacentHTML("beforeend", icon(iconName));
+  const body = el("div", "text");
+  const dots = "•".repeat(12);
+  const shownValue = el(link ? "a" : "div", hidden ? "value secret" : "value", hidden ? dots : text);
+  if (link) shownValue.addEventListener("click", link);
+  body.append(el("div", "label", label), shownValue);
+  const tools = el("div", "actions");
   if (hidden) {
     let visible = false;
-    actions.append(
-      button("Show", "small", (e) => {
-        visible = !visible;
-        shown.textContent = visible ? text : "••••••••••";
-        e.target.textContent = visible ? "Hide" : "Show";
-      }),
-    );
+    const eye = iconButton("eye", "", "iconbtn", () => {
+      visible = !visible;
+      shownValue.textContent = visible ? text : dots;
+      eye.innerHTML = icon(visible ? "eyeOff" : "eye");
+      eye.title = visible ? "Hide" : "Show";
+    }, "Show");
+    tools.append(eye);
   }
-  actions.append(button("Copy", "small", (e) => copy(text, e.target)));
-  box.append(name, shown, actions);
+  if (!link) tools.append(iconButton("copy", "", "iconbtn", (e) => copy(text, e.currentTarget), "Copy"));
+  box.append(body, tools);
   return box;
 }
 
 function details(item, login) {
   login ||= { id: item.id, vault: item.vault.id, title: item.title };
-  const header = el("div", "item-head");
-  const star = button(item.favorite ? "★" : "☆", "icon star", async () => {
+  shown = keyOf(login);
+  const star = iconButton(item.favorite ? "starFilled" : "star", "", `iconbtn${item.favorite ? " on" : ""}`, async () => {
     try {
       await ask({ type: "favorite", item: item.id, vault: item.vault.id, favorite: !item.favorite });
       item.favorite = !item.favorite;
-      star.textContent = item.favorite ? "★" : "☆";
+      star.innerHTML = icon(item.favorite ? "starFilled" : "star");
+      star.classList.toggle("on", item.favorite);
+      star.title = item.favorite ? "Remove from favourites" : "Add to favourites";
     } catch (error) {
       say(error.message, true);
     }
-  });
-  header.append(back(), el("div", "item-title", item.title), star);
-  const meta = el("div", "note", [item.vault?.name, item.category?.toLowerCase().replace("_", " ")].filter(Boolean).join(" · "));
-  const tools = el("div", "tools");
-  if (onPage()) tools.append(button("Fill", "primary", () => choose(login)));
-  tools.append(button("Edit", "", () => editor(item)));
-  const fields = el("div", "fields");
+  }, item.favorite ? "Remove from favourites" : "Add to favourites");
+  const category = item.category ? item.category.charAt(0) + item.category.slice(1).toLowerCase().replace("_", " ") : "";
+  const parts = [head(item.title, hostOf(login, item), [item.vault?.name, category], star), actions(login, item)];
+
+  const main = el("div", "card");
   const user = value(item, isUser);
-  if (user) fields.append(row("username", user));
+  if (user) main.append(row("user", "Username", user));
   const password = value(item, isPassword);
-  if (password) fields.append(row("password", password, true));
+  if (password) main.append(row("key", "Password", password, { hidden: true }));
   const otp = item.fields?.find(isOtp);
-  if (otp?.value) fields.append(otpRow(otp.value));
-  for (const f of (item.fields || []).filter(isCustom)) {
-    if (!f.value) continue;
-    const label = [f.section?.label, f.label || f.id].filter(Boolean).join(" · ");
-    fields.append(row(label, f.value, concealed(f)));
+  if (otp?.value) main.append(otpRow(otp.value));
+  if (main.children.length) parts.push(main);
+
+  const custom = (item.fields || []).filter((f) => isCustom(f) && f.value);
+  if (custom.length) {
+    const box = el("div", "card");
+    for (const f of custom) {
+      const label = [f.section?.label, f.label || f.id].filter(Boolean).join(" · ");
+      box.append(row(concealed(f) ? "lock" : "field", label, f.value, { hidden: concealed(f) }));
+    }
+    parts.push(box);
   }
-  for (const u of item.urls || []) {
-    const box = el("div", "field");
-    const link = el("a", "value", u.href);
-    link.href = "#";
-    link.addEventListener("click", (e) => {
-      e.preventDefault();
-      const href = /^[a-z][a-z0-9+.-]*:/i.test(u.href) ? u.href : `https://${u.href}`;
-      if (/^https?:/i.test(href)) chrome.tabs.create({ url: href });
-    });
-    box.append(el("div", "label", u.label || "website"), link, el("div", "actions"));
-    fields.append(box);
+
+  if (item.urls?.length) {
+    const box = el("div", "card");
+    for (const u of item.urls) {
+      box.append(
+        row("globe", u.label || "Website", u.href, {
+          link: () => {
+            const href = /^[a-z][a-z0-9+.-]*:/i.test(u.href) ? u.href : `https://${u.href}`;
+            if (/^https?:/i.test(href)) chrome.tabs.create({ url: href });
+          },
+        }),
+      );
+    }
+    parts.push(box);
   }
+
   const notes = value(item, isNotes);
   if (notes) {
-    const box = el("div", "field");
-    box.append(el("div", "label", "notes"), el("div", "value notes", notes), el("div", "actions"));
-    fields.append(box);
+    const box = el("div", "card");
+    const line = el("div", "field");
+    line.insertAdjacentHTML("beforeend", icon("note"));
+    const body = el("div", "text");
+    body.append(el("div", "label", "Note"), el("div", "value notes", notes));
+    line.append(body);
+    box.append(line);
+    parts.push(box);
   }
-  if (!otp && onPage()) {
-    fields.append(button("+ Add a two-factor code from this page", "link", () => addTotp(login)));
-  }
-  if (item.updated_at) fields.append(el("div", "note", `Changed ${new Date(item.updated_at).toLocaleString()}`));
-  itemView.replaceChildren(header, meta, tools, fields);
+
+  if (!otp && onPage()) parts.push(button("+ Add a two-factor code from this page", "link", () => addTotp(login)));
+  if (item.updated_at) parts.push(el("div", "note", `Changed ${new Date(item.updated_at).toLocaleString()}`));
+  setPane(...parts);
+  if (otp?.value) startTicker();
 }
 
 // ---- One-time codes, computed here (RFC 6238) ----
@@ -283,26 +400,39 @@ async function totpNow(text) {
   return { code: String(n).padStart(p.digits, "0"), left: p.period - (now % p.period) };
 }
 
+// The live code; `startTicker` updates it once the pane is showing.
+let tick = null;
 function otpRow(secret) {
   const box = el("div", "field");
+  box.insertAdjacentHTML("beforeend", icon("clock"));
+  const body = el("div", "text");
+  const label = el("div", "label", "One-time code ");
+  const left = el("span", "countdown", "");
+  label.append(left);
   const code = el("div", "value code", "…");
-  const left = el("span", "left", "");
-  const copyButton = button("Copy", "small", (e) => copy(code.textContent, e.target));
-  const tick = () =>
+  body.append(label, code);
+  let digits = "";
+  const tools = el("div", "actions");
+  tools.append(iconButton("copy", "", "iconbtn", (e) => digits && copy(digits, e.currentTarget), "Copy"));
+  box.append(body, tools);
+  tick = () =>
     totpNow(secret).then(
       (t) => {
-        code.textContent = t.code;
+        digits = t.code;
+        // Shown in two halves, as authenticator apps do; copied without the space.
+        const half = Math.ceil(t.code.length / 2);
+        code.textContent = `${t.code.slice(0, half)} ${t.code.slice(half)}`;
         left.textContent = `${t.left}s`;
       },
       () => (code.textContent = "Not a valid code secret"),
     );
+  return box;
+}
+
+function startTicker() {
+  clearInterval(ticker);
   tick();
   ticker = setInterval(tick, 1000);
-  const label = el("div", "label", "one-time code ");
-  label.append(left);
-  box.append(label, code, el("div", "actions"));
-  box.lastChild.append(copyButton);
-  return box;
 }
 
 // ---- Editing, and new logins ----
@@ -320,8 +450,8 @@ function input(label, initial, { hidden = false, multiline = false } = {}) {
 }
 
 async function newLogin() {
-  show("item");
-  itemView.replaceChildren(el("div", "note", "Loading vaults…"));
+  shown = null;
+  setPane(el("div", "note", "Loading vaults…"));
   try {
     const { vaults } = await ask({ type: "vaults" });
     const { saveVault } = await chrome.storage.local.get("saveVault");
@@ -343,20 +473,25 @@ async function newLogin() {
       vaults,
     );
   } catch (error) {
-    itemView.replaceChildren(back(), el("div", "note error", error.message));
+    setPane(el("div", "note error", error.message));
   }
 }
 
+// Back to whatever the list has selected.
+function leaveEditor() {
+  shown = null;
+  if (logins[selected]) preview(logins[selected]);
+  else empty("Search your logins above, or + to add one.");
+}
+
 function editor(item, vaults = null) {
-  clearInterval(ticker);
   const isNew = !item.id;
   const header = el("div", "item-head");
-  header.append(
-    back("Cancel", () => (isNew ? show("list") : details(item))),
-    el("div", "item-title", isNew ? "New login" : "Edit"),
-  );
-  const form = el("div", "fields");
-  const title = input("title", item.title);
+  const text = el("div", "text");
+  text.append(el("div", "item-title", isNew ? "New login" : `Edit ${item.title}`), el("div", "meta", item.vault?.name || ""));
+  header.append(avatar(item.title, hostOf(null, item), true), text);
+  const form = el("div", "form");
+  const title = input("Title", item.title);
   form.append(title.box);
   let vaultSelect = null;
   if (isNew && vaults) {
@@ -368,11 +503,11 @@ function editor(item, vaults = null) {
       option.selected = v.id === item.vault.id;
       vaultSelect.append(option);
     }
-    box.append(el("span", "label", "vault"), vaultSelect);
+    box.append(el("span", "label", "Vault"), vaultSelect);
     form.append(box);
   }
-  const username = input("username", value(item, isUser));
-  const password = input("password", value(item, isPassword), { hidden: true });
+  const username = input("Username", value(item, isUser));
+  const password = input("Password", value(item, isPassword), { hidden: true });
   const passwordTools = el("div", "inline-tools");
   passwordTools.append(
     button("Generate", "small", async () => {
@@ -400,17 +535,17 @@ function editor(item, vaults = null) {
     field.value = href;
     field.placeholder = "https://example.com";
     siteInputs.push(field);
-    line.append(field, button("×", "small", () => {
+    line.append(field, iconButton("close", "", "iconbtn", () => {
       siteInputs.splice(siteInputs.indexOf(field), 1);
       line.remove();
-    }));
+    }, "Remove"));
     sites.insertBefore(line, sites.lastChild);
   };
-  sites.append(el("span", "label", "websites"), button("+ Add website", "link", () => addSite()));
+  sites.append(el("span", "label", "Websites"), button("+ Add website", "link", () => addSite()));
   for (const u of item.urls || []) addSite(u.href);
   form.append(sites);
 
-  const otp = input("one-time code secret (otpauth:// link or setup key)", value(item, isOtp), { hidden: true });
+  const otp = input("One-time code secret (otpauth:// link or setup key)", value(item, isOtp), { hidden: true });
   form.append(otp.box);
 
   // Custom fields: label, value, and whether the value is hidden.
@@ -420,17 +555,17 @@ function editor(item, vaults = null) {
     const line = el("div", "line");
     const label = el("input");
     label.value = field.label || field.id || "";
-    label.placeholder = "label";
+    label.placeholder = "Label";
     const text = el("input");
     text.type = concealed(field) ? "password" : "text";
     text.value = field.value || "";
-    text.placeholder = concealed(field) ? "hidden value" : "value";
+    text.placeholder = concealed(field) ? "Hidden value" : "Value";
     const entry = { field, label, text };
     rows.push(entry);
-    line.append(label, text, button("×", "small", () => {
+    line.append(label, text, iconButton("close", "", "iconbtn", () => {
       rows.splice(rows.indexOf(entry), 1);
       line.remove();
-    }));
+    }, "Remove"));
     custom.insertBefore(line, custom.lastChild);
   };
   const adders = el("div", "inline-tools");
@@ -439,11 +574,11 @@ function editor(item, vaults = null) {
     button("+ Text field", "link", () => addField(fresh("STRING"))),
     button("+ Hidden field", "link", () => addField(fresh("CONCEALED"))),
   );
-  custom.append(el("span", "label", "other fields"), adders);
+  custom.append(el("span", "label", "Other fields"), adders);
   for (const f of (item.fields || []).filter(isCustom)) addField(f);
   form.append(custom);
 
-  const notes = input("notes", value(item, isNotes), { multiline: true });
+  const notes = input("Note", value(item, isNotes), { multiline: true });
   form.append(notes.box);
 
   const note = el("div", "note");
@@ -484,24 +619,26 @@ function editor(item, vaults = null) {
       note.textContent = "Saving…";
       note.className = "note";
       const saved = await ask({ type: "save-item", data: next });
-      matchesChanged();
-      details(saved);
+      const login = { id: saved.id, vault: saved.vault.id, title: saved.title };
+      items.set(keyOf(login), saved);
+      details(saved, logins.find((l) => keyOf(l) === keyOf(login)) || login);
+      load();
     } catch (error) {
       note.textContent = error.message;
       note.className = "note error";
     }
   };
   const tools = el("div", "tools");
-  tools.append(button(isNew ? "Save" : "Save changes", "primary", save));
+  tools.append(button(isNew ? "Save" : "Save changes", "pill primary", save), button("Cancel", "pill", () => (isNew ? leaveEditor() : details(item))));
   if (!isNew) {
-    const archive = button("Move to archive", "danger", () => {
+    const archive = button("Move to archive", "pill danger", () => {
       archive.replaceWith(
-        el("span", "note", "Archive it? "),
-        button("Yes, archive", "danger", async () => {
+        el("span", "note", "Archive it?"),
+        button("Yes, archive", "pill danger", async () => {
           try {
             await ask({ type: "archive", item: item.id, vault: item.vault.id });
-            matchesChanged();
-            show("list");
+            items.delete(`${item.vault.id}/${item.id}`);
+            shown = null;
             await load();
             say(`Moved “${item.title}” to the archive. Restore it from the VisiPass app.`);
           } catch (error) {
@@ -509,18 +646,14 @@ function editor(item, vaults = null) {
             note.className = "note error";
           }
         }),
-        button("No", "small", () => editor(item, vaults)),
+        button("No", "pill", () => editor(item, vaults)),
       );
     });
     tools.append(archive);
   }
-  itemView.replaceChildren(header, form, tools, note);
+  tools.style.marginTop = "14px";
+  setPane(header, form, tools, note);
   title.field.focus();
-}
-
-// The list reflects a change the next time it loads.
-function matchesChanged() {
-  load();
 }
 
 // Adds a two-factor code to `login` from the QR code on the page (a screenshot
@@ -534,22 +667,29 @@ async function addTotp(login) {
     if (!reply.ok) throw new Error(reply.error);
     window.close();
   } catch (error) {
-    show("list");
     say(error.message, true);
   }
 }
 
 async function start() {
+  document.getElementById("brand").innerHTML = MARK;
+  document.getElementById("search-icon").innerHTML = icon("search");
+  document.getElementById("new").innerHTML = icon("plus");
+  clear.innerHTML = icon("close");
   [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   ask({ type: "theme" })
     .then((theme) => {
       for (const [key, value] of Object.entries(theme)) {
-        if (value) document.documentElement.style.setProperty(`--${key === "background" ? "bg" : key === "foreground" ? "fg" : key}`, key === "font" ? `"${value}", monospace` : value);
+        if (!value) continue;
+        // The theme's font is a monospace one: it sets passwords and codes only.
+        const name = { background: "bg", foreground: "fg", font: "mono" }[key] || key;
+        document.documentElement.style.setProperty(`--${name}`, key === "font" ? `"${value}", ui-monospace, monospace` : value);
       }
     })
     .catch(() => {});
   if (!onPage()) {
-    site.textContent = "Search your logins above.";
+    site.textContent = "Search";
+    empty("Search your logins above, or + to add one.");
     search.focus();
     return;
   }

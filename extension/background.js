@@ -1,3 +1,4 @@
+import { siteIcon } from "./icons.js";
 import { ask, fill } from "./native.js";
 
 // Fills and saves run here, not in the popup: the popup closes as soon as the
@@ -149,7 +150,9 @@ async function handle(message, sender) {
     case "page-logins": {
       if (!fromPage) throw new Error("Not a page");
       const result = await matchFor(sender.url, Boolean(message.unlock));
-      return { logins: result.logins, locked: Boolean(result.locked) };
+      // Site icons come from Chrome's favicon cache, which pages cannot read.
+      const logins = await Promise.all((result.logins || []).map(async (login) => ({ ...login, icon: await siteIcon(login.host) })));
+      return { logins, locked: Boolean(result.locked) };
     }
     case "page-fill": {
       if (!fromPage) throw new Error("Not a page");

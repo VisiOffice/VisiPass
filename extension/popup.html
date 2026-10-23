@@ -5,18 +5,24 @@
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
-    <div id="list-view">
-      <header>
-        <img src="icons/visipass-32.png" alt="" />
+    <header class="bar">
+      <span id="brand" class="brand"></span>
+      <label class="search">
+        <span id="search-icon"></span>
         <input id="search" type="search" placeholder="Search logins" autocomplete="off" spellcheck="false" />
-        <button id="new" class="icon" title="New login">+</button>
-      </header>
-      <div id="site"></div>
-      <ul id="logins"></ul>
-      <div id="status"></div>
-      <footer><span>↑↓ choose · Enter fills · click for details</span><a id="open" href="#">Open VisiPass</a></footer>
-    </div>
-    <div id="item-view" hidden></div>
+        <button id="clear" class="clear" title="Clear search" hidden></button>
+      </label>
+      <button id="new" class="round primary" title="New login"></button>
+    </header>
+    <main>
+      <section class="list-pane">
+        <div id="site" class="section-label"></div>
+        <ul id="logins"></ul>
+        <div id="status"></div>
+        <footer><span>↑↓ choose · Enter fills</span><a id="open" href="#">Open VisiPass</a></footer>
+      </section>
+      <section id="item-view" class="detail-pane"></section>
+    </main>
     <script type="module" src="popup.js"></script>
   </body>
 </html>
