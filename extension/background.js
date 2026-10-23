@@ -49,6 +49,11 @@ const clearOffer = (tabId) => chrome.storage.session.remove(offerKey(tabId));
 const userKey = (tabId) => `user:${tabId}`;
 chrome.tabs.onRemoved.addListener((tabId) => chrome.storage.session.remove([offerKey(tabId), userKey(tabId)]));
 
+async function isQuiet(origin) {
+  const { quiet = [] } = await chrome.storage.local.get("quiet");
+  return quiet.includes(origin);
+}
+
 async function neverSave(origin) {
   const { never = [] } = await chrome.storage.local.get("never");
   return never.includes(origin);
@@ -152,7 +157,29 @@ async function handle(message, sender) {
       const result = await matchFor(sender.url, Boolean(message.unlock));
       // Site icons come from Chrome's favicon cache, which pages cannot read.
       const logins = await Promise.all((result.logins || []).map(async (login) => ({ ...login, icon: await siteIcon(login.host) })));
-      return { logins, locked: Boolean(result.locked) };
+      return { logins, locked: Boolean(result.locked), quiet: await isQuiet(new URL(sender.url).origin) };
+    }
+    // From the inline menu's ⋮: don't open the menu by itself on this site.
+    case "page-quiet": {
+      if (!fromPage) throw new Error("Not a page");
+      const origin = new URL(sender.url).origin;
+      const { quiet = [] } = await chrome.storage.local.get("quiet");
+      const next = message.quiet ? [...new Set([...quiet, origin])] : quiet.filter((o) => o !== origin);
+      await chrome.storage.local.set({ quiet: next });
+      return {};
+    }
+    case "page-search": {
+      if (!fromPage) throw new Error("Not a page");
+      try {
+        await chrome.action.openPopup({ windowId: sender.tab.windowId });
+      } catch {
+        throw new Error("Click the VisiPass button in the toolbar to search all logins.");
+      }
+      return {};
+    }
+    case "page-open-app": {
+      if (!fromPage) throw new Error("Not a page");
+      return await ask({ type: "open-app" });
     }
     case "page-fill": {
       if (!fromPage) throw new Error("Not a page");

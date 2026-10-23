@@ -28,9 +28,18 @@
         --mono: ui-monospace, monospace;
         --surface: color-mix(in srgb, var(--fg) 6%, var(--bg)); --surface-2: color-mix(in srgb, var(--fg) 11%, var(--bg));
         --line: color-mix(in srgb, var(--fg) 14%, transparent); }
+      @media (prefers-color-scheme: light) {
+        :host { --bg:#ffffff; --fg:#1f2328; --accent:#2f6fde; --muted:#5f6b7a; --danger:#c93c4a; }
+      }
       * { box-sizing: border-box; }`;
   const KEY =
     '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="4.5"/><path d="m10.7 12.3 9.3-9.3M17 6l3 3M14.5 8.5l2 2"/></svg>';
+  const DOTS =
+    '<svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg>';
+  const EYE_OFF =
+    '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l18 18M10.6 5.1A10 10 0 0 1 12 5c6.5 0 10 7 10 7a17 17 0 0 1-3.2 4M6.6 6.6A17 17 0 0 0 2 12s3.5 7 10 7a10 10 0 0 0 5.4-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>';
+  const SEARCH =
+    '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>';
   const LOCK =
     '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>';
 
@@ -46,7 +55,10 @@
   function avatar(title, src, glyph) {
     const box = el("div", "avatar");
     box.style.setProperty("--h", hue(title));
-    if (glyph) box.innerHTML = glyph;
+    if (glyph) {
+      box.innerHTML = glyph;
+      box.classList.add("glyph");
+    }
     else if (src && /^data:image\//.test(src)) {
       const img = el("img");
       img.src = src;
@@ -136,6 +148,10 @@
   // "login", "new" (suggest a password) or "otp" (fill a two-factor code).
   let mode = "login";
   let suggestion = null;
+  // The ⋮ menu is showing instead of the logins.
+  let options = false;
+  // This site asked not to open the menu by itself; the mark still shows.
+  let quiet = false;
 
   function ensureUi() {
     if (host) return;
@@ -164,10 +180,15 @@
       .status.error { color: var(--danger); }
       .sub.secret { color: var(--accent); font: 13px/1.4 var(--mono); letter-spacing: .02em; }
       .avatar { --h: 200; width: 32px; height: 32px; border-radius: 8px; flex: none; display: grid; place-items: center; overflow: hidden;
-        font-weight: 700; font-size: 14px; background: hsl(var(--h) 50% 55% / .2); color: hsl(var(--h) 65% 74%); }
+        font-weight: 700; font-size: 14px; background: hsl(var(--h) 55% 50% / .18); color: color-mix(in srgb, hsl(var(--h) 60% 55%) 75%, var(--fg)); }
       .avatar.icon { background: #fff; }
+      .avatar.glyph { background: var(--surface-2); color: var(--fg); }
       .avatar img { width: 20px; height: 20px; display: block; }
       .avatar svg { width: 17px; height: 17px; }
+      .more { margin-left: auto; width: 24px; height: 24px; border: 0; border-radius: 7px; background: transparent; color: var(--muted);
+        display: grid; place-items: center; cursor: pointer; padding: 0; }
+      .more:hover, .more.on { background: var(--surface-2); color: var(--fg); }
+      .more svg { width: 16px; height: 16px; color: currentColor; }
     </style>
     <button class="mark" title="VisiPass">${MARK}<span class="count"></span></button>
     <div class="menu" role="listbox"></div>`;
@@ -235,8 +256,21 @@
     const head = el("div", "head");
     head.innerHTML = MARK;
     head.append(
-      locked ? "VisiPass is locked" : mode === "new" ? "Password" : mode === "otp" ? "Fill the code from…" : "Log in as…",
+      locked ? "VisiPass is locked" : options ? "VisiPass" : mode === "new" ? "Password" : mode === "otp" ? "Fill the code from…" : "Log in as…",
     );
+    if (!locked) {
+      const more = el("button", `more${options ? " on" : ""}`);
+      more.innerHTML = DOTS;
+      more.title = options ? "Back" : "More";
+      more.addEventListener("mousedown", (e) => {
+        if (!e.isTrusted) return;
+        e.preventDefault(); // keep focus in the field
+        options = !options;
+        selected = 0;
+        renderMenu();
+      });
+      head.append(more);
+    }
     if (locked) {
       const row = el("div", "item selected");
       row.setAttribute("role", "option");
@@ -256,7 +290,10 @@
       const row = el("div", `item${i === selected ? " selected" : ""}`);
       row.setAttribute("role", "option");
       const text = el("div", "text");
-      if (entry.kind === "generate") {
+      if (entry.kind === "option") {
+        text.append(el("div", "title", entry.title), el("div", "sub", entry.sub));
+        row.append(avatar(entry.title, null, entry.glyph), text);
+      } else if (entry.kind === "generate") {
         text.append(el("div", "title", "Use a strong password"), el("div", "sub secret", entry.password));
         row.append(avatar("password", null, KEY), text);
       } else {
@@ -279,11 +316,56 @@
   // What the menu lists: the suggested password on a new-password field, else
   // the logins for this site.
   function entries() {
+    if (options) return optionEntries();
     if (mode === "new") return suggestion ? [{ kind: "generate", password: suggestion }] : [];
     return (logins || []).map((login) => ({ kind: "login", login }));
   }
 
+  // The ⋮ menu. Each acts only from a real click or key on the visible menu,
+  // like picking a login.
+  function optionEntries() {
+    return [
+      {
+        kind: "option",
+        glyph: EYE_OFF,
+        title: quiet ? "Open on this site again" : "Don't open on this site",
+        sub: quiet ? "Show this menu when a login field is focused" : "Click the VisiPass mark to open it",
+        act: async () => {
+          await send({ kind: "page-quiet", quiet: !quiet });
+          quiet = !quiet;
+          options = false;
+          selected = 0;
+          if (quiet) {
+            if (field) dismissed.add(field);
+            renderMenu("Won't open by itself on this site. Click the mark to open it.");
+          } else renderMenu();
+        },
+      },
+      {
+        kind: "option",
+        glyph: SEARCH,
+        title: "Search all logins",
+        sub: "Opens VisiPass in the toolbar",
+        act: async () => {
+          await send({ kind: "page-search" });
+          closeMenu();
+        },
+      },
+      {
+        kind: "option",
+        glyph: MARK,
+        title: "Open VisiPass",
+        sub: "The desktop app",
+        act: async () => {
+          await send({ kind: "page-open-app" });
+          closeMenu();
+        },
+      },
+    ];
+  }
+
   function openMenu() {
+    options = false;
     if (!locked && !entries().length) return;
     menuOpen = true;
     root.querySelector(".menu").style.display = "block";
@@ -341,6 +423,14 @@
     const entry = entries()[i];
     if (!entry) return;
     selected = i;
+    if (entry.kind === "option") {
+      try {
+        await entry.act();
+      } catch (error) {
+        renderMenu(error.message, true);
+      }
+      return;
+    }
     if (entry.kind === "generate") return useSuggestion(entry.password);
     const login = entry.login;
     renderMenu("Filling… approve in VisiPass if it asks.");
@@ -393,6 +483,7 @@
     locked = Boolean(result.locked);
     logins = result.logins || [];
     suggestion = mode === "new" ? result.password : null;
+    if (mode !== "new") quiet = Boolean(result.quiet);
     if (!locked && !entries().length) return hide();
     ensureUi();
     selected = 0;
@@ -400,7 +491,7 @@
     place();
     // Open on first focus, as other managers do; not again after Esc or a fill.
     // While locked only the mark shows: unlocking waits for a click.
-    if (!locked && !dismissed.has(target) && !(mode === "new" && target.value)) openMenu();
+    if (!locked && !quiet && !dismissed.has(target) && !(mode === "new" && target.value)) openMenu();
   }
 
   document.addEventListener(
@@ -429,7 +520,10 @@
       if (e.key === "ArrowDown") selected = Math.min(selected + 1, entries().length - 1);
       else if (e.key === "ArrowUp") selected = Math.max(selected - 1, 0);
       else if (e.key === "Enter") choose(selected);
-      else if (e.key === "Escape") {
+      else if (e.key === "Escape" && options) {
+        options = false;
+        selected = 0;
+      } else if (e.key === "Escape") {
         dismissed.add(field);
         closeMenu();
       } else return;

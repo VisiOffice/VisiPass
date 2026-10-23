@@ -13,6 +13,10 @@
   --line: color-mix(in srgb, var(--fg) 11%, transparent);
   --on-accent: var(--bg);
 }
+/* Without an Omarchy theme, follow the system's light or dark mode. */
+@media (prefers-color-scheme: light) {
+  :root { --bg: #ffffff; --fg: #1f2328; --accent: #2f6fde; --muted: #5f6b7a; --well: #f3f5f8; --danger: #c93c4a; }
+}
 * { box-sizing: border-box; }
 html, body { margin: 0; }
 body { width: 680px; height: 520px; display: flex; flex-direction: column; background: var(--bg); color: var(--fg); font: 13px/1.45 var(--font); -webkit-font-smoothing: antialiased; }
@@ -61,7 +65,7 @@ footer a:hover { text-decoration: underline; }
 
 /* Avatars: the site's icon, or the title's first letter */
 .avatar { --h: 200; width: 34px; height: 34px; border-radius: 9px; flex: none; display: grid; place-items: center; overflow: hidden; font-weight: 700; font-size: 15px;
-  background: hsl(var(--h) 50% 55% / .2); color: hsl(var(--h) 65% 74%); }
+  background: hsl(var(--h) 55% 50% / .18); color: color-mix(in srgb, hsl(var(--h) 60% 55%) 75%, var(--fg)); }
 .avatar.icon { background: #fff; }
 .avatar img { width: 22px; height: 22px; display: block; }
 .avatar.large { width: 44px; height: 44px; border-radius: 11px; font-size: 19px; }
