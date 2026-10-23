@@ -208,6 +208,10 @@ async function handle(message, sender) {
       if (!topFrame) throw new Error("Not the page");
       return await answer(sender.tab.id, message.choice, message.vault);
     }
+    case "page-scheme": {
+      if (topFrame) setScheme(message.scheme);
+      return {};
+    }
     case "theme":
       theme ??= await ask({ type: "theme" }).catch(() => ({}));
       return theme;
@@ -242,6 +246,17 @@ async function handle(message, sender) {
     default:
       throw new Error(`Unknown message "${message.kind}"`);
   }
+}
+
+// The toolbar icon is a light block, made for dark toolbars; pages report the
+// browser's colour scheme (a service worker cannot see it) so a light toolbar
+// gets the dark one.
+let scheme = null; // unknown after the worker restarts, so the next report always applies
+function setScheme(next) {
+  if (next === scheme || !["dark", "light"].includes(next)) return;
+  scheme = next;
+  const name = next === "dark" ? "visipass" : "visipass-dark";
+  chrome.action.setIcon({ path: { 16: `icons/${name}-16.png`, 32: `icons/${name}-32.png` } }).catch(() => {});
 }
 
 // Ctrl+Shift+L: fill the best login for this page (exact host first).

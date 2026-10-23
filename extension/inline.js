@@ -620,6 +620,11 @@
   }
 
   if (window === window.top) {
+    // Lets the toolbar icon follow the browser's light or dark mode.
+    const dark = matchMedia("(prefers-color-scheme: dark)");
+    const report = () => send({ kind: "page-scheme", scheme: dark.matches ? "dark" : "light" }).catch(() => {});
+    report();
+    dark.addEventListener("change", report);
     chrome.runtime.onMessage.addListener((message) => {
       if (message && message.kind === "show-card") renderCard(message.card);
     });
