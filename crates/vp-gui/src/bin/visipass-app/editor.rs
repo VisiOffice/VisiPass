@@ -253,6 +253,7 @@ impl ItemEditor {
         let c = &t.controls;
         div()
             .id(gpui::ElementId::Name(id.into()))
+            .flex_none()
             .px(px(10.))
             .py(px(4.))
             .rounded(px(t.radius))
@@ -453,9 +454,23 @@ impl Render for ItemEditor {
                     .items_center()
                     .gap(px(6.))
                     .when_some(row.label.clone(), |d, label| {
-                        d.child(div().w(px(160.)).child(label))
+                        d.child(
+                            div()
+                                .w(px(160.))
+                                .min_w(px(80.))
+                                .flex()
+                                .flex_col()
+                                .child(label),
+                        )
                     })
-                    .child(div().flex_1().child(row.value.clone()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(120.))
+                            .flex()
+                            .flex_col()
+                            .child(row.value.clone()),
+                    )
                     .when(concealed, |d| {
                         let value = row.value.clone();
                         d.child(self.chip(

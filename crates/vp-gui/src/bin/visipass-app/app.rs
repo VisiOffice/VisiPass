@@ -1287,6 +1287,7 @@ impl VisiPassApp {
         if let Some(editor) = &self.editor {
             return div()
                 .flex_1()
+                .min_w(px(0.))
                 .h_full()
                 .child(editor.clone())
                 .into_any_element();
@@ -1302,6 +1303,7 @@ impl VisiPassApp {
             };
             return div()
                 .flex_1()
+                .min_w(px(0.))
                 .h_full()
                 .flex()
                 .items_center()
@@ -1311,7 +1313,7 @@ impl VisiPassApp {
                 .into_any_element();
         };
 
-        let mut fields = div().flex().flex_col().gap(px(12.));
+        let mut fields = div().min_w(px(0.)).flex().flex_col().gap(px(12.));
         for field in item
             .fields
             .iter()
@@ -1323,7 +1325,7 @@ impl VisiPassApp {
                 .unwrap_or_else(|| Secret::new(String::new()));
             let label = field.display_label();
             let key = field.id.clone();
-            let mut row = div().flex().items_center().gap(px(8.));
+            let mut row = div().min_w(px(0.)).flex().items_center().gap(px(8.));
             if field.kind == "OTP" {
                 match Totp::parse(value.expose()) {
                     Ok(totp) => {
@@ -1335,6 +1337,7 @@ impl VisiPassApp {
                             .child(
                                 div()
                                     .flex_1()
+                                    .min_w(px(0.))
                                     .text_size(px(t.size(1.333)))
                                     .text_color(t.accent)
                                     .font_weight(FontWeight::BOLD)
@@ -1373,6 +1376,7 @@ impl VisiPassApp {
                     .child(
                         div()
                             .flex_1()
+                            .min_w(px(0.))
                             .text_color(t.foreground)
                             .overflow_hidden()
                             .truncate()
@@ -1407,6 +1411,7 @@ impl VisiPassApp {
                     .child(
                         div()
                             .flex_1()
+                            .min_w(px(0.))
                             .text_color(t.foreground)
                             .when(!multiline, |d| d.truncate())
                             .child(value.expose().to_string()),
@@ -1424,6 +1429,7 @@ impl VisiPassApp {
             }
             fields = fields.child(
                 div()
+                    .min_w(px(0.))
                     .flex()
                     .flex_col()
                     .gap(px(3.))
@@ -1442,6 +1448,7 @@ impl VisiPassApp {
             let safe = href.starts_with("https://") || href.starts_with("http://");
             fields = fields.child(
                 div()
+                    .min_w(px(0.))
                     .flex()
                     .flex_col()
                     .gap(px(3.))
@@ -1464,6 +1471,7 @@ impl VisiPassApp {
                             .child(
                                 div()
                                     .flex_1()
+                                    .min_w(px(0.))
                                     .text_color(t.accent)
                                     .truncate()
                                     .child(href.clone()),
@@ -1497,7 +1505,9 @@ impl VisiPassApp {
 
         let edit_item = item.clone();
         let header = div()
+            .min_w(px(0.))
             .flex()
+            .flex_wrap()
             .items_center()
             .gap(px(12.))
             .child(
@@ -1509,6 +1519,7 @@ impl VisiPassApp {
             .child(
                 div()
                     .flex_1()
+                    .min_w(px(160.))
                     .flex()
                     .flex_col()
                     .child(
@@ -1550,6 +1561,7 @@ impl VisiPassApp {
         div()
             .id("detail")
             .flex_1()
+            .min_w(px(0.))
             .h_full()
             .overflow_y_scroll()
             .p(px(24.))

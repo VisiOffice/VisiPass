@@ -4,6 +4,9 @@
 //! (`VISIPASS_APP_FD`); only that channel may read values. Started any other
 //! way (a desktop launcher, a shell), it asks the daemon to launch the real
 //! instance and exits.
+//!
+//! `visipass-app --demo-editor` shows the item editor on a sample item, with
+//! no daemon, for checking the layout.
 
 mod app;
 mod client;
@@ -16,6 +19,10 @@ use gpui::{App, AppContext, Size, TitlebarOptions, WindowBounds, WindowOptions, 
 use std::sync::Arc;
 
 fn main() {
+    if std::env::args().any(|a| a == "--demo-editor") {
+        demo_editor();
+        return;
+    }
     let Some(client) = client::Client::inherited() else {
         if let Err(e) = client::hand_off() {
             eprintln!("visipass-app: {e}");
@@ -99,4 +106,43 @@ fn open_quick(theme: vp_gui::theme::Theme, client: Arc<client::Client>, cx: &mut
         eprintln!("visipass-app: could not open Quick Access");
         cx.quit();
     }
+}
+
+fn demo_editor() {
+    let fields: Vec<serde_json::Value> = ["POSTGRES_PASSWORD", "TRANSYT_WEBHOOK_SECRET", "B2_BACKUP_APPLICATION_KEY"]
+        .iter()
+        .map(|label| serde_json::json!({"id": label, "label": label, "type": "CONCEALED", "value": "sample-value-0123456789"}))
+        .chain([
+            serde_json::json!({"id": "username", "label": "username", "type": "STRING", "purpose": "USERNAME", "value": "robert@example.com"}),
+            serde_json::json!({"id": "password", "label": "password", "type": "CONCEALED", "purpose": "PASSWORD", "value": "sample-password"}),
+            serde_json::json!({"id": "notes", "label": "notes", "type": "STRING", "purpose": "NOTES", "value": "A long single-line note that runs well past the width of a half-screen window, to check that it never widens the pane."}),
+            serde_json::json!({"id": "key", "label": "B2_BACKUP_KEY_ID", "type": "STRING", "value": "00000000000000000000sample"}),
+        ])
+        .collect();
+    let item: vp_core::model::Item = serde_json::from_value(serde_json::json!({
+        "id": "demo",
+        "title": "Production",
+        "category": "LOGIN",
+        "vault": {"id": "v", "name": "Sample"},
+        "fields": fields,
+    }))
+    .expect("sample item");
+    let theme = vp_gui::theme::Theme::load();
+    gpui_platform::application()
+        .with_assets(vp_gui::assets::Assets)
+        .run(move |cx: &mut App| {
+            vp_gui::text_input::bind_keys(cx);
+            let options = WindowOptions {
+                app_id: Some("visipass-demo".into()),
+                window_bounds: Some(WindowBounds::centered(Size::new(px(520.), px(900.)), cx)),
+                ..Default::default()
+            };
+            let _ = cx.open_window(options, |window, cx| {
+                let vaults = vec![item.vault.clone()];
+                cx.new(|cx| {
+                    editor::ItemEditor::new(theme.clone(), item.clone(), vaults, window, cx)
+                })
+            });
+            cx.on_window_closed(|cx, _| cx.quit()).detach();
+        });
 }
