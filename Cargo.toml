@@ -38,6 +38,8 @@ hkdf = "0.12.4"
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 serde_cbor_2 = "0.13"
 rmpv = "1"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 rmp-serde = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 unicode-normalization = "0.1.25"

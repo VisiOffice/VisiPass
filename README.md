@@ -71,8 +71,8 @@ vp import proton ~/Downloads/Proton\ Pass_export.zip
                  # brings passkeys too (also into logins imported before), not from a CSV
                  # then vp app → Duplicates: logins saved twice (same site and username), exact
                  # copies first; keep one and the rest's websites, codes and notes move onto it
-vp lock          # erase the keys from memory; it also locks after 10 idle minutes,
-                 # when the screen locks, and before the machine sleeps
+vp lock          # erase the keys from memory; it also locks once the computer has been
+                 # idle for 10 minutes, when the screen locks, and before the machine sleeps
 vp quick-unlock on   # optional: for 8 hours after you type the master password, unlocking
                      # again takes your fingerprint or login password (polkit)
 vp lock --full   # lock and end that window

@@ -28,6 +28,10 @@ zeroize.workspace = true
 zbus.workspace = true
 zip = { version = "6", default-features = false, features = ["deflate"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-client.workspace = true
+wayland-protocols.workspace = true
+
 [dev-dependencies]
 qrcode = { version = "0.14", default-features = false }
 tempfile.workspace = true

@@ -6548,6 +6548,8 @@ dependencies = [
  "vp-native",
  "vp-op",
  "vp-sync",
+ "wayland-client",
+ "wayland-protocols",
  "zbus",
  "zeroize",
  "zip",

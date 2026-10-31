@@ -228,7 +228,11 @@ granted request returns.
 The daemon locks (erases AK unless a quick-unlock window is open, all derived keys, VKs and
 overviews; grants are kept but unusable) on:
 
-- idle timeout: default 10 minutes without a request, configurable;
+- idle timeout: 10 minutes without keyboard or mouse input, from the Wayland compositor's
+  ext-idle-notify (input-only notification at version 2, so a playing video does not hold the
+  vault open), as 1Password does; while the computer is in use the vault stays unlocked however
+  long it goes between requests. Without that protocol (macOS, X11, older compositors) it falls
+  back to 10 minutes without a request;
 - **suspend and hibernate**: the daemon holds a logind *delay* inhibitor for sleep and erases
   everything (including AK; quick unlock does not survive hibernation) before releasing it, so
   keys are gone before the hibernation image is written;
@@ -719,7 +723,7 @@ Implemented (2026-10-12), with tests that attack it (`crates/vp-store/tests`, `c
   inside; §7.3 history (items are archived, never deleted, so no tombstones yet); §7.4 vault and
   account manifests covering items, history, attributes and wrapped keys, checked at unlock and on
   every details read, and the sequence file against rollback.
-- §6.2 idle lock after 10 minutes, `vp lock`, screen lock (logind and Hyprland), and sleep
+- §6.2 idle lock after the computer is idle 10 minutes (ext-idle-notify; else 10 minutes unused), `vp lock`, screen lock (logind and Hyprland), and sleep
   (logind delay inhibitor, released once the keys are erased).
 - §4.3 quick unlock through polkit, off by default; `vp lock --full` ends its window.
 - Unlock prompts in the VisiPass window, three tries; `vp init` asks for the password twice and

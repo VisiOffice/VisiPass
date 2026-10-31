@@ -1,6 +1,11 @@
-//! Locks VisiPass's own vault when the screen locks or the machine sleeps.
+//! Locks VisiPass's own vault when the screen locks, the machine sleeps, or the
+//! computer has been idle (no keyboard, mouse or touch) for `vp_native::IDLE_LOCK`.
 //!
-//! Three sources, any of which locks:
+//! Four sources, any of which locks:
+//! - The Wayland compositor's idle notification (ext-idle-notify; Hyprland, Sway,
+//!   KDE, niri), as 1Password locks after the computer is idle. While it is held
+//!   the vault's own last-use timer stands down; without one (no Wayland, or a
+//!   compositor without the protocol) the vault locks after IDLE_LOCK unused.
 //! - Hyprland, asked every few seconds while the vault is unlocked. Omarchy's lock
 //!   screen tells nobody else, but Hyprland always knows a session lock is up.
 //! - logind's `Lock` signal and `LockedHint`, which other desktops send.
@@ -20,6 +25,8 @@ pub trait Lockable: Send + Sync + 'static {
     fn lock(&self);
     /// Erases the Account Key too.
     fn lock_fully(&self);
+    /// Whether the computer's idle time is being watched for it.
+    fn computer_idle_watched(&self, _watched: bool) {}
 }
 
 impl<U: vp_native::Unlock + Send + Sync + 'static> Lockable for vp_native::NativeBackend<U> {
@@ -31,6 +38,9 @@ impl<U: vp_native::Unlock + Send + Sync + 'static> Lockable for vp_native::Nativ
     }
     fn lock_fully(&self) {
         vp_native::NativeBackend::lock_fully(self)
+    }
+    fn computer_idle_watched(&self, watched: bool) {
+        vp_native::NativeBackend::computer_idle_watched(self, watched)
     }
 }
 
@@ -50,7 +60,138 @@ pub async fn watch<V: Lockable + Clone>(vault: V) {
             }
         }
     };
-    tokio::join!(polling, logind::watch(vault));
+    #[cfg(target_os = "linux")]
+    let idle = idle::watch(vault.clone(), vp_native::IDLE_LOCK);
+    #[cfg(not(target_os = "linux"))]
+    let idle = std::future::ready(());
+    tokio::join!(polling, logind::watch(vault), idle);
+}
+
+/// The computer's idle time, from the Wayland compositor.
+#[cfg(target_os = "linux")]
+pub mod idle {
+    use super::Lockable;
+    use std::time::Duration;
+    use wayland_client::globals::{GlobalListContents, registry_queue_init};
+    use wayland_client::protocol::{wl_registry, wl_seat};
+    use wayland_client::{Connection, Dispatch, Proxy, QueueHandle};
+    use wayland_protocols::ext::idle_notify::v1::client::{
+        ext_idle_notification_v1, ext_idle_notifier_v1,
+    };
+
+    /// How long to wait before looking for a compositor again.
+    const RETRY: Duration = Duration::from_secs(15);
+
+    /// Locks the vault each time the computer has been idle for `after`, for the
+    /// daemon's whole life, reconnecting when the compositor restarts.
+    pub async fn watch<V: Lockable + Clone>(vault: V, after: Duration) {
+        loop {
+            let (done, ended) = tokio::sync::oneshot::channel();
+            let watching = vault.clone();
+            // Its own thread: the Wayland loop blocks for as long as the
+            // compositor runs, and must not hold up the daemon's exit.
+            std::thread::spawn(move || {
+                let _ = run(watching, after);
+                let _ = done.send(());
+            });
+            let _ = ended.await;
+            vault.computer_idle_watched(false);
+            tokio::time::sleep(RETRY).await;
+        }
+    }
+
+    struct State<V> {
+        vault: V,
+    }
+
+    /// Connects to the session's compositor and asks to be told when the
+    /// computer has been idle for `after`. Returns when the connection ends.
+    pub fn run<V: Lockable>(vault: V, after: Duration) -> Result<(), String> {
+        let socket = crate::approval::find_display()
+            .into_iter()
+            .find(|(name, _)| *name == "WAYLAND_DISPLAY")
+            .map(|(_, path)| path)
+            .ok_or("no Wayland session")?;
+        let stream = std::os::unix::net::UnixStream::connect(&socket).map_err(|e| e.to_string())?;
+        let connection = Connection::from_socket(stream).map_err(|e| e.to_string())?;
+        let (globals, mut queue) =
+            registry_queue_init::<State<V>>(&connection).map_err(|e| e.to_string())?;
+        let qh = queue.handle();
+        let notifier: ext_idle_notifier_v1::ExtIdleNotifierV1 = globals
+            .bind(&qh, 1..=2, ())
+            .map_err(|_| "the compositor has no idle notifications")?;
+        let seat: wl_seat::WlSeat = globals.bind(&qh, 1..=1, ()).map_err(|e| e.to_string())?;
+        let ms = u32::try_from(after.as_millis()).unwrap_or(u32::MAX);
+        // Version 2 counts only input, so a video that keeps the screen awake
+        // does not keep the vault open; version 1 honours such inhibitors.
+        let _notification = if notifier.version() >= 2 {
+            notifier.get_input_idle_notification(ms, &seat, &qh, ())
+        } else {
+            notifier.get_idle_notification(ms, &seat, &qh, ())
+        };
+        connection.flush().map_err(|e| e.to_string())?;
+        vault.computer_idle_watched(true);
+        let mut state = State { vault };
+        loop {
+            queue
+                .blocking_dispatch(&mut state)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    impl<V: Lockable> Dispatch<ext_idle_notification_v1::ExtIdleNotificationV1, ()> for State<V> {
+        fn event(
+            state: &mut Self,
+            _: &ext_idle_notification_v1::ExtIdleNotificationV1,
+            event: ext_idle_notification_v1::Event,
+            _: &(),
+            _: &Connection,
+            _: &QueueHandle<Self>,
+        ) {
+            if let ext_idle_notification_v1::Event::Idled = event
+                && state.vault.is_unlocked()
+            {
+                state.vault.lock();
+                eprintln!("visipassd: the computer was idle, so the vault locked");
+            }
+        }
+    }
+
+    impl<V: Lockable> Dispatch<wl_registry::WlRegistry, GlobalListContents> for State<V> {
+        fn event(
+            _: &mut Self,
+            _: &wl_registry::WlRegistry,
+            _: wl_registry::Event,
+            _: &GlobalListContents,
+            _: &Connection,
+            _: &QueueHandle<Self>,
+        ) {
+        }
+    }
+
+    impl<V: Lockable> Dispatch<ext_idle_notifier_v1::ExtIdleNotifierV1, ()> for State<V> {
+        fn event(
+            _: &mut Self,
+            _: &ext_idle_notifier_v1::ExtIdleNotifierV1,
+            _: ext_idle_notifier_v1::Event,
+            _: &(),
+            _: &Connection,
+            _: &QueueHandle<Self>,
+        ) {
+        }
+    }
+
+    impl<V: Lockable> Dispatch<wl_seat::WlSeat, ()> for State<V> {
+        fn event(
+            _: &mut Self,
+            _: &wl_seat::WlSeat,
+            _: wl_seat::Event,
+            _: &(),
+            _: &Connection,
+            _: &QueueHandle<Self>,
+        ) {
+        }
+    }
 }
 
 /// Locks the vault whenever a Hyprland instance under `hypr_dir` reports a session lock.
@@ -213,6 +354,21 @@ mod tests {
         fn lock_fully(&self) {
             self.lock()
         }
+    }
+
+    /// Against this session's real compositor: hold still for a second.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "needs a Wayland session with ext-idle-notify"]
+    fn the_compositor_says_when_the_computer_is_idle() {
+        let vault = Vault(Arc::new(AtomicBool::new(true)));
+        let watching = vault.clone();
+        std::thread::spawn(move || idle::run(watching, Duration::from_secs(1)));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while vault.is_unlocked() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(!vault.is_unlocked());
     }
 
     /// A Hyprland that answers `j/locked` with `locked`.

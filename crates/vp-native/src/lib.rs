@@ -59,6 +59,9 @@ pub const SYNC_EVERY: Duration = Duration::from_secs(60);
 /// ones) fail at once for this long instead of each opening another prompt.
 pub const QUIET_AFTER_CANCEL: Duration = Duration::from_secs(15);
 const QUIET: &str = "VisiPass is locked: unlocking was just cancelled. Try again in a few seconds";
+/// How long the computer may sit idle before the vault locks, as 1Password's
+/// default. Without a way to see the computer's idle time (see
+/// `NativeBackend::computer_idle_watched`), the vault counts from its own last use.
 pub const IDLE_LOCK: Duration = Duration::from_secs(10 * 60);
 pub const QUICK_UNLOCK_DEFAULT: Duration = Duration::from_secs(8 * 60 * 60);
 pub const QUICK_UNLOCK_MAX: Duration = Duration::from_secs(24 * 60 * 60);
@@ -360,6 +363,9 @@ struct Inner<U> {
     quiet_after_cancel: Duration,
     /// Woken by every commit, so sync sends it at once.
     changed: Arc<tokio::sync::Notify>,
+    /// Something watches the computer's own idle time and locks the vault after
+    /// IDLE_LOCK of it; the vault's own last-use timer then stands down.
+    idle_watched: std::sync::atomic::AtomicBool,
 }
 
 impl<U> Inner<U> {
@@ -369,7 +375,8 @@ impl<U> Inner<U> {
 
     fn expire_if_idle(&self) {
         let mut state = self.state();
-        if state.opened.is_some() && state.last_use.elapsed() >= IDLE_LOCK {
+        let watched = self.idle_watched.load(std::sync::atomic::Ordering::Relaxed);
+        if state.opened.is_some() && !watched && state.last_use.elapsed() >= IDLE_LOCK {
             state.lock(false);
         }
         if state.opened.is_none() && state.kept.is_some() && !state.window_open() {
@@ -434,6 +441,7 @@ impl<U: Unlock> NativeBackend<U> {
             gate: tokio::sync::Mutex::new(()),
             quiet_after_cancel,
             changed: Arc::new(tokio::sync::Notify::new()),
+            idle_watched: std::sync::atomic::AtomicBool::new(false),
         });
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let weak: Weak<Inner<U>> = Arc::downgrade(&inner);
@@ -471,6 +479,19 @@ impl<U: Unlock> NativeBackend<U> {
 
     pub fn is_unlocked(&self) -> bool {
         self.inner.state().opened.is_some()
+    }
+
+    /// Whether the computer's own idle time is watched (true while the daemon
+    /// holds a compositor's idle notification). Then the vault locks after
+    /// IDLE_LOCK without keyboard or mouse, however long since VisiPass was last
+    /// used; otherwise after IDLE_LOCK without a request.
+    pub fn computer_idle_watched(&self, watched: bool) {
+        // Either way the last-use timer starts again from now, so a watch that
+        // ends does not lock at once for a request made long ago.
+        self.inner.state().last_use = Instant::now();
+        self.inner
+            .idle_watched
+            .store(watched, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Locks. Within a quick-unlock window the Account Key stays, so the next
