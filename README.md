@@ -67,7 +67,8 @@ Give your agent `skills/visipass/SKILL.md`.
 vp init          # choose a master password in the VisiPass window; it shows your Secret Key once
 vp import op     # copy your 1Password vaults in; op:// references keep working
 vp import proton ~/Downloads/Proton\ Pass_export.zip
-                 # Proton Pass → Settings → Export → ZIP (or CSV); asks first, skips what is already here
+                 # Proton Pass → Settings → Export → ZIP (or CSV); asks first, skips what is already here;
+                 # brings passkeys too (also into logins imported before), not from a CSV
                  # then vp app → Duplicates: logins saved twice (same site and username), exact
                  # copies first; keep one and the rest's websites, codes and notes move onto it
 vp lock          # erase the keys from memory; it also locks after 10 idle minutes,

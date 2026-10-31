@@ -12,6 +12,7 @@ getrandom.workspace = true
 hmac.workspace = true
 p256.workspace = true
 psl.workspace = true
+rmpv.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha1.workspace = true
@@ -20,4 +21,5 @@ url.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+rmp-serde.workspace = true
 serde_cbor_2.workspace = true

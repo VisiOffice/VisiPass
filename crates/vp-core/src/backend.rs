@@ -134,6 +134,17 @@ pub trait Backend: Send + Sync + 'static {
         async { Err(Failure::new(NO_NATIVE)) }
     }
 
+    /// Adds an export's passkeys to a login already in the native vault,
+    /// leaving out any it holds. Returns how many it added.
+    fn native_add_imported_passkeys(
+        &self,
+        _vault_id: &str,
+        _item_id: &str,
+        _passkeys: Vec<crate::passkey::Imported>,
+    ) -> impl Future<Output = Result<usize, Failure>> + Send {
+        async { Err(Failure::new(NO_NATIVE)) }
+    }
+
     /// The passkeys saved for `rp_id`, outside the archive. No private key.
     fn native_passkeys(
         &self,

@@ -386,8 +386,15 @@ cannot sign).
 - **Edits cannot remove one.** An item save keeps the stored passkeys whatever the client sends;
   merging duplicates refuses to archive an item that holds a passkey, since the site knows a
   passkey only by its ID and the key cannot move to another item.
-- **Not covered.** Passkeys in 1Password or Proton Pass exports are not copied (they cannot be
-  exported); each site's passkey is registered again. No PRF, largeBlob or other extensions.
+- **Imported from Proton Pass.** A Proton Pass export carries each passkey's private key
+  (`content`: MessagePack of Proton's `ProtonPassKey`, a COSE key). `vp import proton` brings
+  EC2 P-256 ones over with the login, or adds them to the login already saved (imported before,
+  or the same site, username and password), leaving out any that login holds; other key types
+  are counted and left. The key travels from the parser to the vault on the item's
+  never-serialised `imported_passkeys`, so no request can set one and no reply carries one.
+- **Not covered.** 1Password does not let passkeys' private keys out (not in `op`, not in .1pux);
+  `vp import op` counts them and they are registered again on each site. No PRF, largeBlob or
+  other extensions.
 
 ## 8. Storage
 
@@ -721,7 +728,8 @@ Implemented (2026-10-12), with tests that attack it (`crates/vp-store/tests`, `c
   against either backend; never overwrites.
 - `vp import proton FILE`: reads an unencrypted Proton Pass export (the .zip, its data.json, or
   the CSV, which holds only the names of cards, identities and SSH keys) in the daemon, asks every time, and skips items imported before (IDs derived from Proton's) and logins
-  already saved with the same site, username and password. Passkeys and aliases are not copied.
+  already saved with the same site, username and password. P-256 passkeys come over (§7.6);
+  aliases are not copied.
 
 - §5.1 Emergency Kit (`vp emergency-kit`).
 
@@ -747,3 +755,5 @@ rotation; §7.5 files; §9 fingerprints; §10 log signing; §11.1 buckets; §11.
   `item_version` with revisions, migrating schema-1 files after a backup.
 - 2026-10-23: §7.6 passkeys: VisiPass creates and signs with ES256 passkeys for web pages,
   keys in the native vault's details, an unlocked vault as user verification.
+- 2026-10-30: §7.6 passkeys import from Proton Pass exports (P-256), also into logins already
+  imported; `vp import op` reports the passkeys that stay in 1Password.

@@ -97,6 +97,7 @@ fn field(id: &str, kind: &str, purpose: Option<&str>, value: &str) -> Field {
 
 fn login(id: &str, title: &str, vault: &VaultRef, password: &str) -> Item {
     Item {
+        imported_passkeys: Vec::new(),
         passkeys: Vec::new(),
         id: id.into(),
         title: title.into(),

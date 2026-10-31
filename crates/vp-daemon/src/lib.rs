@@ -584,6 +584,8 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
         let listed = self.backend.list(&vp_core::model::Scope::default()).await?;
         let mut plan = Vec::new();
         let mut duplicates = 0;
+        // Passkeys for logins already here, added to them after approval.
+        let mut to_add = Vec::new();
         for proton in export.vaults {
             let target = existing
                 .iter()
@@ -596,8 +598,27 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
             });
             let mut items = Vec::new();
             for mut item in proton.items {
-                if self.already_saved(&item, &listed).await {
+                if let Some((vault_id, item_id)) = self.already_saved(&item, &listed).await {
                     duplicates += 1;
+                    if !item.imported_passkeys.is_empty() {
+                        // Only the passkeys the saved login does not have yet.
+                        let has = match self.backend.item(&item_id, &vault_id).await {
+                            Ok(saved) => saved.passkeys,
+                            Err(_) => Vec::new(),
+                        };
+                        let new: Vec<_> = std::mem::take(&mut item.imported_passkeys)
+                            .into_iter()
+                            .filter(|p| {
+                                !has.iter().any(|h| {
+                                    h.credential_id == p.info.credential_id
+                                        && h.rp_id == p.info.rp_id
+                                })
+                            })
+                            .collect();
+                        if !new.is_empty() {
+                            to_add.push((vault_id, item_id, new));
+                        }
+                    }
                     continue;
                 }
                 item.vault = vault.clone();
@@ -606,7 +627,13 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
             plan.push((vault, new, items));
         }
         let total: usize = plan.iter().map(|(_, _, items)| items.len()).sum();
-        if total == 0 {
+        let new_passkeys: usize = plan
+            .iter()
+            .flat_map(|(_, _, items)| items)
+            .map(|i| i.imported_passkeys.len())
+            .sum();
+        let existing_passkeys: usize = to_add.iter().map(|(_, _, p)| p.len()).sum();
+        if total == 0 && existing_passkeys == 0 {
             return if duplicates == 0 {
                 Err(Failure::new("The export has no items to import"))
             } else {
@@ -630,10 +657,26 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
             })
             .collect();
         let left = &export.left;
-        let mut details = vec![
-            ("File".to_string(), path.to_string()),
-            ("Into".to_string(), into.join("\n")),
-        ];
+        let mut details = vec![("File".to_string(), path.to_string())];
+        if !into.is_empty() {
+            details.push(("Into".into(), into.join("\n")));
+        }
+        if new_passkeys + existing_passkeys > 0 {
+            let mut lines = Vec::new();
+            if new_passkeys > 0 {
+                lines.push(format!(
+                    "{} with the new logins",
+                    plural(new_passkeys, "passkey")
+                ));
+            }
+            if existing_passkeys > 0 {
+                lines.push(format!(
+                    "{} added to logins already in VisiPass",
+                    plural(existing_passkeys, "passkey")
+                ));
+            }
+            details.push(("Passkeys".into(), lines.join("\n")));
+        }
         if duplicates > 0 {
             details.push((
                 "Skipped".into(),
@@ -664,8 +707,8 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
         }
         if left.passkeys > 0 {
             not.push(format!(
-                "passkeys on {} (the logins come over, the passkeys do not)",
-                plural(left.passkeys, "login")
+                "{} of a kind VisiPass does not use (their logins come over)",
+                plural(left.passkeys, "passkey")
             ));
         }
         if left.incomplete > 0 {
@@ -677,9 +720,17 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
         if !not.is_empty() {
             details.push(("Not imported".into(), not.join("\n")));
         }
+        let action = if total > 0 {
+            format!("import {} from Proton Pass", plural(total, "item"))
+        } else {
+            format!(
+                "add {} from Proton Pass to saved logins",
+                plural(existing_passkeys, "passkey")
+            )
+        };
         self.ask_each_time(&Prompt {
             who: who(requester),
-            action: format!("import {} from Proton Pass", plural(total, "item")),
+            action,
             details,
             secrets: vec![],
             purpose: None,
@@ -696,9 +747,22 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
             let (created, skipped) = self.backend.native_import_items(&vault, items).await?;
             report.push(json!({ "vault": vault.name, "items": count, "created": created, "skipped": skipped }));
         }
+        let mut added = 0;
+        for (vault_id, item_id, passkeys) in to_add {
+            added += self
+                .backend
+                .native_add_imported_passkeys(&vault_id, &item_id, passkeys)
+                .await?;
+        }
         Ok(json!({
             "imported": report,
             "duplicates": duplicates,
+            "passkeys": {
+                "withNewLogins": new_passkeys,
+                "addedToSavedLogins": added,
+                // For a login VisiPass matched in 1Password, which keeps its own.
+                "notAdded": existing_passkeys - added,
+            },
             "notImported": {
                 "trashed": left.trashed,
                 "aliases": left.aliases,
@@ -789,22 +853,24 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
         Ok(json!({ "kept": kept, "archived": archived, "added": added }))
     }
 
-    /// The item was imported before, or a login with the same site, username
-    /// and password is already saved.
+    /// The saved item this one already is, as (vault ID, item ID): imported
+    /// before, or a login with the same site, username and password.
     async fn already_saved(
         &self,
         item: &vp_core::model::Item,
         listed: &[vp_core::model::Listed],
-    ) -> bool {
+    ) -> Option<(String, String)> {
+        let at =
+            |l: &vp_core::model::Listed| Some((l.summary.vault.id.clone(), l.summary.id.clone()));
         // Imported from this export before.
-        if listed.iter().any(|l| l.summary.id == item.id) {
-            return true;
+        if let Some(l) = listed.iter().find(|l| l.summary.id == item.id) {
+            return at(l);
         }
         if item.category != "LOGIN" {
-            return false;
+            return None;
         }
         let (Some(url), Some(password)) = (item.urls.first(), field_value(item, "PASSWORD")) else {
-            return false;
+            return None;
         };
         let username = field_value(item, "USERNAME").unwrap_or_default();
         for found in listed.iter().filter(|l| {
@@ -823,10 +889,10 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 .await
                 && field_value(&saved, "PASSWORD").as_deref() == Some(password.as_str())
             {
-                return true;
+                return at(found);
             }
         }
-        false
+        None
     }
 
     /// Asks the human, every time, and never records a grant: for changes to a
@@ -1776,6 +1842,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                         set_field(&mut fields, "USERNAME", &username);
                         set_field(&mut fields, "PASSWORD", password.expose());
                         let item = vp_core::model::Item {
+                            imported_passkeys: Vec::new(),
                             passkeys: Vec::new(),
                             id: String::new(),
                             title: page.clone(),

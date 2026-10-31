@@ -264,6 +264,18 @@ impl Key {
     }
 }
 
+/// A passkey from another manager's export, private key included, on its
+/// way into the native vault. Never serialised (see `Item::imported_passkeys`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Imported {
+    pub info: PasskeyInfo,
+    /// base64url, the site's opaque ID for the account.
+    pub user_handle: String,
+    pub user_display_name: String,
+    /// The P-256 scalar, base64url, as [`Key::export`] writes it.
+    pub key: crate::secret::Secret,
+}
+
 /// A new credential ID: 16 random bytes, base64url.
 pub fn new_credential_id() -> Result<String, Failure> {
     let mut bytes = [0u8; 16];

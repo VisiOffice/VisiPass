@@ -317,6 +317,7 @@ mod tests {
         ];
         fields.extend(extra);
         Item {
+            imported_passkeys: Vec::new(),
             passkeys: Vec::new(),
             id: id.into(),
             title: "Chase".into(),

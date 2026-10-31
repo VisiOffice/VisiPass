@@ -172,6 +172,11 @@ pub struct Item {
     /// the browser.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub passkeys: Vec<PasskeyInfo>,
+    /// Passkeys with their private keys, read from another manager's export.
+    /// Never serialised: no request can set them, and no reply carries them;
+    /// they ride from the import's parser to the native vault.
+    #[serde(skip)]
+    pub imported_passkeys: Vec<crate::passkey::Imported>,
 }
 
 /// A passkey's public description; see [`crate::passkey`].

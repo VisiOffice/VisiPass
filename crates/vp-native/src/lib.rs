@@ -164,6 +164,30 @@ fn overview_of(item: &Item) -> Overview {
     }
 }
 
+/// An imported item's overview: as [`overview_of`], plus the public side of
+/// the passkeys its export carried (a save ignores `Item::passkeys`; an import
+/// is the one write that brings passkeys in).
+fn imported_overview(item: &Item) -> Overview {
+    Overview {
+        passkeys: item
+            .imported_passkeys
+            .iter()
+            .map(|p| p.info.clone())
+            .collect(),
+        ..overview_of(item)
+    }
+}
+
+fn stored(p: &passkey::Imported) -> StoredPasskey {
+    StoredPasskey {
+        credential_id: p.info.credential_id.clone(),
+        rp_id: p.info.rp_id.clone(),
+        user_handle: p.user_handle.clone(),
+        user_display_name: p.user_display_name.clone(),
+        key: p.key.clone(),
+    }
+}
+
 fn encode<T: Serialize>(value: &T) -> Zeroizing<Vec<u8>> {
     Zeroizing::new(serde_json::to_vec(value).expect("item types always serialise"))
 }
@@ -791,11 +815,11 @@ impl<U: Unlock> NativeBackend<U> {
                 .map(|item| {
                     (
                         item.id.clone(),
-                        encode(&overview_of(item)),
+                        encode(&imported_overview(item)),
                         encode(&Details {
                             sections: item.sections.clone(),
                             fields: item.fields.clone(),
-                            passkeys: Vec::new(),
+                            passkeys: item.imported_passkeys.iter().map(stored).collect(),
                         }),
                     )
                 })
@@ -817,7 +841,7 @@ impl<U: Unlock> NativeBackend<U> {
                     vault_id: vault.id.clone(),
                     item_id: item.id.clone(),
                     rev,
-                    overview: overview_of(item),
+                    overview: imported_overview(item),
                     others: Vec::new(),
                 });
             }
@@ -914,6 +938,7 @@ fn details_at(
 
 fn assemble(vault: &VaultRef, item_id: &str, overview: &Overview, details: Details) -> Item {
     Item {
+        imported_passkeys: Vec::new(),
         passkeys: overview.passkeys.clone(),
         id: item_id.to_string(),
         title: overview.title.clone(),
@@ -1546,6 +1571,54 @@ impl<U: Unlock> NativeBackend<U> {
             });
             save(store, opened, &vault, &item_id, overview, d)?;
             passkey::register(&key, &credential_id, &creation, &item_id, &vault.name)
+        })
+        .await
+    }
+
+    /// Adds passkeys from an export to a login already in the vault (imported
+    /// before, or the same site, username and password), leaving out any it
+    /// holds already (same credential ID and site). Returns how many it added.
+    pub async fn add_imported_passkeys(
+        &self,
+        vault_id: &str,
+        item_id: &str,
+        passkeys: Vec<passkey::Imported>,
+    ) -> Result<usize, Failure> {
+        let (vault_id, item_id) = (vault_id.to_string(), item_id.to_string());
+        self.with(move |store, opened| {
+            // A login matched outside this vault (in 1Password) takes none.
+            let Ok(vault) = opened.vault(&vault_id).cloned() else {
+                return Ok(0);
+            };
+            let Ok(entry) = opened.entry(&vault.id, &item_id) else {
+                return Ok(0);
+            };
+            if entry.overview.category != "LOGIN" || entry.overview.archived {
+                return Ok(0);
+            }
+            let (item_id, mut overview) = (entry.item_id.clone(), entry.overview.clone());
+            let mut d = details(store, opened, &vault.id, &item_id)?;
+            let new: Vec<&passkey::Imported> = passkeys
+                .iter()
+                .filter(|p| {
+                    !d.passkeys
+                        .iter()
+                        .any(|s| s.credential_id == p.info.credential_id && s.rp_id == p.info.rp_id)
+                })
+                .collect();
+            if new.is_empty() {
+                return Ok(0);
+            }
+            for p in &new {
+                overview.passkeys.retain(|o| {
+                    !(o.credential_id == p.info.credential_id && o.rp_id == p.info.rp_id)
+                });
+                overview.passkeys.push(p.info.clone());
+                d.passkeys.push(stored(p));
+            }
+            overview.updated_at = Some(vp_core::time::now_rfc3339());
+            save(store, opened, &vault, &item_id, overview, d)?;
+            Ok(new.len())
         })
         .await
     }

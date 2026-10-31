@@ -1334,6 +1334,194 @@ fn a_proton_pass_export_comes_in_once_after_asking_and_skips_what_is_there() {
     world.assert_contained();
 }
 
+/// A passkey entry as Proton Pass exports it: `content` is base64 of
+/// MessagePack `{c, v: 1}` around MessagePack of Proton's `ProtonPassKey`
+/// (P-256 COSE key with scalar `d`). vp-core's unit test builds the same with
+/// Proton's own serde types; this one writes the MessagePack directly.
+fn proton_passkey(
+    d: &[u8; 32],
+    rp_id: &str,
+    credential_id: &[u8],
+    user_handle: &[u8],
+) -> serde_json::Value {
+    use base64::Engine as _;
+    use rmpv::Value as Mp;
+    let s = |t: &str| Mp::from(t);
+    let bytes = |b: &[u8]| Mp::Array(b.iter().map(|x| Mp::from(*x)).collect());
+    let tagged = |t: &str, c: Mp| Mp::Map(vec![(s("t"), s(t)), (s("c"), c)]);
+    let map = |pairs: Vec<(&str, Mp)>| Mp::Map(pairs.into_iter().map(|(k, v)| (s(k), v)).collect());
+    let key = map(vec![
+        ("kty", tagged("assign", s("EC2"))),
+        ("kid", bytes(&[])),
+        ("alg", tagged("assign", s("ES256"))),
+        ("kops", Mp::Array(vec![])),
+        ("biv", bytes(&[])),
+        (
+            "par",
+            Mp::Array(vec![
+                Mp::Array(vec![
+                    tagged("int", Mp::from(-1)),
+                    tagged("int", map(vec![("inner", bytes(&1i128.to_le_bytes()))])),
+                ]),
+                Mp::Array(vec![tagged("int", Mp::from(-4)), tagged("bytes", bytes(d))]),
+            ]),
+        ),
+    ]);
+    let inner = map(vec![
+        ("key", key),
+        ("cid", bytes(credential_id)),
+        ("rid", s(rp_id)),
+        ("uhd", bytes(user_handle)),
+        ("cnt", Mp::Nil),
+        ("ext", map(vec![("hmac_secret", Mp::Nil)])),
+        ("udn", s("Robert")),
+        ("un", s("robert@example.com")),
+    ]);
+    let encode = |v: &Mp| {
+        let mut out = Vec::new();
+        rmpv::encode::write_value(&mut out, v).unwrap();
+        out
+    };
+    let outer = map(vec![("c", Mp::Binary(encode(&inner))), ("v", Mp::from(1))]);
+    let std = base64::engine::general_purpose::STANDARD;
+    serde_json::json!({"keyId": "k", "content": std.encode(encode(&outer)), "rpId": rp_id,
+        "credentialId": std.encode(credential_id), "userHandle": std.encode(user_handle)})
+}
+
+#[test]
+fn passkeys_come_over_from_proton_and_sign_in() {
+    use p256::ecdsa::signature::Verifier;
+    use sha2::Digest;
+    use vp_core::passkey::{b64, unb64};
+
+    let world = World::native_browser(&[
+        // init: password, confirmation, Secret Key window
+        Decision::Once,
+        Decision::Once,
+        Decision::Deny,
+        // the first import, a sign-in, the second import, a sign-in
+        Decision::Once,
+        Decision::Once,
+        Decision::Once,
+        Decision::Once,
+    ]);
+    clean(&world.vp(&["init"], None));
+    let d = [0x42u8; 32];
+    let secret = b64(&d);
+    let login = |id: &str, name: &str, url: &str, passkeys: serde_json::Value| {
+        serde_json::json!({"itemId": id, "state": 1, "data": {"metadata": {"name": name, "note": ""},
+            "type": "login", "content": {"itemUsername": "robert", "password": LOGIN,
+            "urls": [url], "passkeys": passkeys}}})
+    };
+    let export = |items: Vec<serde_json::Value>| {
+        serde_json::json!({"version": "1.22.0", "encrypted": false,
+            "vaults": {"shareA": {"name": "Personal", "items": items}}})
+        .to_string()
+    };
+    let file = world.path("export.json");
+    let import = |items: Vec<serde_json::Value>| {
+        std::fs::write(&file, export(items)).unwrap();
+        let out = world.vp(&["import", "proton", file.to_str().unwrap()], None);
+        clean(&out);
+        for stream in [&out.stdout, &out.stderr] {
+            assert!(
+                !text(stream).contains(&secret),
+                "private key in vp's output"
+            );
+        }
+        json(&out)
+    };
+    let sign = |url: &str, rp_id: &str, credential: &[u8]| {
+        let challenge = b64(b"a challenge from the site, 32 by");
+        let reply = host(
+            &world,
+            serde_json::json!({"id": 4, "type": "passkey-get", "url": url, "rp_id": rp_id,
+                "credential_id": b64(credential), "challenge": challenge}),
+        );
+        assert!(
+            !reply.to_string().contains(&secret),
+            "private key sent to the browser"
+        );
+        reply["result"].clone()
+    };
+    let verifies = |signed: &serde_json::Value| {
+        let auth = unb64(signed["authenticator_data"].as_str().unwrap()).unwrap();
+        let client = unb64(signed["client_data_json"].as_str().unwrap()).unwrap();
+        let signature = p256::ecdsa::Signature::from_der(
+            &unb64(signed["signature"].as_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        let mut message = auth;
+        message.extend_from_slice(&sha2::Sha256::digest(&client));
+        let public = *p256::ecdsa::SigningKey::from_slice(&d)
+            .unwrap()
+            .verifying_key();
+        public.verify(&message, &signature).is_ok()
+    };
+
+    // A new login brings its passkey, which then signs in for its site.
+    let first = import(vec![
+        login(
+            "gh",
+            "GitHub",
+            "https://github.com",
+            serde_json::json!([proton_passkey(&d, "github.com", b"cred-gh", b"user-gh")]),
+        ),
+        login(
+            "ex",
+            "Example",
+            "https://example.com",
+            serde_json::json!([]),
+        ),
+    ]);
+    assert_eq!(first["imported"][0]["created"], 2, "{first}");
+    assert_eq!(first["passkeys"]["withNewLogins"], 1, "{first}");
+    let signed = sign("https://github.com/login", "github.com", b"cred-gh");
+    assert_eq!(signed["user_handle"], b64(b"user-gh"), "{signed}");
+    assert!(verifies(&signed));
+
+    // Importing again, where a login already here now has a passkey: it is
+    // added to that login, once; nothing else changes.
+    let pk = proton_passkey(&d, "example.com", b"cred-ex", b"user-ex");
+    let second = import(vec![
+        login(
+            "gh",
+            "GitHub",
+            "https://github.com",
+            serde_json::json!([proton_passkey(&d, "github.com", b"cred-gh", b"user-gh")]),
+        ),
+        login(
+            "ex",
+            "Example",
+            "https://example.com",
+            serde_json::json!([pk]),
+        ),
+    ]);
+    assert_eq!(second["duplicates"], 2, "{second}");
+    assert_eq!(second["passkeys"]["addedToSavedLogins"], 1, "{second}");
+    assert_eq!(second["passkeys"]["notAdded"], 0, "{second}");
+    assert!(verifies(&sign(
+        "https://example.com/",
+        "example.com",
+        b"cred-ex"
+    )));
+
+    // A third time there is nothing to add, so nothing is asked.
+    let asked = world.approver.asked();
+    let third = import(vec![login(
+        "ex",
+        "Example",
+        "https://example.com",
+        serde_json::json!([pk]),
+    )]);
+    assert_eq!(third["duplicates"], 1, "{third}");
+    assert_eq!(world.approver.asked(), asked);
+
+    let log = std::fs::read_to_string(world.path("state/access.log")).unwrap_or_default();
+    assert!(!log.contains(&secret), "private key in the access log");
+    world.assert_contained();
+}
+
 #[test]
 fn the_popup_opens_edits_adds_and_archives_items() {
     let world = World::native_browser(&[Decision::Once, Decision::Once, Decision::Deny]);
@@ -1900,4 +2088,22 @@ fn an_agent_cannot_turn_on_sync_or_join() {
     assert_eq!(world.approver.asked(), asked, "no window opened");
     assert!(std::fs::read_dir(shared.path()).unwrap().next().is_none());
     assert_eq!(json(&world.vp(&["sync"], None))["on"], false);
+}
+
+/// Chrome shows the extension's own version; keep it the release's.
+#[test]
+fn the_extension_says_the_release_version() {
+    let manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../extension/manifest.json"
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        manifest["version"],
+        env!("CARGO_PKG_VERSION"),
+        "bump extension/manifest.json with Cargo.toml"
+    );
 }

@@ -29,7 +29,8 @@ pub struct Left {
     pub aliases: usize,
     /// Item types VisiPass does not know.
     pub unknown: usize,
-    /// Logins that had passkeys; the login comes over, the passkey cannot.
+    /// Passkeys that could not come over (a key type VisiPass does not use,
+    /// or content it could not read); their logins still do.
     pub passkeys: usize,
     /// Cards, identities and SSH keys in a CSV export, which holds only their
     /// name and note.
@@ -248,6 +249,7 @@ fn parse_csv(text: &str) -> Result<Export, Failure> {
             name: vault_name.clone(),
         };
         let item = Item {
+            imported_passkeys: Vec::new(),
             passkeys: Vec::new(),
             id,
             title,
@@ -407,6 +409,133 @@ impl Fields {
     }
 }
 
+/// One passkey from a login's `passkeys`, private key included. Proton keeps
+/// it in `content`: base64 of MessagePack `{c, v: 1}` whose `c` is MessagePack
+/// of a `ProtonPassKey` (proton-pass-common, `passkey/protonpasskey.rs`): a COSE
+/// key in `key`, credential ID `cid`, RP ID `rid`, user handle `uhd`. Only an
+/// EC2 P-256 key comes over, the only kind VisiPass signs with; anything else,
+/// or anything unreadable, is None and counted as left behind.
+fn passkey(p: &Value) -> Option<crate::passkey::Imported> {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
+    use rmpv::Value as Mp;
+    use zeroize::Zeroizing;
+
+    let decode64 = |text: &str| {
+        let text = text.trim();
+        STANDARD
+            .decode(text)
+            .or_else(|_| STANDARD_NO_PAD.decode(text.trim_end_matches('=')))
+            .ok()
+    };
+    fn get<'a>(map: &'a Mp, key: &str) -> Option<&'a Mp> {
+        map.as_map()?
+            .iter()
+            .find(|(k, _)| k.as_str() == Some(key))
+            .map(|(_, v)| v)
+    }
+    // rmp_serde writes a Vec<u8> as an array of integers; accept bin too.
+    fn bytes(v: &Mp) -> Option<Vec<u8>> {
+        match v {
+            Mp::Binary(b) => Some(b.clone()),
+            Mp::Array(items) => items
+                .iter()
+                .map(|i| i.as_u64().and_then(|n| u8::try_from(n).ok()))
+                .collect(),
+            _ => None,
+        }
+    }
+    // An adjacently tagged label, {t: "assign" | "int" | "txt", c: ...}: its
+    // content as a name (unit variants are written by name) or a number.
+    fn tagged(v: &Mp) -> Option<&Mp> {
+        get(v, "c")
+    }
+    fn read(bytes: &[u8]) -> Option<Mp> {
+        let mut slice = bytes;
+        let value = rmpv::decode::read_value(&mut slice).ok()?;
+        slice.is_empty().then_some(value)
+    }
+
+    let outer = read(&Zeroizing::new(decode64(p.get("content")?.as_str()?)?))?;
+    if get(&outer, "v")?.as_u64()? != 1 {
+        return None;
+    }
+    let inner = read(&Zeroizing::new(bytes(get(&outer, "c")?)?))?;
+    let key = get(&inner, "key")?;
+    let kty = tagged(get(key, "kty")?)?;
+    if !(kty.as_str() == Some("EC2") || kty.as_i64() == Some(2)) {
+        return None;
+    }
+    if let Some(alg) = get(key, "alg").filter(|a| !a.is_nil()) {
+        let alg = tagged(alg)?;
+        if !(alg.as_str() == Some("ES256") || alg.as_i64() == Some(crate::passkey::ES256)) {
+            return None;
+        }
+    }
+    let mut curve = None;
+    let mut scalar = None;
+    for pair in get(key, "par")?.as_array()? {
+        let [label, value] = pair.as_array()?.as_slice() else {
+            return None;
+        };
+        let label = tagged(label)?.as_i64();
+        let value_tag = get(value, "t")?.as_str()?;
+        let value = tagged(value)?;
+        match (label, value_tag) {
+            // crv: a COSE integer, little-endian bytes of an i128.
+            (Some(-1), "int") => {
+                let inner = bytes(get(value, "inner")?)?;
+                curve = Some(
+                    inner
+                        .iter()
+                        .rev()
+                        .fold(0i128, |n, b| n << 8 | i128::from(*b)),
+                );
+            }
+            (Some(-4), "bytes") => scalar = Some(Zeroizing::new(bytes(value)?)),
+            _ => {}
+        }
+    }
+    if curve != Some(1) {
+        return None;
+    }
+    let scalar = scalar?;
+    let encoded = Zeroizing::new(crate::passkey::b64(&scalar));
+    // Check the scalar is a usable P-256 key before it is saved.
+    crate::passkey::Key::import(&encoded).ok()?;
+
+    let text = |v: Option<&Mp>| v.and_then(Mp::as_str).map(String::from);
+    let json_text = |key: &str| text_of(p, key);
+    let rp_id = text(get(&inner, "rid")).or_else(|| json_text("rpId"))?;
+    let credential_id = bytes(get(&inner, "cid")?)?;
+    let user_handle = get(&inner, "uhd")
+        .and_then(bytes)
+        .or_else(|| json_text("userHandle").and_then(|t| decode64(&t)))
+        .unwrap_or_default();
+    if credential_id.is_empty() || rp_id.is_empty() {
+        return None;
+    }
+    Some(crate::passkey::Imported {
+        info: crate::model::PasskeyInfo {
+            credential_id: crate::passkey::b64(&credential_id),
+            rp_id,
+            user_name: text(get(&inner, "un"))
+                .or_else(|| json_text("userName"))
+                .unwrap_or_default(),
+            created_at: p
+                .get("createTime")
+                .and_then(Value::as_u64)
+                .filter(|t| *t > 0)
+                .map(crate::time::rfc3339),
+        },
+        user_handle: crate::passkey::b64(&user_handle),
+        user_display_name: text(get(&inner, "udn"))
+            .or_else(|| json_text("userDisplayName"))
+            .unwrap_or_default(),
+        key: Secret::new(encoded.to_string()),
+    })
+}
+
 /// "socialSecurityNumber" -> "social security number".
 fn words(key: &str) -> String {
     let mut out = String::new();
@@ -428,6 +557,7 @@ fn item(raw: &Value, vault: &VaultRef, left: &mut Left) -> Option<Item> {
         sections: Vec::new(),
     };
     let mut urls = Vec::new();
+    let mut imported = Vec::new();
     let category = match data.get("type").and_then(Value::as_str) {
         Some("login") => {
             let email = text_of(&content, "itemEmail");
@@ -469,12 +599,16 @@ fn item(raw: &Value, vault: &VaultRef, left: &mut Left) -> Option<Item> {
                     primary: i == 0,
                 });
             }
-            if content
+            for p in content
                 .get("passkeys")
                 .and_then(Value::as_array)
-                .is_some_and(|p| !p.is_empty())
+                .into_iter()
+                .flatten()
             {
-                left.passkeys += 1;
+                match passkey(p) {
+                    Some(p) => imported.push(p),
+                    None => left.passkeys += 1,
+                }
             }
             "LOGIN"
         }
@@ -610,7 +744,8 @@ fn item(raw: &Value, vault: &VaultRef, left: &mut Left) -> Option<Item> {
             .map(crate::time::rfc3339)
     };
     Some(Item {
-        passkeys: Vec::new(),
+        passkeys: imported.iter().map(|p| p.info.clone()).collect(),
+        imported_passkeys: imported,
         id: String::new(),
         title: text_of(&metadata, "name").unwrap_or_else(|| "Untitled".into()),
         category: category.into(),
@@ -789,5 +924,205 @@ creditCard,Visa,,,,,,,,1700000000,1700000000,Personal\r\n";
         assert_eq!(again.vaults[0].items[1].id, other.id);
         let work = export.vaults.iter().find(|v| v.name == "Work").unwrap();
         assert_eq!(work.items[0].category, "SECURE_NOTE");
+    }
+
+    /// Proton's own types (proton-pass-common, passkey/protonpasskey.rs and
+    /// passkey_handling.rs), with the serde attributes they carry, so the
+    /// test's content is exactly what Proton writes (names included, as
+    /// serde writes unit variants by name).
+    #[allow(clippy::upper_case_acronyms)]
+    mod proton_types {
+        use serde::Serialize;
+
+        #[derive(Serialize)]
+        pub struct SerializedPassKey {
+            #[serde(rename = "c")]
+            pub content: Vec<u8>,
+            #[serde(rename = "v")]
+            pub format_version: u8,
+        }
+        #[derive(Serialize)]
+        pub struct ProtonPassKey {
+            pub key: ProtonKey,
+            #[serde(rename = "cid")]
+            pub credential_id: Vec<u8>,
+            #[serde(rename = "rid")]
+            pub rp_id: String,
+            #[serde(rename = "uhd")]
+            pub user_handle: Option<Vec<u8>>,
+            #[serde(rename = "cnt")]
+            pub counter: Option<u32>,
+            #[serde(rename = "ext")]
+            pub extensions: Extensions,
+            #[serde(rename = "udn")]
+            pub user_display_name: Option<String>,
+            #[serde(rename = "un")]
+            pub username: Option<String>,
+        }
+        #[derive(Serialize)]
+        pub struct Extensions {
+            pub hmac_secret: Option<()>,
+        }
+        #[derive(Serialize)]
+        pub struct ProtonKey {
+            pub kty: KeyTypeLabel,
+            #[serde(rename = "kid")]
+            pub key_id: Vec<u8>,
+            pub alg: Option<AlgorithmLabel>,
+            #[serde(rename = "kops")]
+            pub key_ops: Vec<()>,
+            #[serde(rename = "biv")]
+            pub base_iv: Vec<u8>,
+            #[serde(rename = "par")]
+            pub params: Vec<(Label, ProtonValue)>,
+        }
+        #[derive(Serialize)]
+        pub enum KeyType {
+            OKP = 1,
+            EC2 = 2,
+        }
+        #[derive(Serialize)]
+        #[serde(tag = "t", content = "c")]
+        pub enum KeyTypeLabel {
+            #[serde(rename = "assign")]
+            Assigned(KeyType),
+        }
+        #[derive(Serialize)]
+        pub enum Algorithm {
+            EdDSA = -8,
+            ES256 = -7,
+        }
+        #[derive(Serialize)]
+        #[serde(tag = "t", content = "c")]
+        pub enum AlgorithmLabel {
+            #[serde(rename = "assign")]
+            Assigned(Algorithm),
+        }
+        #[derive(Serialize)]
+        #[serde(tag = "t", content = "c")]
+        pub enum Label {
+            #[serde(rename = "int")]
+            Int(i64),
+        }
+        #[derive(Serialize)]
+        #[serde(tag = "t", content = "c")]
+        pub enum ProtonValue {
+            #[serde(rename = "int")]
+            Integer(ProtonInteger),
+            #[serde(rename = "bytes")]
+            Bytes(Vec<u8>),
+        }
+        #[derive(Serialize)]
+        pub struct ProtonInteger {
+            pub inner: Vec<u8>,
+        }
+    }
+
+    /// A passkey entry as Proton's export holds it, for a P-256 key with
+    /// scalar `d` (or an Ed25519 one when `ed25519`).
+    fn proton_passkey(d: &[u8; 32], ed25519: bool) -> Value {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD;
+        use proton_types::*;
+        let int = |n: i128| {
+            ProtonValue::Integer(ProtonInteger {
+                inner: n.to_le_bytes().to_vec(),
+            })
+        };
+        let (kty, alg, params) = if ed25519 {
+            (
+                KeyType::OKP,
+                Algorithm::EdDSA,
+                vec![
+                    (Label::Int(-1), int(6)),
+                    (Label::Int(-4), ProtonValue::Bytes(d.to_vec())),
+                ],
+            )
+        } else {
+            let key = p256::ecdsa::SigningKey::from_slice(d).unwrap();
+            let point = key.verifying_key().to_encoded_point(false);
+            (
+                KeyType::EC2,
+                Algorithm::ES256,
+                vec![
+                    (Label::Int(-1), int(1)),
+                    (
+                        Label::Int(-2),
+                        ProtonValue::Bytes(point.x().unwrap().to_vec()),
+                    ),
+                    (
+                        Label::Int(-3),
+                        ProtonValue::Bytes(point.y().unwrap().to_vec()),
+                    ),
+                    (Label::Int(-4), ProtonValue::Bytes(d.to_vec())),
+                ],
+            )
+        };
+        let inner = ProtonPassKey {
+            key: ProtonKey {
+                kty: KeyTypeLabel::Assigned(kty),
+                key_id: vec![],
+                alg: Some(AlgorithmLabel::Assigned(alg)),
+                key_ops: vec![],
+                base_iv: vec![],
+                params,
+            },
+            credential_id: vec![1, 2, 3, 250],
+            rp_id: "github.com".into(),
+            user_handle: Some(vec![9, 8, 7]),
+            counter: None,
+            extensions: Extensions { hmac_secret: None },
+            user_display_name: Some("Robert".into()),
+            username: Some("robert@example.com".into()),
+        };
+        let content = rmp_serde::to_vec_named(&SerializedPassKey {
+            content: rmp_serde::to_vec_named(&inner).unwrap(),
+            format_version: 1,
+        })
+        .unwrap();
+        serde_json::json!({
+            "keyId": "k", "content": STANDARD.encode(content), "domain": "github.com",
+            "rpId": "github.com", "rpName": "GitHub", "userName": "robert@example.com",
+            "userDisplayName": "Robert", "userId": "", "createTime": 1700000000, "note": "",
+            "credentialId": STANDARD.encode([1, 2, 3, 250]), "userHandle": STANDARD.encode([9, 8, 7]),
+        })
+    }
+
+    #[test]
+    fn a_p256_passkey_comes_over_with_its_key_and_others_are_counted() {
+        let d = [7u8; 32];
+        let export = serde_json::json!({
+            "version": "1.0", "userId": "u", "encrypted": false,
+            "vaults": {"shareA": {"name": "Personal", "description": "", "items": [
+                {"itemId": "i1", "shareId": "shareA", "state": 1, "createTime": 1700000000,
+                 "data": {"metadata": {"name": "GitHub", "note": ""}, "extraFields": [], "type": "login",
+                          "content": {"itemUsername": "robert", "password": "sentinel-pass-2",
+                                      "urls": ["https://github.com"], "totpUri": "",
+                                      "passkeys": [proton_passkey(&d, false), proton_passkey(&d, true)]}}}
+            ]}}
+        });
+        let parsed = parse(export.to_string().as_bytes()).unwrap();
+        assert_eq!(parsed.left.passkeys, 1, "the Ed25519 one stays behind");
+        let item = &parsed.vaults[0].items[0];
+        assert_eq!(item.imported_passkeys.len(), 1);
+        let p = &item.imported_passkeys[0];
+        assert_eq!(p.info.rp_id, "github.com");
+        assert_eq!(p.info.credential_id, crate::passkey::b64(&[1, 2, 3, 250]));
+        assert_eq!(p.info.user_name, "robert@example.com");
+        assert_eq!(p.user_handle, crate::passkey::b64(&[9, 8, 7]));
+        assert_eq!(p.user_display_name, "Robert");
+        assert_eq!(p.key.expose(), crate::passkey::b64(&d));
+        assert_eq!(item.passkeys, vec![p.info.clone()]);
+        // The key never reaches the item's JSON.
+        let json = serde_json::to_string(item).unwrap();
+        assert!(!json.contains(&crate::passkey::b64(&d)));
+    }
+
+    #[test]
+    fn unreadable_passkey_content_is_counted_not_imported() {
+        for content in ["", "not base64!", "AAAA", "gqFjkKF2Ag=="] {
+            let p = serde_json::json!({"keyId": "k", "content": content, "rpId": "github.com"});
+            assert!(passkey(&p).is_none(), "{content}");
+        }
     }
 }

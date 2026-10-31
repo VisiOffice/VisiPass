@@ -192,6 +192,8 @@ impl<U: Unlock> Backend for Routed<U> {
             }
         };
         let mut report = Vec::new();
+        // 1Password keeps passkeys' private keys to itself: they cannot come over.
+        let mut passkeys = 0;
         for vault in chosen {
             let listed = self
                 .op
@@ -201,6 +203,11 @@ impl<U: Unlock> Backend for Routed<U> {
                 })
                 .await?;
             let items = self.op.items_with_values(&listed).await?;
+            passkeys += items
+                .iter()
+                .flat_map(|i| &i.fields)
+                .filter(|f| f.kind == "PASSKEY")
+                .count();
             let count = items.len();
             let (created, skipped) = self.native.import(&vault, items).await?;
             report.push(json!({
@@ -210,7 +217,14 @@ impl<U: Unlock> Backend for Routed<U> {
                 "skipped": skipped,
             }));
         }
-        Ok(json!({ "imported": report }))
+        let mut result = json!({ "imported": report });
+        if passkeys > 0 {
+            result["passkeysLeftIn1Password"] = json!(passkeys);
+            result["next"] = json!(
+                "1Password does not let passkeys' private keys out, so these stay in 1Password. Sign in to each site and add a new passkey there to keep one in VisiPass"
+            );
+        }
+        Ok(result)
     }
 
     async fn native_sync(&self, op: SyncOp) -> Result<Value, Failure> {
@@ -285,6 +299,17 @@ impl<U: Unlock> Backend for Routed<U> {
             ));
         }
         self.native.import(vault, items).await
+    }
+
+    async fn native_add_imported_passkeys(
+        &self,
+        vault_id: &str,
+        item_id: &str,
+        passkeys: Vec<passkey::Imported>,
+    ) -> Result<usize, Failure> {
+        self.native
+            .add_imported_passkeys(vault_id, item_id, passkeys)
+            .await
     }
 
     async fn native_passkeys(&self, rp_id: &str) -> Result<Vec<passkey::Found>, Failure> {

@@ -25,3 +25,5 @@ vp-native.workspace = true
 vp-crypto.workspace = true
 p256.workspace = true
 sha2.workspace = true
+rmpv.workspace = true
+base64.workspace = true
