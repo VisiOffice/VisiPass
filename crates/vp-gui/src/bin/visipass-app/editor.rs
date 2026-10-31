@@ -133,6 +133,13 @@ impl ItemEditor {
         self.original.id.is_empty()
     }
 
+    /// The login's password, the one field the generator fills.
+    fn password_row(&self) -> Option<usize> {
+        self.rows
+            .iter()
+            .position(|r| r.field.purpose.as_deref() == Some("PASSWORD") && r.preserved.is_none())
+    }
+
     fn generate_into(&mut self, row: usize, cx: &mut Context<Self>) {
         match generate(&self.recipe) {
             Ok(password) => {
@@ -388,8 +395,17 @@ impl ItemEditor {
 }
 
 impl Render for ItemEditor {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme.clone();
+        // A hidden value shows while you are in its box, and masks again when you leave.
+        for row in &self.rows {
+            let concealed = row.field.concealed();
+            let focused = row.value.read(cx).focus_handle(cx).is_focused(window);
+            if row.value.read(cx).masked() != (concealed && !focused) {
+                row.value
+                    .update(cx, |v, cx| v.set_masked(concealed && !focused, cx));
+            }
+        }
         let heading = if self.is_new() {
             format!(
                 "New {}",
@@ -400,7 +416,7 @@ impl Render for ItemEditor {
         } else {
             format!("Edit {}", self.original.title)
         };
-        let has_secret = self.rows.iter().any(|r| r.field.concealed());
+        let has_password = self.password_row().is_some();
 
         let mut vaults = div().flex().flex_wrap().gap(px(6.));
         if self.is_new() {
@@ -427,8 +443,7 @@ impl Render for ItemEditor {
         let mut fields = div().flex().flex_col().gap(px(12.));
         for (index, row) in self.rows.iter().enumerate() {
             let label = row.field.display_label();
-            let concealed = row.field.concealed();
-            let masked = row.value.read(cx).masked();
+            let password = row.field.purpose.as_deref() == Some("PASSWORD");
             let body = if let Some(preserved) = &row.preserved {
                 div()
                     .flex()
@@ -471,21 +486,8 @@ impl Render for ItemEditor {
                             .flex_col()
                             .child(row.value.clone()),
                     )
-                    .when(concealed, |d| {
-                        let value = row.value.clone();
+                    .when(password, |d| {
                         d.child(self.chip(
-                            format!("show-{index}"),
-                            if masked { "Show" } else { "Hide" },
-                            false,
-                            cx,
-                            move |_, cx| {
-                                value.update(cx, |v, cx| {
-                                    let masked = v.masked();
-                                    v.set_masked(!masked, cx)
-                                });
-                            },
-                        ))
-                        .child(self.chip(
                             format!("gen-{index}"),
                             "Generate",
                             false,
@@ -502,7 +504,7 @@ impl Render for ItemEditor {
             .key_context(crate::keymap::EDITOR)
             .on_action(cx.listener(|this, _: &crate::keymap::actions::SaveItem, _, cx| this.save(cx)))
             .on_action(cx.listener(|this, _: &crate::keymap::actions::GeneratePassword, _, cx| {
-                if let Some(row) = this.rows.iter().position(|r| r.field.concealed() && r.preserved.is_none()) {
+                if let Some(row) = this.password_row() {
                     this.generate_into(row, cx);
                 }
             }))
@@ -552,7 +554,7 @@ impl Render for ItemEditor {
                     ),
             )
             .child(self.labelled("Tags", self.tags.clone()))
-            .when(has_secret, |d| d.child(self.render_generator(cx)))
+            .when(has_password, |d| d.child(self.render_generator(cx)))
             .when_some(self.error.clone(), |d, e| {
                 d.child(div().text_color(t.danger).child(e))
             })
