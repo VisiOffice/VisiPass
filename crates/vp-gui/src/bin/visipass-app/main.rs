@@ -132,6 +132,7 @@ fn demo_editor() {
         .with_assets(vp_gui::assets::Assets)
         .run(move |cx: &mut App| {
             vp_gui::text_input::bind_keys(cx);
+            keymap::load(cx);
             let options = WindowOptions {
                 app_id: Some("visipass-demo".into()),
                 window_bounds: Some(WindowBounds::centered(Size::new(px(520.), px(900.)), cx)),

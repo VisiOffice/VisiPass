@@ -503,6 +503,8 @@ impl Render for ItemEditor {
             .id("editor")
             .key_context(crate::keymap::EDITOR)
             .on_action(cx.listener(|this, _: &crate::keymap::actions::SaveItem, _, cx| this.save(cx)))
+            .on_action(|_: &crate::keymap::actions::NextField, window, cx| window.focus_next(cx))
+            .on_action(|_: &crate::keymap::actions::PreviousField, window, cx| window.focus_prev(cx))
             .on_action(cx.listener(|this, _: &crate::keymap::actions::GeneratePassword, _, cx| {
                 if let Some(row) = this.password_row() {
                     this.generate_into(row, cx);

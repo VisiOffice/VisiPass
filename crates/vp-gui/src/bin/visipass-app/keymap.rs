@@ -36,6 +36,8 @@ pub mod actions {
             Dismiss,
             SaveItem,
             GeneratePassword,
+            NextField,
+            PreviousField,
         ]
     );
 }
@@ -176,6 +178,22 @@ pub const SHORTCUTS: &[Shortcut] = &[
     ),
     shortcut!("new-item", "Item", "New item", ["ctrl-n"], APP, NewItem),
     shortcut!("save-item", "Editor", "Save", ["ctrl-s"], EDITOR, SaveItem),
+    shortcut!(
+        "next-field",
+        "Editor",
+        "Next field",
+        ["tab"],
+        EDITOR,
+        NextField
+    ),
+    shortcut!(
+        "previous-field",
+        "Editor",
+        "Previous field",
+        ["shift-tab"],
+        EDITOR,
+        PreviousField
+    ),
     shortcut!(
         "generate-password",
         "Editor",
