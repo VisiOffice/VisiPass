@@ -1,0 +1,106 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    @apply bg-ink-950 text-ink-300 antialiased;
+    scroll-behavior: smooth;
+  }
+  ::selection {
+    @apply bg-tn-accent/30 text-white;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 px-5 py-2.5 font-medium rounded-md transition-colors duration-150;
+  }
+  .btn-primary {
+    @apply bg-tn-accent text-ink-950 hover:bg-white;
+  }
+  .btn-secondary {
+    @apply bg-ink-900 text-ink-100 hover:bg-ink-800 border border-ink-700;
+  }
+  .badge {
+    @apply inline-flex items-center px-2.5 py-1 text-xs font-mono font-medium rounded bg-ink-900 text-ink-300 border border-ink-800;
+  }
+  .card {
+    @apply bg-ink-900/50 border border-ink-800 rounded-xl p-6;
+  }
+  .section {
+    @apply py-20 md:py-28;
+  }
+  .container-narrow {
+    @apply max-w-5xl mx-auto px-4 sm:px-6 lg:px-8;
+  }
+  .container-wide {
+    @apply max-w-7xl mx-auto px-4 sm:px-6 lg:px-8;
+  }
+  .eyebrow {
+    @apply font-mono text-xs uppercase tracking-[0.18em] text-tn-accent;
+  }
+  .h2 {
+    @apply mt-3 text-3xl md:text-4xl font-bold tracking-tight text-white text-balance;
+  }
+  .lede {
+    @apply mt-4 text-lg text-ink-400 leading-relaxed max-w-2xl;
+  }
+  .kbd {
+    @apply whitespace-nowrap font-mono text-[0.8em] px-1.5 py-0.5 rounded border border-ink-700 bg-ink-900 text-ink-200;
+  }
+
+  /* A terminal or app window chrome. */
+  .window {
+    @apply rounded-xl border border-ink-800 bg-tn-well shadow-2xl shadow-black/50 overflow-hidden;
+  }
+  .window-bar {
+    @apply flex items-center gap-2 px-4 h-9 border-b border-ink-800/80 bg-tn-bg text-xs text-ink-500 font-mono;
+  }
+  .window-dot {
+    @apply w-2.5 h-2.5 rounded-full bg-ink-700;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+/* Scroll reveal: elements with [data-reveal] rise in once they are on screen. */
+[data-reveal] {
+  opacity: 0;
+  transform: translateY(18px);
+  transition: opacity 0.7s ease, transform 0.7s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+[data-reveal].revealed {
+  opacity: 1;
+  transform: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-reveal] {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+  html {
+    scroll-behavior: auto;
+  }
+}
+
+.caret::after {
+  content: '';
+  display: inline-block;
+  width: 0.55em;
+  height: 1.1em;
+  margin-left: 1px;
+  vertical-align: -0.2em;
+  background: currentColor;
+  animation: blink 1s steps(1) infinite;
+}
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}

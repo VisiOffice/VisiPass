@@ -1,0 +1,347 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import Nav from '../components/Nav.astro';
+import Mark from '../components/Mark.astro';
+import AgentDemo from '../components/AgentDemo.astro';
+import MaskPlayground from '../components/MaskPlayground.astro';
+import BrowserDemo from '../components/BrowserDemo.astro';
+import Footer from '../components/Footer.astro';
+
+const answers = [
+  { key: 'd', label: 'Deny', text: 'Refused. The agent is told not to retry and to ask you instead.', danger: true },
+  { key: 'o', label: 'Once', text: 'This one request.' },
+  { key: 't', label: 'This task', text: 'Until this agent session ends.' },
+  { key: 'h', label: '8 hours', text: 'This agent, in this project, for 8 hours.' },
+  { key: 'a', label: 'Always', text: 'This agent, in this project, until you revoke it.' },
+];
+
+const promises = [
+  {
+    title: 'Zero plaintext in the model',
+    text: 'Find, write and run with op:// references. Printing a value to the agent is a separate operation you grant by name, and it is logged.',
+  },
+  {
+    title: 'One approval per task',
+    text: 'The prompt names the agent, project, git remote, command, every secret and the agent’s stated purpose. Inside a grant there are no prompts at all.',
+  },
+  {
+    title: 'Grants never widen',
+    text: 'A grant covers the exact agent, project, operation and references you saw. A new key, or reading instead of running, asks again.',
+  },
+  {
+    title: 'Every request on the record',
+    text: 'Written to a SHA-256 chained log before the result goes back. If the log can’t be written, the request fails.',
+  },
+];
+
+const commands = [
+  ['vp find openai stripe', 'references, never values; one call for many queries'],
+  ['vp run --env "KEY=op://…" -- bun dev', 'inject, run, mask the output'],
+  ['vp env run .env.tpl -- cargo test', 'one approval for every reference in the file'],
+  ['vp env import .env --vault Dev', 'move plaintext secrets into the vault, rewrite to refs'],
+  ['vp request --title "Stripe Live Key"', 'you paste it in a VisiPass window; the agent gets a ref'],
+  ['vp create api-credential --clipboard', 'save a new key; read back and verified, never overwritten'],
+  ['vp kamal-fetch --from "op://…" A B C', 'a whole Kamal deploy in one approval'],
+  ['vp log · vp grant list', 'what was asked for, by whom, and what you allowed'],
+];
+---
+
+<BaseLayout>
+  <Nav />
+  <main>
+    <!-- Hero -->
+    <section class="relative pt-28 md:pt-36 pb-16 overflow-hidden" aria-labelledby="hero-heading">
+      <div class="absolute inset-0 -z-10 pointer-events-none" aria-hidden="true">
+        <div class="absolute left-1/2 top-[-12rem] -translate-x-1/2 w-[64rem] h-[40rem] rounded-full bg-tn-accent/10 blur-3xl"></div>
+        <div class="absolute right-[-10rem] top-[18rem] w-[30rem] h-[30rem] rounded-full bg-tn-purple/10 blur-3xl"></div>
+        <div
+          class="absolute inset-0 opacity-[0.35]"
+          style="background-image:radial-gradient(rgba(148,163,184,.12) 1px,transparent 1px);background-size:22px 22px;mask-image:linear-gradient(to bottom,black,transparent 70%)"
+        >
+        </div>
+      </div>
+      <div class="container-wide">
+        <div class="max-w-4xl mx-auto text-center">
+          <a
+            href="https://github.com/VisiOffice/VisiPass/releases"
+            class="inline-flex items-center gap-2 rounded-full border border-ink-800 bg-ink-900/60 px-3 py-1 text-xs text-ink-400 hover:text-white hover:border-ink-700 transition"
+          >
+            <span class="w-1.5 h-1.5 rounded-full bg-tn-green"></span> Open source · Linux · on 1Password or its own vault
+          </a>
+          <h1 id="hero-heading" class="mt-6 text-4xl sm:text-5xl lg:text-6xl font-bold tracking-tight text-white text-balance">
+            A password manager<br />
+            <span class="bg-clip-text text-transparent bg-gradient-to-r from-tn-accent via-sky-300 to-tn-purple">for coding agents.</span>
+          </h1>
+          <p class="mt-6 max-w-2xl mx-auto text-lg md:text-xl text-ink-400 leading-relaxed">
+            Your agent finds, uses and saves secrets without ever seeing them. You approve once per task and project, not once per shell.
+          </p>
+          <div class="mt-8 flex flex-wrap justify-center gap-3">
+            <a href="#install" class="btn btn-primary">Install VisiPass</a>
+            <a href="https://github.com/VisiOffice/VisiPass" class="btn btn-secondary">View source</a>
+          </div>
+        </div>
+
+        <div class="mt-14 max-w-6xl mx-auto">
+          <p class="mb-3 text-center text-sm text-ink-500">
+            A real session, replayed. <span class="text-ink-300">When the approval window opens, you answer it.</span>
+          </p>
+          <AgentDemo />
+        </div>
+      </div>
+    </section>
+
+    <!-- Promises -->
+    <section id="how" class="section border-t border-ink-900">
+      <div class="container-wide">
+        <div data-reveal>
+          <div class="eyebrow">How it works</div>
+          <h2 class="h2">Use credentials as freely as a trusted teammate would.</h2>
+          <p class="lede">
+            Without the secret entering the model’s context, and without you babysitting every shell. The agent works with references; visipassd decides
+            what may resolve them and hands the values straight to the command.
+          </p>
+        </div>
+
+        <!-- Flow diagram -->
+        <div data-reveal class="mt-12 grid md:grid-cols-[1fr_auto_1fr_auto_1fr] items-stretch gap-3 md:gap-4">
+          <div class="card">
+            <div class="text-xs text-ink-500 font-mono">agent</div>
+            <div class="mt-1 text-white font-semibold">Claude Code, Codex, …</div>
+            <div class="mt-3 font-mono text-[12px] text-tn-accent break-all">op://Dev/Stripe Test Key/credential</div>
+            <p class="mt-3 text-sm text-ink-400">Sees references, receipts and masked output.</p>
+          </div>
+          <div class="hidden md:flex items-center text-ink-600" aria-hidden="true">
+            <svg class="w-8 h-8 flow-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 12h15m-5-5 5 5-5 5"></path></svg>
+          </div>
+          <div class="card border-tn-accent/40 bg-tn-accent/[0.04]">
+            <div class="text-xs text-ink-500 font-mono">visipassd</div>
+            <div class="mt-1 text-white font-semibold flex items-center gap-2"><Mark class="w-4 h-4 text-tn-accent" /> Grants, approval, log</div>
+            <ul class="mt-3 space-y-1 text-sm text-ink-400">
+              <li>Who is asking: the agent from the process tree</li>
+              <li>Where: the session’s project and git remote</li>
+              <li>What: operation and exact references</li>
+            </ul>
+          </div>
+          <div class="hidden md:flex items-center text-ink-600" aria-hidden="true">
+            <svg class="w-8 h-8 flow-arrow" style="animation-delay:.6s" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 12h15m-5-5 5 5-5 5"></path></svg>
+          </div>
+          <div class="card">
+            <div class="text-xs text-ink-500 font-mono">your command</div>
+            <div class="mt-1 text-white font-semibold">cargo test, bun dev, kamal…</div>
+            <div class="mt-3 font-mono text-[12px] text-tn-yellow">STRIPE_KEY=sk_test_••••</div>
+            <p class="mt-3 text-sm text-ink-400">Gets the value in its environment. Its output is masked on the way back.</p>
+          </div>
+        </div>
+
+        <div class="mt-12 grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          {
+            promises.map((p, i) => (
+              <div data-reveal class="card" style={`transition-delay:${i * 80}ms`}>
+                <div class="text-white font-semibold">{p.title}</div>
+                <p class="mt-2 text-sm text-ink-400 leading-relaxed">{p.text}</p>
+              </div>
+            ))
+          }
+        </div>
+      </div>
+    </section>
+
+    <!-- Approvals -->
+    <section class="section border-t border-ink-900">
+      <div class="container-wide grid grid-cols-1 lg:grid-cols-[1fr_1.1fr] gap-12 items-center [&>*]:min-w-0">
+        <div data-reveal>
+          <div class="eyebrow">Approvals</div>
+          <h2 class="h2">Five answers. Deny is the default.</h2>
+          <p class="lede">
+            The window opens on Deny, ignores input for its first 700ms so a stray keypress can’t approve, and Escape, closing it or a crash all deny. No
+            agent can approve its own request: there is no <code class="kbd">vp approve</code>, and nothing an agent sets decides where the prompt appears.
+          </p>
+          <p class="mt-4 text-ink-400">
+            On Omarchy it takes your theme’s colours, fonts and Hyprland’s rounding every time it opens.
+          </p>
+        </div>
+        <ol data-reveal class="space-y-2.5">
+          {
+            answers.map((a) => (
+              <li class="flex items-start gap-4 rounded-xl border border-ink-800 bg-ink-900/40 px-4 py-3.5 hover:border-ink-700 transition">
+                <span class="kbd mt-0.5 text-tn-accent">{a.key}</span>
+                <div>
+                  <div class:list={['font-semibold', a.danger ? 'text-tn-danger' : 'text-white']}>{a.label}</div>
+                  <div class="text-sm text-ink-400">{a.text}</div>
+                </div>
+              </li>
+            ))
+          }
+        </ol>
+      </div>
+    </section>
+
+    <!-- Masking -->
+    <section class="section border-t border-ink-900">
+      <div class="container-wide">
+        <div data-reveal class="max-w-3xl">
+          <div class="eyebrow">Masking</div>
+          <h2 class="h2">When a command prints the secret, nobody reads it.</h2>
+          <p class="lede">
+            <code class="kbd">vp run</code> masks every injected value in the command’s output as <code class="kbd">&lt;vp:NAME&gt;</code>, including its
+            base64, URL-safe base64, percent-encoded and JSON-escaped forms, even when a value is split across chunks. This is the same masker, running on
+            what you type. Nothing leaves your browser.
+          </p>
+        </div>
+        <div data-reveal class="mt-10"><MaskPlayground /></div>
+        <p class="mt-4 text-sm text-ink-500">
+          VisiPass is not a sandbox: a command given a secret can do anything with it. Masking keeps it out of the transcript, not out of the command.
+        </p>
+      </div>
+    </section>
+
+    <!-- Browser -->
+    <section id="browser" class="section border-t border-ink-900">
+      <div class="container-wide grid grid-cols-1 lg:grid-cols-[0.9fr_1.1fr] gap-12 items-center [&>*]:min-w-0">
+        <div data-reveal>
+          <div class="eyebrow">In the browser</div>
+          <h2 class="h2">And for you, a password manager.</h2>
+          <p class="lede">
+            The Chrome extension fills logins, passkeys and two-factor codes on the site they belong to, suggests strong passwords on sign-up and offers to save
+            what you submit.
+          </p>
+          <ul class="mt-6 space-y-2.5 text-ink-400 text-[15px]">
+            <li class="flex gap-3"><span class="text-tn-accent">→</span> Fills only the approved site, matched by the Public Suffix List, and only visible fields.</li>
+            <li class="flex gap-3"><span class="text-tn-accent">→</span> Acts only on your real clicks, with its menu actually visible on screen.</li>
+            <li class="flex gap-3"><span class="text-tn-accent">→</span> Imports from 1Password and Proton Pass, passkeys included.</li>
+            <li class="flex gap-3"><span class="text-tn-accent">→</span> <span>A desktop app and <code class="kbd">vp quick</code> Quick Access, themed like the rest of your desktop.</span></li>
+          </ul>
+          <p class="mt-5 text-sm text-ink-500">Try it: click the keyhole in the email field, or switch to Sign up. The password is generated in your browser the way VisiPass generates one.</p>
+        </div>
+        <div data-reveal><BrowserDemo /></div>
+      </div>
+    </section>
+
+    <!-- Vault -->
+    <section id="vault" class="section border-t border-ink-900">
+      <div class="container-wide">
+        <div data-reveal class="max-w-3xl">
+          <div class="eyebrow">Where the secrets live</div>
+          <h2 class="h2">Keep 1Password, or bring your own vault.</h2>
+        </div>
+        <div class="mt-10 grid md:grid-cols-2 gap-4">
+          <div data-reveal class="card p-7">
+            <div class="text-white font-semibold text-lg">On 1Password</div>
+            <p class="mt-2 text-ink-400 leading-relaxed">
+              <code class="kbd">vp</code> reaches your existing vaults through the 1Password CLI and adds grants, the approval prompt, masking and the access
+              log. 1Password still stores and encrypts everything. This is the part to rely on today.
+            </p>
+            <pre class="mt-5 rounded-lg bg-ink-950 border border-ink-800 p-4 font-mono text-[12.5px] text-ink-300 overflow-x-auto"><span class="text-ink-500">$</span> yay -S visipass-bin 1password-cli
+<span class="text-ink-500">$</span> vp doctor</pre>
+          </div>
+          <div data-reveal class="card p-7" style="transition-delay:80ms">
+            <div class="flex items-center gap-2">
+              <span class="text-white font-semibold text-lg">VisiPass’s own vault</span>
+              <span class="badge text-tn-yellow border-tn-yellow/30">early</span>
+            </div>
+            <p class="mt-2 text-ink-400 leading-relaxed">
+              End-to-end encrypted with a master password and Secret Key. <code class="kbd">vp import op</code> brings your 1Password vaults over and every
+              op:// reference keeps working. Syncs through a folder you already sync, as encrypted, signed files; there is no VisiPass server.
+            </p>
+            <ul class="mt-4 grid grid-cols-2 gap-2 text-sm text-ink-400">
+              <li>· Locks when you’re idle</li>
+              <li>· Locks with the screen</li>
+              <li>· Erases keys before sleep</li>
+              <li>· Fingerprint quick unlock</li>
+            </ul>
+            <p class="mt-4 text-xs text-ink-500">Internally reviewed, not yet audited from outside. Keep 1Password as your backup for now.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Commands -->
+    <section class="section border-t border-ink-900">
+      <div class="container-wide grid grid-cols-1 lg:grid-cols-[0.8fr_1.2fr] gap-12 [&>*]:min-w-0">
+        <div data-reveal>
+          <div class="eyebrow">For the agent</div>
+          <h2 class="h2">One obvious command per goal.</h2>
+          <p class="lede">
+            Compact JSON on stdout, and errors that say what to do next. Give your agent the skill file and it knows the rules: batch, state a purpose, never
+            retry a denial. There’s an MCP server too.
+          </p>
+        </div>
+        <div data-reveal class="window">
+          <div class="window-bar">
+            <span class="window-dot"></span><span class="window-dot"></span><span class="window-dot"></span><span class="ml-2">~/.claude/skills/visipass/SKILL.md</span>
+          </div>
+          <dl class="p-5 space-y-3 font-mono text-[12.5px]">
+            {
+              commands.map(([cmd, what]) => (
+                <div class="group">
+                  <dt class="text-white">
+                    <span class="text-ink-600">$ </span>
+                    {cmd}
+                  </dt>
+                  <dd class="text-ink-500 pl-4 group-hover:text-ink-300 transition-colors"># {what}</dd>
+                </div>
+              ))
+            }
+          </dl>
+        </div>
+      </div>
+    </section>
+
+    <!-- Install -->
+    <section id="install" class="section border-t border-ink-900">
+      <div class="container-narrow">
+        <div data-reveal class="text-center">
+          <div class="eyebrow">Install</div>
+          <h2 class="h2">Running in a minute.</h2>
+          <p class="lede mx-auto">Linux on x86_64 and aarch64, Omarchy first. Needs the 1Password CLI with app integration turned on.</p>
+        </div>
+        <div data-reveal class="mt-10 grid md:grid-cols-3 gap-4">
+          <div class="card">
+            <div class="text-sm text-ink-500">1 · Arch / Omarchy</div>
+            <pre class="mt-3 font-mono text-[12.5px] text-white whitespace-pre-wrap">yay -S visipass-bin 1password-cli</pre>
+          </div>
+          <div class="card">
+            <div class="text-sm text-ink-500">1 · Any Linux</div>
+            <p class="mt-3 text-[13px] text-ink-300">
+              Download from <a class="text-tn-accent hover:underline" href="https://github.com/VisiOffice/VisiPass/releases">the latest release</a> and put
+              <code class="font-mono">vp</code>, <code class="font-mono">visipassd</code> and <code class="font-mono">visipass-prompt</code> on your PATH.
+            </p>
+          </div>
+          <div class="card">
+            <div class="text-sm text-ink-500">2 · Teach your agent</div>
+            <pre class="mt-3 font-mono text-[12.5px] text-white whitespace-pre-wrap">cp SKILL.md ~/.claude/skills/visipass/</pre>
+            <p class="mt-2 text-[13px] text-ink-400">Then <code class="font-mono">vp doctor</code>.</p>
+          </div>
+        </div>
+        <div data-reveal class="mt-8 rounded-xl border border-ink-800 bg-ink-900/40 p-5 text-sm text-ink-400 leading-relaxed">
+          <span class="text-white font-medium">Where it stands.</span> 0.x, Linux only. The browser extension loads unpacked in Chrome and Chromium; it isn’t in
+          the Chrome Web Store yet. No macOS or Windows builds yet. AGPL-3.0.
+        </div>
+      </div>
+    </section>
+  </main>
+  <Footer />
+</BaseLayout>
+
+<style>
+  .flow-arrow {
+    animation: nudge 2.4s ease-in-out infinite;
+  }
+  @keyframes nudge {
+    0%,
+    100% {
+      transform: translateX(0);
+      opacity: 0.5;
+    }
+    50% {
+      transform: translateX(5px);
+      opacity: 1;
+      color: #7aa2f7;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .flow-arrow {
+      animation: none;
+    }
+  }
+</style>

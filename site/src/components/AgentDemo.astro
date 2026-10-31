@@ -1,0 +1,532 @@
+---
+// A Claude Code session using VisiPass, replayed in the page. The approval window
+// is a copy of visipass-prompt (crates/vp-gui/src/bin/visipass-prompt/view.rs):
+// the same text, the same five answers and keys, Deny selected on open, input
+// ignored for the first 700ms, Esc denies. The visitor answers it, and the
+// session goes where the real one would: grants cover repeats, a new reference
+// or operation asks again, a denial is never retried. Access-log lines are
+// hash-chained in the browser exactly as visipassd chains them (SHA-256 of the
+// entry with the previous hash as "prev").
+import Mark from './Mark.astro';
+---
+
+<div id="agent-demo" class="relative grid lg:grid-cols-[minmax(0,1fr)_320px] gap-4 text-left">
+  <div class="window relative">
+    <div class="window-bar">
+      <span class="window-dot"></span><span class="window-dot"></span><span class="window-dot"></span>
+      <span class="ml-2 truncate">claude — ~/Code/shop</span>
+      <button
+        id="demo-replay"
+        class="ml-auto flex items-center gap-1.5 text-ink-400 hover:text-white transition-colors"
+        type="button"
+      >
+        <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"
+          ><path d="M3 12a9 9 0 1 0 3-6.7L3 8"></path><path d="M3 3v5h5"></path></svg
+        >
+        Replay
+      </button>
+    </div>
+    <div
+      id="demo-term"
+      class="font-mono text-[12.5px] leading-[1.65] p-4 sm:p-5 h-[470px] overflow-y-auto overflow-x-hidden text-ink-300 space-y-1.5"
+      aria-live="polite"
+    >
+    </div>
+
+    <!-- The approval window, as visipassd shows it: a full-screen overlay. -->
+    <div id="demo-approval" class="absolute inset-0 hidden items-center justify-center flex-col gap-2.5 p-3 bg-black/60 backdrop-blur-[2px]">
+      <div class="px-3 py-1 rounded-lg bg-tn-bg text-[12px] text-tn-fg">VisiPass · approval needed</div>
+      <div
+        id="demo-card"
+        class="w-full max-w-[540px] flex flex-col gap-4 p-[18px] rounded-[10px] border-2 border-tn-accent/70 bg-tn-bg text-tn-fg text-[13.5px] shadow-2xl shadow-black/60 scale-95 opacity-0 transition duration-200"
+      >
+        <div class="flex items-start gap-3">
+          <Mark class="w-6 h-6 mt-0.5 flex-none text-tn-accent" />
+          <div class="min-w-0 text-[15.5px] leading-snug">
+            <span id="ap-who" class="text-tn-accent font-bold"></span> wants to <span id="ap-action"></span>.
+          </div>
+        </div>
+        <div id="ap-details" class="flex flex-col gap-2.5"></div>
+        <div class="h-px bg-tn-fg/10"></div>
+        <div id="ap-buttons" class="grid grid-cols-3 sm:grid-cols-5 gap-2"></div>
+        <div class="flex justify-between gap-3 text-[11.5px] text-tn-muted">
+          <span id="ap-explain"></span>
+          <span class="whitespace-nowrap">Esc denies · <span id="ap-clock">2:00</span></span>
+        </div>
+      </div>
+      <div id="ap-hint" class="text-[12px] text-ink-300 text-center"></div>
+    </div>
+  </div>
+
+  <aside class="flex flex-col gap-4">
+    <div class="card p-5">
+      <div class="text-xs font-medium uppercase tracking-wider text-ink-500">In the model's context</div>
+      <div class="mt-3 flex items-end gap-6">
+        <div>
+          <div id="ctx-plain" class="text-4xl font-bold text-tn-green tabular-nums transition-colors">0</div>
+          <div class="text-xs text-ink-500 mt-1">secret values</div>
+        </div>
+        <div>
+          <div id="ctx-refs" class="text-4xl font-bold text-white tabular-nums">0</div>
+          <div class="text-xs text-ink-500 mt-1">op:// references</div>
+        </div>
+      </div>
+      <p id="ctx-note" class="mt-3 text-xs text-ink-500 leading-relaxed">
+        The agent passes references around. Values go straight to the command it runs.
+      </p>
+    </div>
+    <div class="card p-0 flex-1 min-h-[200px] overflow-hidden flex flex-col">
+      <div class="px-5 pt-4 pb-2 flex items-center justify-between">
+        <span class="text-xs font-medium uppercase tracking-wider text-ink-500">Access log</span>
+        <span class="text-[10px] font-mono text-ink-600">sha-256 chained</span>
+      </div>
+      <ol id="demo-log" class="px-3 pb-3 flex flex-col gap-1.5 overflow-y-auto font-mono text-[11px]"></ol>
+    </div>
+  </aside>
+</div>
+
+<script>
+  type Answer = 'deny' | 'once' | 'task' | 'hours' | 'always';
+  interface Prompt {
+    who: string;
+    action: string;
+    details: [string, string][];
+    secrets: string[];
+    purpose?: string;
+    /** What the demo answers when nobody does. */
+    hint?: Answer;
+  }
+
+  const CHOICES: { answer: Answer; label: string; key: string }[] = [
+    { answer: 'deny', label: 'Deny', key: 'd' },
+    { answer: 'once', label: 'Once', key: 'o' },
+    { answer: 'task', label: 'This task', key: 't' },
+    { answer: 'hours', label: '8 hours', key: 'h' },
+    { answer: 'always', label: 'Always', key: 'a' },
+  ];
+  const ARM_DELAY = 700;
+  const AUTO_ANSWER = 10;
+  const DENIED = 'The human denied this request. Do not retry it; ask them how to proceed';
+
+  const root = document.getElementById('agent-demo')!;
+  const term = document.getElementById('demo-term')!;
+  const overlay = document.getElementById('demo-approval')!;
+  const card = document.getElementById('demo-card')!;
+  const buttonsEl = document.getElementById('ap-buttons')!;
+  const logEl = document.getElementById('demo-log')!;
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  class Cancelled extends Error {}
+  let run = 0;
+
+  const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
+  // References and masked values stand out, as they would to a reader of the transcript.
+  const paint = (s: string) =>
+    esc(s)
+      .replace(/op:\/\/[^"\s]+(?: [A-Z][\w]*(?: [A-Z][\w]*)*)*\/[\w-]+/g, (m) => `<span class="text-tn-accent">${m}</span>`)
+      .replace(/&lt;vp:[A-Z_]+&gt;/g, (m) => `<span class="text-tn-purple">${m}</span>`);
+
+  function guard(token: number) {
+    if (token !== run) throw new Cancelled();
+  }
+  async function wait(token: number, ms: number) {
+    await new Promise((r) => setTimeout(r, reduced ? Math.min(ms, 150) : ms));
+    guard(token);
+  }
+  function scroll() {
+    term.scrollTo({ top: term.scrollHeight, behavior: reduced ? 'auto' : 'smooth' });
+  }
+  function add(html: string, cls = '') {
+    const div = document.createElement('div');
+    div.className = cls;
+    div.innerHTML = html;
+    term.appendChild(div);
+    scroll();
+    return div;
+  }
+  async function typeInto(token: number, el: HTMLElement, text: string, speed = 22) {
+    if (reduced) {
+      el.innerHTML = paint(text);
+      return;
+    }
+    el.classList.add('caret');
+    for (let i = 1; i <= text.length; i++) {
+      el.innerHTML = paint(text.slice(0, i));
+      await wait(token, speed + Math.random() * speed);
+    }
+    el.classList.remove('caret');
+  }
+
+  async function user(token: number, text: string) {
+    const line = add('<span class="text-ink-500">&gt; </span><span></span>', 'text-ink-100 bg-white/[0.04] -mx-2 px-2 py-1 rounded');
+    await typeInto(token, line.lastElementChild as HTMLElement, text, 28);
+    await wait(token, 450);
+  }
+  async function say(token: number, text: string) {
+    add(`<span class="text-white">●</span> ${paint(text)}`, 'pt-2');
+    await wait(token, 650);
+  }
+  async function bash(token: number, cmd: string) {
+    const line = add('<span class="text-tn-green">●</span> <span class="text-white font-semibold">Bash</span>(<span></span>)', 'pt-2 break-words');
+    await typeInto(token, line.children[2] as HTMLElement, cmd, 9);
+    await wait(token, 300);
+  }
+  function out(text: string, cls = 'text-ink-400') {
+    return add(`<span class="text-ink-600">⎿</span>  ${paint(text)}`, `pl-4 break-words whitespace-pre-wrap ${cls}`);
+  }
+  async function lines(token: number, rows: string[], gap = 110) {
+    for (const [i, row] of rows.entries()) {
+      add(paint(row), `!mt-0 pl-8 whitespace-pre-wrap break-words ${row.includes('<vp:') ? 'text-ink-300' : 'text-ink-500'}`);
+      if (i < rows.length - 1) await wait(token, gap);
+    }
+  }
+
+  // ---- The model's context ----------------------------------------------------
+  let refs = 0;
+  function context(r: number, plain?: number) {
+    refs = r;
+    document.getElementById('ctx-refs')!.textContent = String(refs);
+    const p = document.getElementById('ctx-plain')!;
+    const note = document.getElementById('ctx-note')!;
+    if (plain === undefined) {
+      p.textContent = '0';
+      p.className = p.className.replace(/text-tn-\w+/, 'text-tn-green');
+      note.textContent = 'The agent passes references around. Values go straight to the command it runs.';
+    } else {
+      p.textContent = String(plain);
+      p.className = p.className.replace(/text-tn-\w+/, 'text-tn-yellow');
+      note.textContent = 'You chose to reveal one value with vp read. That is a named, granted and logged act, never the default.';
+    }
+  }
+
+  // ---- The access log, chained as visipassd chains it -------------------------
+  let previous = '0'.repeat(64);
+  async function sha256(text: string) {
+    const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+    return [...new Uint8Array(bytes)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+  async function log(entry: Record<string, unknown>) {
+    const value = {
+      at: new Date().toISOString().replace(/\.\d+Z$/, 'Z'),
+      agent: 'Claude Code',
+      pid: 48213,
+      project: '/home/you/Code/shop',
+      ...entry,
+      prev: previous,
+    };
+    const hash = await sha256(JSON.stringify(value));
+    previous = hash;
+    const ok = String(entry.outcome) === 'ok';
+    const li = document.createElement('li');
+    li.className = 'rounded-md bg-ink-950/60 border border-ink-800 px-2.5 py-1.5 opacity-0 -translate-y-1 transition duration-300';
+    li.title = JSON.stringify({ ...value, hash });
+    const refsCount = Array.isArray(entry.refs) ? entry.refs.length : 0;
+    li.innerHTML = `<div class="flex justify-between gap-2"><span class="text-white">${esc(String(entry.request))}${
+      entry.operation ? ` <span class="text-ink-500">${esc(String(entry.operation))}</span>` : ''
+    }</span><span class="${ok ? 'text-tn-green' : 'text-tn-danger'}">${ok ? 'ok' : 'denied'}</span></div>
+      <div class="flex justify-between gap-2 text-ink-500"><span>${refsCount ? `${refsCount} ref${refsCount > 1 ? 's' : ''}` : 'no values'}${
+        entry.grant ? ` · grant ${esc(String(entry.grant))}` : ''
+      }</span><span class="text-ink-600">${hash.slice(0, 8)}…</span></div>`;
+    logEl.appendChild(li);
+    requestAnimationFrame(() => li.classList.remove('opacity-0', '-translate-y-1'));
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  // ---- The approval window ------------------------------------------------------
+  const explain = (a: Answer, who: string) =>
+    ({
+      deny: 'Refuse. The agent is told not to retry.',
+      once: 'Allow this one request.',
+      task: `Allow until this ${who} session ends.`,
+      hours: `Allow ${who} in this project for 8 hours.`,
+      always: `Allow ${who} in this project until you revoke it.`,
+    })[a];
+
+  /** `op://Vault/Item/field` grouped by item, as the real window lists them. */
+  function groups(secrets: string[]) {
+    const map = new Map<string, { vault: string; item: string; fields: string[] }>();
+    for (const s of secrets) {
+      const [vault, item, ...rest] = s.replace('op://', '').split('/');
+      const key = `${vault}/${item}`;
+      if (!map.has(key)) map.set(key, { vault, item, fields: [] });
+      map.get(key)!.fields.push(rest.join('/'));
+    }
+    return [...map.values()];
+  }
+
+  let pending: ((a: Answer) => void) | null = null;
+  let selected = 0;
+  let armed = false;
+  let who = '';
+
+  function paintButtons() {
+    buttonsEl.innerHTML = '';
+    CHOICES.forEach((c, i) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      const on = i === selected;
+      b.className = `flex items-center justify-center gap-1.5 py-[7px] px-1 rounded-[10px] border text-[12.5px] transition ${
+        on ? 'border-tn-accent bg-tn-fg/[0.12]' : 'border-tn-fg/15 bg-tn-fg/[0.04] hover:bg-tn-fg/[0.09]'
+      } ${armed ? 'cursor-pointer' : 'opacity-45 cursor-default'}`;
+      b.innerHTML = `<span class="text-tn-accent">${c.key}</span><span class="${c.answer === 'deny' ? 'text-tn-danger' : 'text-tn-fg'} whitespace-nowrap">${c.label}</span>`;
+      b.addEventListener('mouseenter', () => {
+        selected = i;
+        stopAuto();
+        paintButtons();
+      });
+      b.addEventListener('click', () => choose(c.answer));
+      buttonsEl.appendChild(b);
+    });
+    document.getElementById('ap-explain')!.textContent = explain(CHOICES[selected].answer, who);
+  }
+
+  let autoTimer: ReturnType<typeof setInterval> | null = null;
+  let clockTimer: ReturnType<typeof setInterval> | null = null;
+  function stopAuto() {
+    if (autoTimer) clearInterval(autoTimer);
+    autoTimer = null;
+    const hint = document.getElementById('ap-hint')!;
+    if (pending) hint.textContent = 'Your call. Click an answer, or press its key.';
+  }
+
+  function choose(a: Answer) {
+    if (!pending || !armed) return;
+    const resolve = pending;
+    pending = null;
+    stopAuto();
+    if (clockTimer) clearInterval(clockTimer);
+    card.classList.add('scale-95', 'opacity-0');
+    setTimeout(() => {
+      overlay.classList.add('hidden');
+      overlay.classList.remove('flex');
+    }, 180);
+    resolve(a);
+  }
+
+  function ask(token: number, p: Prompt): Promise<Answer> {
+    who = p.who;
+    document.getElementById('ap-who')!.textContent = p.who;
+    document.getElementById('ap-action')!.textContent = p.action;
+    const details = document.getElementById('ap-details')!;
+    const label = (t: string) => `<div class="text-[12px] text-tn-muted">${esc(t)}</div>`;
+    let html = p.details
+      .map(
+        ([k, v]) =>
+          `<div class="flex flex-col gap-[3px]">${label(k)}<div class="${
+            k === 'Command' ? 'bg-tn-well px-2 py-1.5 rounded-[10px] font-mono text-[12.5px] break-all' : 'break-words'
+          }">${esc(v)}</div></div>`,
+      )
+      .join('');
+    const g = groups(p.secrets);
+    html += `<div class="flex flex-col gap-[3px]">${label(p.secrets.length === 1 ? 'Secret' : `${p.secrets.length} secrets`)}<div class="flex flex-col gap-1.5">${g
+      .map(
+        (s) =>
+          `<div class="flex items-baseline gap-2"><span class="font-medium">${esc(s.item)}</span><span class="text-tn-muted">${esc(
+            s.fields.join(' · '),
+          )}</span><span class="flex-1"></span><span class="text-[12px] text-tn-muted">${esc(s.vault)}</span></div>`,
+      )
+      .join('')}</div></div>`;
+    if (p.purpose) html += `<div class="flex flex-col gap-[3px]">${label("Purpose, in the agent's words")}<div class="italic">“${esc(p.purpose)}”</div></div>`;
+    details.innerHTML = html;
+
+    selected = 0; // Deny, as the real window opens
+    armed = false;
+    paintButtons();
+    overlay.classList.remove('hidden');
+    overlay.classList.add('flex');
+    requestAnimationFrame(() => card.classList.remove('scale-95', 'opacity-0'));
+    setTimeout(() => {
+      if (token !== run) return;
+      armed = true;
+      paintButtons();
+    }, ARM_DELAY);
+
+    let remaining = 120;
+    const clock = document.getElementById('ap-clock')!;
+    clock.textContent = '2:00';
+    clockTimer = setInterval(() => {
+      remaining = Math.max(0, remaining - 1);
+      clock.textContent = `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, '0')}`;
+    }, 1000);
+
+    // Nobody at the keyboard: after a while, the demo answers for them.
+    const hint = document.getElementById('ap-hint')!;
+    let left = AUTO_ANSWER;
+    const preferred = CHOICES.findIndex((c) => c.answer === (p.hint ?? 'task'));
+    hint.textContent = `Your call. Click an answer or press its key · auto-picks “${CHOICES[preferred].label}” in ${left}s`;
+    autoTimer = setInterval(() => {
+      left -= 1;
+      if (left <= 0) {
+        selected = preferred;
+        paintButtons();
+        setTimeout(() => choose(CHOICES[preferred].answer), 450);
+        stopAuto();
+        hint.textContent = '';
+      } else {
+        hint.textContent = `Your call. Click an answer or press its key · auto-picks “${CHOICES[preferred].label}” in ${left}s`;
+      }
+    }, 1000);
+
+    return new Promise((resolve) => {
+      pending = resolve;
+    });
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (!pending || e.metaKey || e.ctrlKey || e.altKey) return;
+    const key = e.key.toLowerCase();
+    let handled = true;
+    if (key === 'escape') choose('deny');
+    else if (key === 'enter') choose(CHOICES[selected].answer);
+    else if (key === 'arrowleft') selected = Math.max(0, selected - 1);
+    else if (key === 'arrowright') selected = Math.min(CHOICES.length - 1, selected + 1);
+    else if (key === 'tab') selected = (selected + (e.shiftKey ? CHOICES.length - 1 : 1)) % CHOICES.length;
+    else {
+      const c = CHOICES.find((c) => c.key === key);
+      if (c) choose(c.answer);
+      else handled = false;
+    }
+    if (handled) {
+      e.preventDefault();
+      stopAuto();
+      if (pending) paintButtons();
+    }
+  });
+
+  // ---- The session ----------------------------------------------------------------
+  const STRIPE = 'op://Dev/Stripe Test Key/credential';
+  const OPENAI = 'op://Dev/OpenAI API Key/credential';
+  const LIVE = 'op://Prod/Stripe Live Key/credential';
+  const PROJECT: [string, string] = ['Project', '/home/you/Code/shop  (git@github.com:you/shop.git)'];
+  const RUN = `vp run --env "STRIPE_KEY=${STRIPE}" --env "OPENAI_API_KEY=${OPENAI}" --purpose "run the integration tests against the Stripe sandbox" -- cargo test --test integration`;
+  const runPrompt: Prompt = {
+    who: 'Claude Code',
+    action: 'inject 2 secrets into a command',
+    details: [PROJECT, ['Command', 'cargo test --test integration']],
+    secrets: [STRIPE, OPENAI],
+    purpose: 'run the integration tests against the Stripe sandbox',
+  };
+  const TESTS = [
+    'running 24 tests',
+    'test checkout::creates_payment_intent ... ok',
+    'test checkout::refunds_partial ... ok',
+    'DEBUG stripe::client: using key=<vp:STRIPE_KEY>',
+    'test summarize::order_receipt ... ok',
+    'test webhooks::verifies_signature ... ok',
+    'test result: ok. 24 passed; 0 failed; finished in 6.12s',
+  ];
+
+  async function denied(token: number, entry: Record<string, unknown>) {
+    out(`visipass: ${DENIED}`, 'text-tn-danger');
+    await log({ ...entry, outcome: `failed: ${DENIED}` });
+    await wait(token, 700);
+    await say(token, 'You denied that, so I won’t retry it. How would you like me to proceed?');
+  }
+
+  async function session(token: number) {
+    await wait(token, 600);
+    await user(token, 'run the integration tests against the Stripe sandbox');
+    await say(token, 'I’ll find the keys first. VisiPass gives me references, never values.');
+    await bash(token, 'vp find stripe openai');
+    await wait(token, 250);
+    out(
+      `{"matches":[{"ref":"${STRIPE}","title":"Stripe Test Key","kind":"api-credential","queries":["stripe"]},{"ref":"${OPENAI}","title":"OpenAI API Key","kind":"api-credential","queries":["openai"]}]}`,
+    );
+    context(2);
+    await log({ request: 'find', outcome: 'ok' });
+    await wait(token, 700);
+
+    await bash(token, RUN);
+    const waiting = out('Waiting for approval in the VisiPass window…', 'text-tn-yellow');
+    await wait(token, 500);
+    const entry = { request: 'run', operation: 'run', refs: [STRIPE, OPENAI], detail: 'cargo test --test integration' };
+    let answer = await ask(token, runPrompt);
+    guard(token);
+    waiting.remove();
+    if (answer === 'deny') return denied(token, entry);
+    await log({ ...entry, grant: answer === 'once' ? 'once' : `g-${answer}`, outcome: 'ok' });
+    await lines(token, TESTS);
+    await wait(token, 600);
+    await say(token, 'All 24 pass. One test logs the Stripe key: VisiPass masked it as <vp:STRIPE_KEY>, but I’ll delete that log line and run them again.');
+    add(`<span class="text-tn-green">●</span> <span class="text-white font-semibold">Update</span>(tests/support/stripe.rs)`, 'pt-2');
+    out('Removed 1 line', 'text-ink-500');
+    await wait(token, 500);
+    await bash(token, RUN);
+
+    if (answer === 'once') {
+      const w = out('“Once” covered one request, so VisiPass asks again…', 'text-tn-yellow');
+      await wait(token, 500);
+      answer = await ask(token, { ...runPrompt, hint: 'once' });
+      guard(token);
+      w.remove();
+      if (answer === 'deny') return denied(token, entry);
+      await log({ ...entry, grant: answer === 'once' ? 'once' : `g-${answer}`, outcome: 'ok' });
+    } else {
+      const label = CHOICES.find((c) => c.answer === answer)!.label;
+      out(`Covered by your “${label}” grant: no prompt.`, 'text-tn-green');
+      await log({ ...entry, grant: `g-${answer}`, outcome: 'ok' });
+    }
+    await lines(
+      token,
+      TESTS.filter((l) => !l.startsWith('DEBUG')),
+      70,
+    );
+    await wait(token, 600);
+
+    await say(token, 'Done. While I’m here, let me check the live key is the one production uses.');
+    await bash(token, `vp read "${LIVE}" --purpose "compare with the production config"`);
+    const w2 = out('A new reference and a new operation: a grant never widens, so VisiPass asks…', 'text-tn-yellow');
+    await wait(token, 500);
+    const readEntry = { request: 'resolve', operation: 'reveal', refs: [LIVE] };
+    const read = await ask(token, {
+      who: 'Claude Code',
+      action: 'print a secret to the agent',
+      details: [PROJECT],
+      secrets: [LIVE],
+      purpose: 'compare with the production config',
+      hint: 'deny',
+    });
+    guard(token);
+    w2.remove();
+    if (read === 'deny') return denied(token, readEntry);
+    out('sk_live_51Hx••••••••••••••••••••', 'text-tn-yellow');
+    context(3, 1);
+    await log({ ...readEntry, grant: read === 'once' ? 'once' : `g-${read}`, outcome: 'ok' });
+    await wait(token, 600);
+    await say(token, 'It matches production. I won’t repeat it anywhere.');
+  }
+
+  async function start() {
+    const token = ++run;
+    pending = null;
+    stopAuto();
+    if (clockTimer) clearInterval(clockTimer);
+    overlay.classList.add('hidden');
+    overlay.classList.remove('flex');
+    term.innerHTML = '';
+    logEl.innerHTML = '';
+    previous = '0'.repeat(64);
+    context(0);
+    try {
+      await session(token);
+      await wait(token, 400);
+      add('<span class="text-ink-600">— end of session · Replay to try another answer —</span>', 'pt-3');
+    } catch (e) {
+      if (!(e instanceof Cancelled)) throw e;
+    }
+  }
+
+  document.getElementById('demo-replay')!.addEventListener('click', start);
+
+  // Start once the demo is on screen.
+  const io = new IntersectionObserver(
+    (entries) => {
+      if (entries.some((e) => e.isIntersecting)) {
+        io.disconnect();
+        start();
+      }
+    },
+    { threshold: 0.25 },
+  );
+  io.observe(root);
+</script>

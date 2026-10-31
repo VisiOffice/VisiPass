@@ -1,0 +1,252 @@
+---
+// The Chrome extension filling a sign-in, and generating a password on sign-up.
+// The menu copies extension/inline.js ("Log in as…", letter avatars, passkey
+// rows, "Use a strong password"); the generator is crates/vp-core/src/generate.rs
+// (24 characters, avoids look-alikes, every class present, rejection sampling
+// over crypto.getRandomValues) running here.
+import Mark from './Mark.astro';
+---
+
+<div id="browser-window" class="window">
+  <div class="window-bar gap-3">
+    <span class="window-dot"></span><span class="window-dot"></span><span class="window-dot"></span>
+    <div class="ml-2 flex-1 min-w-0 max-w-md flex items-center gap-2 rounded-md bg-ink-950 border border-ink-800 px-3 h-6 text-ink-400">
+      <svg class="w-3 h-3 text-tn-green" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"
+        ><rect x="4" y="10" width="16" height="11" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3"></path></svg
+      >
+      <span id="b-url" class="truncate">shop.example.com/login</span>
+    </div>
+    <div class="ml-auto flex flex-none rounded-md border border-ink-800 overflow-hidden text-[11px]">
+      <button type="button" data-mode="login" class="b-tab px-2.5 h-6 bg-ink-800 text-white">Sign in</button>
+      <button type="button" data-mode="signup" class="b-tab px-2.5 h-6 text-ink-400 hover:text-white">Sign up</button>
+    </div>
+  </div>
+
+  <div class="relative bg-gradient-to-br from-[#f6f7fb] to-[#e9ecf5] text-[#1f2328] px-4 py-10 sm:py-14 min-h-[420px] flex items-start justify-center">
+    <form class="relative w-full max-w-[340px] bg-white rounded-2xl shadow-xl shadow-black/10 p-7" onsubmit="return false">
+      <div class="flex items-center gap-2 font-bold text-lg"><span class="w-6 h-6 rounded-md bg-[#ff6b4a]"></span> Shop</div>
+      <h3 id="b-title" class="mt-5 text-xl font-semibold">Sign in</h3>
+      <label class="block mt-4 text-[13px] font-medium text-[#57606a]">Email</label>
+      <div class="relative">
+        <input id="b-user" readonly class="mt-1 w-full rounded-lg border border-[#d0d7de] bg-white text-[#1f2328] [color-scheme:light] px-3 py-2 pr-9 text-[14px] outline-none" />
+        <button id="b-mark" type="button" class="absolute right-2 top-1/2 -translate-y-1/2 mt-0.5 text-[#2f6fde] transition hover:scale-110" aria-label="VisiPass">
+          <Mark class="w-5 h-5" />
+        </button>
+      </div>
+      <label class="block mt-3 text-[13px] font-medium text-[#57606a]">Password</label>
+      <input id="b-pass" readonly type="text" class="mt-1 w-full rounded-lg border border-[#d0d7de] bg-white text-[#1f2328] [color-scheme:light] px-3 py-2 text-[14px] font-mono tracking-wider outline-none" />
+      <button id="b-submit" type="button" class="mt-5 w-full rounded-lg bg-[#1f2328] text-white py-2.5 text-[14px] font-medium">Sign in</button>
+      <p id="b-done" class="mt-3 h-5 text-center text-[13px] text-[#1a7f37] opacity-0 transition"></p>
+
+      <!-- The extension's menu (extension/inline.js), in its default dark palette. -->
+      <div
+        id="b-menu"
+        class="absolute left-7 right-7 sm:left-auto sm:-right-6 sm:w-[300px] top-[188px] z-10 rounded-xl border border-tn-fg/15 bg-tn-bg text-tn-fg p-1.5 shadow-2xl shadow-black/40 text-[13px] opacity-0 pointer-events-none -translate-y-1 transition duration-200"
+      >
+        <div class="flex items-center gap-[7px] px-2 pt-1.5 pb-2 text-tn-muted text-[12px] font-semibold">
+          <Mark class="w-3.5 h-3.5 text-tn-accent" /><span id="b-head">Log in as…</span>
+        </div>
+        <div id="b-rows"></div>
+      </div>
+    </form>
+
+    <!-- The save card, after a sign-up with a generated password. -->
+    <div
+      id="b-save"
+      class="absolute right-4 top-4 w-[280px] rounded-xl border border-tn-fg/15 bg-tn-bg text-tn-fg p-3.5 shadow-2xl text-[13px] opacity-0 translate-x-3 pointer-events-none transition duration-300"
+    >
+      <div class="flex items-center gap-2 text-tn-muted text-[12px] font-semibold"><Mark class="w-3.5 h-3.5 text-tn-accent" /> Save to VisiPass?</div>
+      <div class="mt-2 font-semibold">Shop</div>
+      <div class="text-tn-muted text-[12px]">you@example.com · shop.example.com</div>
+      <div class="mt-3 flex gap-2">
+        <span class="flex-1 text-center rounded-lg bg-tn-accent text-tn-bg py-1.5 font-semibold">Save</span>
+        <span class="flex-1 text-center rounded-lg border border-tn-fg/15 py-1.5">Not now</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const LOWER = 'abcdefghijklmnopqrstuvwxyz';
+  const UPPER = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  const DIGITS = '0123456789';
+  const SYMBOLS = '!@#$%^&*()-_=+[]{};:,.?/~';
+  const AMBIGUOUS = "0O1lI|`'\"";
+
+  /** A uniform index below n: rejection sampling, never random % n. */
+  function below(n: number) {
+    const zone = 2 ** 32 - (2 ** 32 % n);
+    const buf = new Uint32Array(1);
+    for (;;) {
+      crypto.getRandomValues(buf);
+      if (buf[0] < zone) return buf[0] % n;
+    }
+  }
+  function generate(length = 24) {
+    const keep = (s: string) => [...s].filter((c) => !AMBIGUOUS.includes(c));
+    const classes = [LOWER, UPPER, DIGITS, SYMBOLS].map(keep);
+    const all = classes.flat();
+    for (;;) {
+      const p = Array.from({ length }, () => all[below(all.length)]).join('');
+      if (classes.every((cls) => cls.some((c) => p.includes(c)))) return p;
+    }
+  }
+
+  const $ = (id: string) => document.getElementById(id)!;
+  const user = $('b-user') as HTMLInputElement;
+  const pass = $('b-pass') as HTMLInputElement;
+  const menu = $('b-menu');
+  const rows = $('b-rows');
+  const done = $('b-done');
+  const save = $('b-save');
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  let mode: 'login' | 'signup' = 'login';
+  let run = 0;
+  let generated = '';
+
+  const hue = (text: string) => {
+    let h = 0;
+    for (const c of text) h = (h * 31 + c.codePointAt(0)!) % 360;
+    return h;
+  };
+  const avatar = (title: string, glyph?: string) =>
+    `<span class="w-7 h-7 flex-none rounded-lg grid place-items-center text-[12px] font-bold text-white" style="background:hsl(${hue(
+      title,
+    )} 55% 45%)">${glyph ?? title[0]}</span>`;
+  const row = (i: number, sel: boolean, avatarHtml: string, title: string, sub: string, subCls = 'text-tn-muted text-[12px]') =>
+    `<div data-i="${i}" class="b-row flex items-center gap-2.5 px-2 py-[7px] rounded-[9px] cursor-pointer ${
+      sel ? 'bg-tn-fg/[0.11]' : 'hover:bg-tn-fg/[0.06]'
+    }">${avatarHtml}<div class="min-w-0"><div class="font-semibold truncate">${title}</div><div class="${subCls} truncate">${sub}</div></div></div>`;
+
+  const KEY =
+    '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="7.5" cy="15.5" r="4.5"/><path d="m10.7 12.3 9.3-9.3M17 6l3 3M14.5 8.5l2 2"/></svg>';
+  const PASSKEY =
+    '<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="9" cy="8" r="4"/><path d="M2 21a7 7 0 0 1 11-5.7"/><circle cx="17" cy="14" r="2.5"/><path d="M17 16.5V22l1.5-1.2M17 19.5l1.5-1"/></svg>';
+
+  function renderMenu(sel = 0) {
+    if (mode === 'login') {
+      $('b-head').textContent = 'Log in as…';
+      rows.innerHTML =
+        row(0, sel === 0, avatar('Shop'), 'Shop', 'you@example.com') +
+        row(1, sel === 1, avatar('Shop admin'), 'Shop admin', 'ops@example.com') +
+        row(2, sel === 2, avatar('Shop', PASSKEY), 'you@example.com', 'Passkey · Shop');
+    } else {
+      $('b-head').textContent = 'Password';
+      rows.innerHTML = row(0, true, avatar('password', KEY), 'Use a strong password', generated, 'text-tn-accent font-mono text-[12.5px] tracking-wide');
+    }
+    rows.querySelectorAll<HTMLElement>('.b-row').forEach((r) =>
+      r.addEventListener('click', () => {
+        stopAuto();
+        pick(Number(r.dataset.i));
+      }),
+    );
+  }
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, reduced ? 0 : ms));
+  function openMenu() {
+    if (mode === 'signup') generated = generate();
+    renderMenu();
+    menu.classList.remove('opacity-0', 'pointer-events-none', '-translate-y-1');
+  }
+  function closeMenu() {
+    menu.classList.add('opacity-0', 'pointer-events-none', '-translate-y-1');
+  }
+
+  async function pick(i: number) {
+    const token = ++run;
+    closeMenu();
+    if (mode === 'login' && i === 2) {
+      user.value = 'you@example.com';
+      pass.value = '';
+      done.textContent = 'Signed in with your passkey';
+      done.classList.remove('opacity-0');
+      return;
+    }
+    const email = mode === 'login' && i === 1 ? 'ops@example.com' : 'you@example.com';
+    const secret = mode === 'signup' ? generated : generate(18);
+    user.value = '';
+    pass.value = '';
+    for (const ch of email) {
+      if (token !== run) return;
+      user.value += ch;
+      await sleep(14);
+    }
+    for (let k = 0; k < secret.length; k++) {
+      if (token !== run) return;
+      pass.value = '•'.repeat(k + 1);
+      await sleep(14);
+    }
+    if (mode === 'signup') {
+      pass.value = generated;
+      done.textContent = 'Account created';
+      done.classList.remove('opacity-0');
+      await sleep(500);
+      if (token === run) save.classList.remove('opacity-0', 'translate-x-3');
+    } else {
+      done.textContent = 'Signed in';
+      done.classList.remove('opacity-0');
+    }
+  }
+
+  function reset() {
+    run++;
+    closeMenu();
+    user.value = mode === 'signup' ? 'you@example.com' : '';
+    pass.value = '';
+    done.classList.add('opacity-0');
+    save.classList.add('opacity-0', 'translate-x-3');
+    $('b-title').textContent = mode === 'login' ? 'Sign in' : 'Create your account';
+    $('b-submit').textContent = mode === 'login' ? 'Sign in' : 'Create account';
+    $('b-url').textContent = mode === 'login' ? 'shop.example.com/login' : 'shop.example.com/signup';
+    document.querySelectorAll<HTMLElement>('.b-tab').forEach((t) => {
+      const on = t.dataset.mode === mode;
+      t.classList.toggle('bg-ink-800', on);
+      t.classList.toggle('text-white', on);
+      t.classList.toggle('text-ink-400', !on);
+    });
+  }
+
+  $('b-mark').addEventListener('click', () => {
+    stopAuto();
+    if (menu.classList.contains('opacity-0')) openMenu();
+    else closeMenu();
+  });
+  document.querySelectorAll<HTMLElement>('.b-tab').forEach((t) =>
+    t.addEventListener('click', () => {
+      stopAuto();
+      mode = t.dataset.mode as 'login' | 'signup';
+      reset();
+    }),
+  );
+
+  // Plays by itself, sign-in then sign-up, until the visitor takes over.
+  let auto = true;
+  function stopAuto() {
+    auto = false;
+  }
+  async function loop() {
+    while (auto) {
+      for (const m of ['login', 'signup'] as const) {
+        if (!auto) return;
+        mode = m;
+        reset();
+        await sleep(1200);
+        if (!auto) return;
+        openMenu();
+        await sleep(1600);
+        if (!auto) return;
+        await pick(0);
+        await sleep(3200);
+      }
+    }
+  }
+  reset();
+  const io = new IntersectionObserver((e) => {
+    if (e.some((x) => x.isIntersecting)) {
+      io.disconnect();
+      loop();
+    }
+  });
+  io.observe($("browser-window"));
+</script>

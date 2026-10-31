@@ -1,0 +1,120 @@
+---
+// `vp run` output masking, ported from crates/vp-core/src/mask.rs: each injected
+// value is replaced by <vp:NAME> in its raw, base64, URL-safe base64,
+// percent-encoded and JSON-escaped forms; values shorter than 6 characters are
+// left alone; overlapping matches resolve leftmost-longest. Runs on what the
+// visitor types, in their browser.
+---
+
+<div class="grid lg:grid-cols-2 gap-4" id="mask">
+  <div class="window">
+    <div class="window-bar">
+      <span class="window-dot"></span><span class="window-dot"></span><span class="window-dot"></span>
+      <span class="ml-2">what the command printed</span>
+    </div>
+    <div class="p-4 sm:p-5 space-y-4">
+      <div class="grid sm:grid-cols-[150px_1fr] gap-3">
+        <label class="block">
+          <span class="text-xs text-ink-500">Variable</span>
+          <input
+            id="mask-name"
+            value="STRIPE_KEY"
+            spellcheck="false"
+            class="mt-1 w-full rounded-md bg-ink-950 border border-ink-800 px-3 py-2 font-mono text-sm text-white focus:outline-none focus:border-tn-accent"
+          />
+        </label>
+        <label class="block">
+          <span class="text-xs text-ink-500">Its value (made up; try your own)</span>
+          <input
+            id="mask-value"
+            value="sk_test_51Mz9+demo/Key=Q7"
+            spellcheck="false"
+            autocomplete="off"
+            class="mt-1 w-full rounded-md bg-ink-950 border border-ink-800 px-3 py-2 font-mono text-sm text-white focus:outline-none focus:border-tn-accent"
+          />
+        </label>
+      </div>
+      <pre id="mask-raw" class="font-mono text-[12.5px] leading-relaxed text-ink-300 whitespace-pre-wrap break-all"></pre>
+    </div>
+  </div>
+  <div class="window">
+    <div class="window-bar">
+      <span class="window-dot"></span><span class="window-dot"></span><span class="window-dot"></span>
+      <span class="ml-2">what you and the agent see</span>
+      <span id="mask-count" class="ml-auto text-tn-purple"></span>
+    </div>
+    <pre id="mask-out" class="p-4 sm:p-5 font-mono text-[12.5px] leading-relaxed text-ink-300 whitespace-pre-wrap break-all"></pre>
+  </div>
+</div>
+
+<script>
+  const MIN_MASKED_LEN = 6;
+  const nameEl = document.getElementById('mask-name') as HTMLInputElement;
+  const valueEl = document.getElementById('mask-value') as HTMLInputElement;
+  const rawEl = document.getElementById('mask-raw')!;
+  const outEl = document.getElementById('mask-out')!;
+  const countEl = document.getElementById('mask-count')!;
+
+  const bytes = (s: string) => new TextEncoder().encode(s);
+  const b64 = (s: string) => btoa(String.fromCharCode(...bytes(s)));
+  const b64url = (s: string) => b64(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const percent = (s: string) =>
+    [...bytes(s)]
+      .map((b) => {
+        const c = String.fromCharCode(b);
+        return /[A-Za-z0-9\-_.~]/.test(c) ? c : '%' + b.toString(16).toUpperCase().padStart(2, '0');
+      })
+      .join('');
+  const json = (s: string) => JSON.stringify(s).slice(1, -1);
+  const esc = (s: string) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]!);
+
+  /** The masker: every form of each value, leftmost-longest, like aho-corasick's LeftmostLongest. */
+  function mask(text: string, secrets: [string, string][]) {
+    const patterns: [string, string][] = [];
+    for (const [label, raw] of secrets) {
+      const value = raw.replace(/\n$/, '');
+      if (value.length < MIN_MASKED_LEN) continue;
+      for (const form of [value, b64(value), b64url(value), percent(value), json(value)]) {
+        if (!patterns.some(([p]) => p === form)) patterns.push([form, `<vp:${label}>`]);
+      }
+    }
+    let out = '';
+    let hits = 0;
+    for (let i = 0; i < text.length; ) {
+      let best: [string, string] | null = null;
+      for (const p of patterns) if (text.startsWith(p[0], i) && (!best || p[0].length > best[0].length)) best = p;
+      if (best) {
+        out += '\u0000' + best[1] + '\u0001';
+        i += best[0].length;
+        hits++;
+      } else out += text[i++];
+    }
+    return { out, hits };
+  }
+
+  function render() {
+    const name = (nameEl.value.trim() || 'SECRET').toUpperCase().replace(/[^A-Z0-9_]/g, '_');
+    const v = valueEl.value;
+    const raw = [
+      `$ vp run --env "${name}=op://Dev/Stripe Test Key/credential" -- ./smoke.sh`,
+      `using key ${v}`,
+      `Authorization: Basic ${b64(v)}`,
+      `token (url-safe): ${b64url(v)}`,
+      `GET /charges?key=${percent(v)}`,
+      `{"config":{"key":"${json(v)}"}}`,
+      `ok: 5 checks passed`,
+    ].join('\n');
+    rawEl.innerHTML = esc(raw).replace(/^(.*)$/m, '<span class="text-ink-500">$1</span>');
+    const lines = raw.split('\n');
+    const { out, hits } = mask(lines.slice(1).join('\n'), [[name, v]]);
+    outEl.innerHTML =
+      `<span class="text-ink-500">${esc(lines[0])}</span>\n` +
+      esc(out).replace(/\u0000(.*?)\u0001/g, '<span class="text-tn-purple bg-tn-purple/10 rounded px-0.5">$1</span>');
+    countEl.textContent =
+      v.length < MIN_MASKED_LEN ? 'under 6 characters: not masked' : `${hits} masked`;
+  }
+
+  nameEl.addEventListener('input', render);
+  valueEl.addEventListener('input', render);
+  render();
+</script>

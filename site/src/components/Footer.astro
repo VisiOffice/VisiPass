@@ -1,0 +1,20 @@
+---
+import Mark from './Mark.astro';
+const year = new Date().getFullYear();
+---
+
+<footer class="border-t border-ink-900 py-12">
+  <div class="container-wide flex flex-col md:flex-row gap-6 md:items-center justify-between text-sm text-ink-500">
+    <div class="flex items-center gap-2.5">
+      <Mark class="w-5 h-5 text-ink-400" />
+      <span>VisiPass · © {year} VisiOffice · AGPL-3.0</span>
+    </div>
+    <nav class="flex flex-wrap gap-x-6 gap-y-2" aria-label="Footer">
+      <a class="hover:text-white" href="https://github.com/VisiOffice/VisiPass">GitHub</a>
+      <a class="hover:text-white" href="https://github.com/VisiOffice/VisiPass/releases">Releases</a>
+      <a class="hover:text-white" href="https://github.com/VisiOffice/VisiPass/blob/main/docs/crypto-design.md">Security design</a>
+      <a class="hover:text-white" href="https://github.com/VisiOffice/VisiPass/blob/main/skills/visipass/SKILL.md">Agent skill</a>
+      <a class="hover:text-white" href="https://github.com/VisiOffice/VisiPass/issues">Issues</a>
+    </nav>
+  </div>
+</footer>
