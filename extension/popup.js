@@ -413,8 +413,16 @@ function otpRow(secret) {
   body.append(label, code);
   let digits = "";
   const tools = el("div", "actions");
-  tools.append(iconButton("copy", "", "iconbtn", (e) => digits && copy(digits, e.currentTarget), "Copy"));
+  const copyButton = iconButton("copy", "", "iconbtn", (e) => {
+    e.stopPropagation();
+    if (digits) copy(digits, e.currentTarget);
+  }, "Copy");
+  tools.append(copyButton);
   box.append(body, tools);
+  // Anywhere on the row copies the code, as authenticator apps do.
+  box.classList.add("copyable");
+  box.title = "Click to copy";
+  box.addEventListener("click", () => digits && copy(digits, copyButton));
   tick = () =>
     totpNow(secret).then(
       (t) => {
@@ -546,6 +554,28 @@ function editor(item, vaults = null) {
   form.append(sites);
 
   const otp = input("One-time code secret (otpauth:// link or setup key)", value(item, isOtp), { hidden: true });
+  // Shown while you type in it, hidden again when you leave.
+  otp.field.addEventListener("focus", () => (otp.field.type = "text"));
+  otp.field.addEventListener("blur", () => (otp.field.type = "password"));
+  // The code the secret makes, live, so a pasted secret shows at once that it works.
+  const preview = el("div", "note");
+  otp.box.append(preview);
+  const showCode = () => {
+    const text = otp.field.value.trim();
+    if (!text) return (preview.textContent = "");
+    totpNow(text).then(
+      (t) => {
+        const half = Math.ceil(t.code.length / 2);
+        preview.textContent = `Code now: ${t.code.slice(0, half)} ${t.code.slice(half)} · ${t.left}s`;
+        preview.className = "note";
+      },
+      (error) => {
+        preview.textContent = error?.message || "Not a valid code secret";
+        preview.className = "note error";
+      },
+    );
+  };
+  otp.field.addEventListener("input", showCode);
   form.append(otp.box);
 
   // Custom fields: label, value, and whether the value is hidden.
@@ -652,7 +682,17 @@ function editor(item, vaults = null) {
     tools.append(archive);
   }
   tools.style.marginTop = "14px";
+  // Enter in any one-line field saves, as it would submit a form.
+  form.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && e.target.tagName === "INPUT" && !e.isComposing) {
+      e.preventDefault();
+      save();
+    }
+  });
   setPane(header, form, tools, note);
+  // setPane stops the detail view's ticker; this one keeps the preview's countdown live.
+  showCode();
+  ticker = setInterval(showCode, 1000);
   title.field.focus();
 }
 
