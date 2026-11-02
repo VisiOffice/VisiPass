@@ -2107,3 +2107,32 @@ fn the_extension_says_the_release_version() {
         "bump extension/manifest.json with Cargo.toml"
     );
 }
+
+#[test]
+fn browser_install_registers_the_host_where_chrome_keeps_its_profile() {
+    let home = tempfile::tempdir().unwrap();
+    let chrome = if cfg!(target_os = "macos") {
+        home.path()
+            .join("Library/Application Support/Google/Chrome")
+    } else {
+        home.path().join(".config/google-chrome")
+    };
+    std::fs::create_dir_all(&chrome).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_vp"))
+        .args(["browser", "install"])
+        .env("HOME", home.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let manifest = chrome.join("NativeMessagingHosts/com.visioffice.visipass.json");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+    assert_eq!(
+        manifest["allowed_origins"][0],
+        "chrome-extension://pmfmecknoobmojibgpbkpeckpdnmhnpm/"
+    );
+}
