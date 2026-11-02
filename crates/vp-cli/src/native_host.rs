@@ -196,16 +196,42 @@ pub fn serve(origin: &str) -> i32 {
     0
 }
 
+#[cfg(target_os = "macos")]
+const CONFIG_DIR: &str = "~/Library/Application Support";
+#[cfg(not(target_os = "macos"))]
+const CONFIG_DIR: &str = "~/.config";
+
+/// Each browser's profile folder, where its NativeMessagingHosts folder goes.
+fn browser_dirs(home: &std::path::Path) -> [(&'static str, PathBuf); 3] {
+    #[cfg(target_os = "macos")]
+    let (base, chrome, chromium, brave) = (
+        home.join("Library/Application Support"),
+        "Google/Chrome",
+        "Chromium",
+        "BraveSoftware/Brave-Browser",
+    );
+    #[cfg(not(target_os = "macos"))]
+    let (base, chrome, chromium, brave) = (
+        home.join(".config"),
+        "google-chrome",
+        "chromium",
+        "BraveSoftware/Brave-Browser",
+    );
+    [
+        ("Chrome", base.join(chrome)),
+        ("Chromium", base.join(chromium)),
+        ("Brave", base.join(brave)),
+    ]
+}
+
 /// Registers the host with every Chromium-family browser that has a profile here.
 pub fn install() -> Result<Value, Failure> {
-    let exe =
-        std::env::current_exe().map_err(|_| Failure::new("Could not find the vp executable"))?;
+    // Resolve symlinks (vp linked into ~/.local/bin) so extensionDir is found beside the real build.
+    let exe = std::env::current_exe()
+        .and_then(std::fs::canonicalize)
+        .map_err(|_| Failure::new("Could not find the vp executable"))?;
     let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    let browsers = [
-        ("Chrome", home.join(".config/google-chrome")),
-        ("Chromium", home.join(".config/chromium")),
-        ("Brave", home.join(".config/BraveSoftware/Brave-Browser")),
-    ];
+    let browsers = browser_dirs(&home);
     let manifest = json!({
         "name": HOST_NAME,
         "description": "VisiPass: fill logins from the vault",
@@ -231,9 +257,10 @@ pub fn install() -> Result<Value, Failure> {
         installed.push(json!({ "browser": name, "manifest": path }));
     }
     if installed.is_empty() {
-        return Err(Failure::new(
-            "No Chrome, Chromium or Brave profile found in ~/.config",
-        ));
+        return Err(Failure::new(format!(
+            "No Chrome, Chromium or Brave profile found in {}",
+            CONFIG_DIR
+        )));
     }
     let extension = ["/usr/share/visipass/extension"]
         .into_iter()
