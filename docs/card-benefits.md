@@ -77,7 +77,7 @@ upstream reaches nobody until someone reviews it here.
 
 - `network` is null on 15 of the 30 cards (most Chase, Citi and Capital One cards), because the product
   pages CardFacts cites don't state it and its rule is never to guess. The acceptance check (§5)
-  needs it. Asked upstream to source it from issuer terms, and to allow a list where a product is
+  needs it. Asked upstream ([cardfacts#8](https://github.com/WeiqiZhou2002/cardfacts/issues/8)) to source it from issuer terms, and to allow a list where a product is
   issued on more than one network. Until then, the person picks the network when saving a card.
 - Merchant exclusions (Amex grocery bonuses exclude superstores and warehouse clubs) are only in
   `notes`. The merchant map handles this from the other side: walmart.com is not `groceries`. If
