@@ -67,4 +67,5 @@ Security properties. Do not weaken them.
 git tag v0.1.1 && git push origin main v0.1.1
 # CI tests, builds x86_64 + aarch64 tarballs and creates the GitHub release (0.x = prerelease).
 packaging/aur/update.sh 0.1.1   # fills PKGBUILD checksums + .SRCINFO; push to the AUR visipass-bin repo
+packaging/macos/build-app.sh    # VisiPass.app, all four programs in Contents/MacOS; --install puts it in ~/Applications
 ```

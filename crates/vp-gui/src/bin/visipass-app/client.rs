@@ -73,6 +73,7 @@ pub fn hand_off() -> Result<(), Failure> {
         Ok(stream) => stream,
         Err(_) => {
             let daemon = std::env::current_exe()
+                .and_then(std::fs::canonicalize)
                 .ok()
                 .and_then(|exe| exe.parent().map(|d| d.join("visipassd")))
                 .filter(|p| p.is_file())

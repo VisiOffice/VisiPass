@@ -209,8 +209,12 @@ pub fn find_display() -> Vec<(&'static str, std::ffi::OsString)> {
     found
 }
 
+/// Beside the real visipassd, not a link to it: macOS reports the path it was
+/// started by.
 pub(crate) fn beside_self(name: &str) -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
+    let exe = std::env::current_exe()
+        .and_then(std::fs::canonicalize)
+        .ok()?;
     Some(exe.parent()?.join(name)).filter(|p| p.is_file())
 }
 

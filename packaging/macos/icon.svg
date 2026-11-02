@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- The app icon: assets/brand/visipass.svg on Apple's macOS icon grid (an 824
+       body in a 1024 canvas). Rebuild VisiPass.icns with make-icon.sh. -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="#101014"/>
+  <g transform="translate(512,512) scale(1.2227) translate(-256,-256)">
+    <path fill="#F5F6F8" fill-rule="evenodd" d="M76,0 H436 A76,76 0 0 1 512,76 V436 A76,76 0 0 1 436,512 H76 A76,76 0 0 1 0,436 V76 A76,76 0 0 1 76,0 Z M228,400 H284 V287.2 A84,84 0 1 0 228,287.2 Z"/>
+  </g>
+</svg>
