@@ -342,7 +342,11 @@ impl Render for ApprovalView {
                         div()
                             .text_color(t.foreground)
                             .when(is_command, |d| {
-                                d.bg(t.well).px(px(8.)).py(px(6.)).rounded(px(t.radius))
+                                d.bg(t.well)
+                                    .px(px(8.))
+                                    .py(px(6.))
+                                    .rounded(px(t.radius))
+                                    .font_family(SharedString::from(t.mono_family.clone()))
                             })
                             .child(value.clone()),
                     ),

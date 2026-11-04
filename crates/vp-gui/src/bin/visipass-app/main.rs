@@ -46,6 +46,8 @@ fn main() {
             let options = WindowOptions {
                 titlebar: Some(TitlebarOptions {
                     title: Some("VisiPass".into()),
+                    // On macOS the panes run to the top edge, under the window buttons.
+                    appears_transparent: cfg!(target_os = "macos"),
                     ..Default::default()
                 }),
                 app_id: Some("visipass".into()),

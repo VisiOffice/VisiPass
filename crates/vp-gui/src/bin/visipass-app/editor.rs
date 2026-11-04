@@ -1,6 +1,6 @@
 //! Creating and editing an item, with the password generator.
 
-use crate::app::{category_glyph, category_name};
+use crate::app::{category_icon, category_name};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     Context, Entity, EventEmitter, Focusable, FontWeight, IntoElement, Render, SharedString,
@@ -9,6 +9,7 @@ use gpui::{
 use vp_core::generate::{Recipe, entropy, generate};
 use vp_core::model::{Field, Item, UrlEntry, VaultRef};
 use vp_core::secret::Secret;
+use vp_gui::assets::icon;
 use vp_gui::text_input::{InputEvent, TextInput};
 use vp_gui::theme::{Theme, alpha};
 
@@ -523,9 +524,9 @@ impl Render for ItemEditor {
                     .gap(px(12.))
                     .child(
                         div()
-                            .text_size(px(t.size(2.0)))
+                            .flex()
                             .text_color(t.accent)
-                            .child(category_glyph(&self.original.category)),
+                            .child(icon(category_icon(&self.original.category), t.size(2.0)).text_color(t.accent)),
                     )
                     .child(
                         div()

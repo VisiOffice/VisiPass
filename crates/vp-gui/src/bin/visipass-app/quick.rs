@@ -6,7 +6,7 @@
 //! After copying a secret the window closes but the process waits 90 seconds
 //! to clear the clipboard, unless something else was copied since.
 
-use crate::app::category_glyph;
+use crate::app::category_icon;
 use crate::client::Client;
 use crate::keymap::actions::*;
 use gpui::prelude::FluentBuilder;
@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use vp_core::ipc::Request;
 use vp_core::model::{Item, ItemSummary, Scope};
 use vp_core::totp::Totp;
+use vp_gui::assets::icon;
 use vp_gui::text_input::{InputEvent, TextInput};
 use vp_gui::theme::{Theme, alpha};
 
@@ -285,55 +286,60 @@ impl Render for QuickView {
                 .filter(|u| !u.is_empty())
                 .or_else(|| item.urls.first().map(|u| host(&u.href)))
                 .unwrap_or_else(|| item.vault.name.clone());
-            rows = rows.child(
-                div()
-                    .id(("quick-row", row))
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .px(px(12.))
-                    .py(px(6.))
-                    .rounded(px(t.radius))
-                    .cursor_pointer()
-                    .when(selected, |d| {
-                        d.bg(alpha(t.foreground, t.controls.selected_fill_alpha * 0.6))
-                    })
-                    .hover(|s| s.bg(alpha(t.foreground, t.controls.hover_fill_alpha)))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.cursor = row;
-                        this.take(Take::Password, window, cx);
-                    }))
-                    .child(
-                        div()
-                            .w(px(18.))
-                            .text_color(if selected { t.accent } else { t.muted })
-                            .child(category_glyph(&item.category)),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .overflow_hidden()
-                            .child(div().truncate().child(item.title.clone()))
-                            .child(
+            rows =
+                rows.child(
+                    div()
+                        .id(("quick-row", row))
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .px(px(12.))
+                        .py(px(6.))
+                        .rounded(px(t.radius))
+                        .cursor_pointer()
+                        .when(selected, |d| {
+                            d.bg(alpha(t.foreground, t.controls.selected_fill_alpha * 0.6))
+                        })
+                        .hover(|s| s.bg(alpha(t.foreground, t.controls.hover_fill_alpha)))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.cursor = row;
+                            this.take(Take::Password, window, cx);
+                        }))
+                        .child(
+                            div()
+                                .w(px(18.))
+                                .flex()
+                                .text_color(if selected { t.accent } else { t.muted })
+                                .child(
+                                    icon(category_icon(&item.category), 16.)
+                                        .text_color(if selected { t.accent } else { t.muted }),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .overflow_hidden()
+                                .child(div().truncate().child(item.title.clone()))
+                                .child(
+                                    div()
+                                        .text_size(px(t.size(0.917)))
+                                        .text_color(t.muted)
+                                        .truncate()
+                                        .child(detail),
+                                ),
+                        )
+                        .when(selected, |d| {
+                            d.child(
                                 div()
                                     .text_size(px(t.size(0.917)))
-                                    .text_color(t.muted)
-                                    .truncate()
-                                    .child(detail),
-                            ),
-                    )
-                    .when(selected, |d| {
-                        d.child(
-                            div()
-                                .text_size(px(t.size(0.917)))
-                                .text_color(t.accent)
-                                .child("↵ copy password"),
-                        )
-                    }),
-            );
+                                    .text_color(t.accent)
+                                    .child("↵ copy password"),
+                            )
+                        }),
+                );
         }
         let empty = if self.items.is_empty() {
             "Loading your items…"

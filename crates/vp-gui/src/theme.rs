@@ -24,7 +24,11 @@ pub struct Theme {
     pub scrim: Rgba,
     /// Wells such as the command line.
     pub well: Rgba,
+    /// Interface text. The system font on macOS; the terminal font on Linux,
+    /// as Omarchy's own menus use.
     pub font_family: String,
+    /// Passwords, codes and commands, where every character must be legible.
+    pub mono_family: String,
     /// The rem root; Omarchy's `[font] base-size`.
     pub base_size: f32,
     pub radius: f32,
@@ -130,6 +134,14 @@ fn quick(program: &str, args: &[&str]) -> Option<String> {
 }
 
 fn font_family() -> String {
+    // GPUI resolves this alias to San Francisco.
+    if cfg!(target_os = "macos") {
+        return ".SystemUIFont".into();
+    }
+    mono_family()
+}
+
+fn mono_family() -> String {
     std::env::var("OMARCHY_MENU_FONT")
         .ok()
         .filter(|f| !f.is_empty())
@@ -220,6 +232,7 @@ fn omarchy() -> Option<Theme> {
         scrim: alpha(scrim, number(&polkit, "scrim-alpha").unwrap_or(0.5)),
         well: palette("dark_background").unwrap_or_else(|| alpha(foreground, 0.06)),
         font_family: font_family(),
+        mono_family: mono_family(),
         base_size: number(&font, "base-size").unwrap_or(12.0).max(1.0),
         radius: hyprland_rounding().unwrap_or(0.0),
         controls: Controls {
@@ -255,7 +268,13 @@ fn fallback() -> Theme {
         scrim: alpha(background, 0.5),
         well: hex("#16161e"),
         font_family: font_family(),
-        base_size: 12.0,
+        mono_family: mono_family(),
+        // macOS's body text is 13 points.
+        base_size: if cfg!(target_os = "macos") {
+            13.0
+        } else {
+            12.0
+        },
         radius: 8.0,
         controls: Controls {
             color: foreground,

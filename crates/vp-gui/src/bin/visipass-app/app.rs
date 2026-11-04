@@ -18,9 +18,14 @@ use vp_core::ipc::{ItemKey, Merge, Request};
 use vp_core::model::{Item, ItemSummary, Scope, VaultRef, kind};
 use vp_core::secret::Secret;
 use vp_core::totp::Totp;
+use vp_gui::assets::{Icon, icon};
 use vp_gui::text_input::{InputEvent, TextInput};
 use vp_gui::theme::{Theme, alpha};
 
+/// Height of the transparent macOS title bar the panes start below.
+const TITLEBAR: f32 = if cfg!(target_os = "macos") { 28. } else { 0. };
+const SIDEBAR_WIDTH: f32 = 230.;
+const LIST_WIDTH: f32 = 330.;
 const CLIPBOARD_CLEAR: Duration = Duration::from_secs(90);
 const REVEAL_FOR: Duration = Duration::from_secs(30);
 const SLOW_CALL: Duration = Duration::from_millis(1500);
@@ -104,16 +109,17 @@ pub fn category_name(category: &str) -> String {
     }
 }
 
-pub fn category_glyph(category: &str) -> &'static str {
+pub fn category_icon(category: &str) -> Icon {
     match category {
-        "LOGIN" => "\u{f007}",
-        "PASSWORD" => "\u{f084}",
-        "API_CREDENTIAL" => "\u{f121}",
-        "SECURE_NOTE" => "\u{f15c}",
-        "CREDIT_CARD" => "\u{f09d}",
-        "SSH_KEY" | "SERVER" => "\u{f233}",
-        "DATABASE" => "\u{f1c0}",
-        _ => "\u{f023}",
+        "LOGIN" => Icon::Login,
+        "PASSWORD" => Icon::Password,
+        "API_CREDENTIAL" => Icon::Code,
+        "SECURE_NOTE" => Icon::Note,
+        "CREDIT_CARD" => Icon::Card,
+        "SSH_KEY" | "SERVER" => Icon::Server,
+        "DATABASE" => Icon::Database,
+        "WIRELESS_ROUTER" => Icon::Wifi,
+        _ => Icon::Lock,
     }
 }
 
@@ -768,6 +774,17 @@ impl VisiPassApp {
         cx: &mut Context<Self>,
         on: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> impl IntoElement {
+        self.icon_button(id, None, label, cx, on)
+    }
+
+    fn icon_button(
+        &self,
+        id: impl Into<SharedString>,
+        leading: Option<(Icon, gpui::Rgba)>,
+        label: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+        on: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> impl IntoElement {
         let t = &self.theme;
         let c = &t.controls;
         div()
@@ -786,13 +803,19 @@ impl VisiPassApp {
             })
             .active(|s| s.bg(alpha(c.color, c.pressed_fill_alpha)))
             .on_click(cx.listener(move |this, _, window, cx| on(this, window, cx)))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .when_some(leading, |d, (glyph, color)| {
+                d.child(icon(glyph, t.size(1.0)).text_color(color))
+            })
             .child(label.into())
     }
 
     fn nav_row(
         &self,
         id: String,
-        glyph: &'static str,
+        glyph: Icon,
         label: String,
         count: Option<usize>,
         filter: Filter,
@@ -818,8 +841,9 @@ impl VisiPassApp {
             .child(
                 div()
                     .w(px(16.))
+                    .flex()
                     .text_color(if selected { t.accent } else { t.muted })
-                    .child(glyph),
+                    .child(icon(glyph, 15.).text_color(if selected { t.accent } else { t.muted })),
             )
             .child(div().flex_1().child(label))
             .when_some(count, |d, n| {
@@ -847,7 +871,7 @@ impl VisiPassApp {
 
         let mut sidebar = div()
             .id("sidebar")
-            .w(px(230.))
+            .w(px(SIDEBAR_WIDTH))
             .h_full()
             .flex()
             .flex_col()
@@ -878,7 +902,7 @@ impl VisiPassApp {
             )
             .child(self.nav_row(
                 "nav-all".into(),
-                "\u{f03a}",
+                Icon::List,
                 "All items".into(),
                 Some(self.items.len()),
                 Filter::All,
@@ -887,7 +911,7 @@ impl VisiPassApp {
             .when(favorites > 0, |d| {
                 d.child(self.nav_row(
                     "nav-fav".into(),
-                    "\u{f005}",
+                    Icon::Star,
                     "Favorites".into(),
                     Some(favorites),
                     Filter::Favorites,
@@ -899,7 +923,7 @@ impl VisiPassApp {
             let count = self.items.iter().filter(|i| i.vault.id == vault.id).count();
             sidebar = sidebar.child(self.nav_row(
                 format!("vault-{}", vault.id),
-                "\u{f187}",
+                Icon::Vault,
                 vault.name.clone(),
                 Some(count),
                 Filter::Vault(vault.id.clone()),
@@ -911,7 +935,7 @@ impl VisiPassApp {
             .when(!self.conflicts.is_empty(), |d| {
                 d.child(self.nav_row(
                     "nav-conflicts".into(),
-                    "\u{f071}",
+                    Icon::Warning,
                     "Conflicts".into(),
                     Some(self.conflicts.len()),
                     Filter::Conflicts,
@@ -920,7 +944,7 @@ impl VisiPassApp {
             })
             .child(self.nav_row(
                 "nav-duplicates".into(),
-                "\u{f0c5}",
+                Icon::Copy,
                 "Duplicates".into(),
                 self.duplicates.as_ref().map(|_| self.open_groups().len()),
                 Filter::Duplicates,
@@ -928,7 +952,7 @@ impl VisiPassApp {
             ))
             .child(self.nav_row(
                 "nav-agents".into(),
-                "\u{f06a9}",
+                Icon::Bot,
                 "Agents".into(),
                 None,
                 Filter::Agents,
@@ -970,7 +994,7 @@ impl VisiPassApp {
                     .child(format!("{count} item{}", if count == 1 { "" } else { "s" })),
             );
         div()
-            .w(px(330.))
+            .w(px(LIST_WIDTH))
             .h_full()
             .flex()
             .flex_col()
@@ -1008,29 +1032,33 @@ impl VisiPassApp {
 
     fn render_menu(&self, menu: Menu, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme.clone();
-        let entry =
-            |id: String, glyph: &'static str, label: String, count: Option<usize>, chosen: bool| {
-                div()
-                    .id(gpui::ElementId::Name(id.into()))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .px(px(10.))
-                    .py(px(4.))
-                    .cursor_pointer()
-                    .text_color(if chosen { t.accent } else { t.foreground })
-                    .hover(|s| s.bg(alpha(t.foreground, t.controls.hover_fill_alpha)))
-                    .child(
-                        div()
-                            .w(px(16.))
-                            .text_color(if chosen { t.accent } else { t.muted })
-                            .child(glyph),
-                    )
-                    .child(div().flex_1().child(label))
-                    .when_some(count, |d, n| {
-                        d.child(div().text_color(t.muted).child(n.to_string()))
-                    })
-            };
+        let entry = |id: String, glyph: Icon, label: String, count: Option<usize>, chosen: bool| {
+            div()
+                .id(gpui::ElementId::Name(id.into()))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .px(px(10.))
+                .py(px(4.))
+                .cursor_pointer()
+                .text_color(if chosen { t.accent } else { t.foreground })
+                .hover(|s| s.bg(alpha(t.foreground, t.controls.hover_fill_alpha)))
+                .child(
+                    div()
+                        .w(px(16.))
+                        .flex()
+                        .text_color(if chosen { t.accent } else { t.muted })
+                        .child(icon(glyph, 15.).text_color(if chosen {
+                            t.accent
+                        } else {
+                            t.muted
+                        })),
+                )
+                .child(div().flex_1().child(label))
+                .when_some(count, |d, n| {
+                    d.child(div().text_color(t.muted).child(n.to_string()))
+                })
+        };
         let mut list = div().flex().flex_col().py(px(4.));
         match menu {
             Menu::Category => {
@@ -1050,7 +1078,7 @@ impl VisiPassApp {
                 list = list.child(
                     entry(
                         "cat-all".into(),
-                        "\u{f03a}",
+                        Icon::List,
                         "All categories".into(),
                         None,
                         self.category.is_none(),
@@ -1068,7 +1096,7 @@ impl VisiPassApp {
                     list = list.child(
                         entry(
                             format!("cat-{category}"),
-                            category_glyph(&category),
+                            category_icon(&category),
                             category_name(&category),
                             Some(n),
                             chosen,
@@ -1092,7 +1120,7 @@ impl VisiPassApp {
                     list = list.child(
                         entry(
                             format!("new-{category}"),
-                            category_glyph(category),
+                            category_icon(category),
                             label.into(),
                             None,
                             false,
@@ -1111,7 +1139,7 @@ impl VisiPassApp {
             div()
                 .id("menu")
                 .absolute()
-                .top(px(84.))
+                .top(px(84. + TITLEBAR))
                 .when(menu == Menu::Category, |d| d.left(px(10.)))
                 .when(menu == Menu::New, |d| d.right(px(10.)))
                 .w(px(240.))
@@ -1173,8 +1201,15 @@ impl VisiPassApp {
             .child(
                 div()
                     .w(px(18.))
+                    .flex()
                     .text_color(if selected { t.accent } else { t.muted })
-                    .child(category_glyph(&item.category)),
+                    .child(
+                        icon(category_icon(&item.category), 16.).text_color(if selected {
+                            t.accent
+                        } else {
+                            t.muted
+                        }),
+                    ),
             )
             .child(
                 div()
@@ -1341,6 +1376,7 @@ impl VisiPassApp {
                                     .min_w(px(0.))
                                     .text_size(px(t.size(1.333)))
                                     .text_color(t.accent)
+                                    .font_family(SharedString::from(t.mono_family.clone()))
                                     .font_weight(FontWeight::BOLD)
                                     .child(shown),
                             )
@@ -1379,6 +1415,7 @@ impl VisiPassApp {
                             .flex_1()
                             .min_w(px(0.))
                             .text_color(t.foreground)
+                            .font_family(SharedString::from(t.mono_family.clone()))
                             .overflow_hidden()
                             .truncate()
                             .child(shown),
@@ -1513,9 +1550,9 @@ impl VisiPassApp {
             .gap(px(12.))
             .child(
                 div()
-                    .text_size(px(t.size(2.0)))
+                    .flex()
                     .text_color(t.accent)
-                    .child(category_glyph(&item.category)),
+                    .child(icon(category_icon(&item.category), t.size(2.0)).text_color(t.accent)),
             )
             .child(
                 div()
@@ -1535,13 +1572,14 @@ impl VisiPassApp {
                         item.vault.name
                     ))),
             )
-            .child(self.button(
+            .child(self.icon_button(
                 "favorite",
-                if item.favorite {
-                    "\u{f005} Favorite"
+                Some(if item.favorite {
+                    (Icon::StarFilled, t.accent)
                 } else {
-                    "\u{f006} Favorite"
-                },
+                    (Icon::Star, t.muted)
+                }),
+                "Favorite",
                 cx,
                 |this, _, cx| this.toggle_favorite(cx),
             ))
@@ -2166,6 +2204,33 @@ impl VisiPassApp {
 impl Render for VisiPassApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme.clone();
+        let list_shown = !matches!(self.filter, Filter::Duplicates | Filter::Conflicts);
+        // The macOS title bar is transparent: this strip continues the panes under the
+        // window buttons, and AppKit drags the window from it.
+        let titlebar = div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .h(px(TITLEBAR))
+            .flex()
+            .child(
+                div()
+                    .w(px(SIDEBAR_WIDTH))
+                    .h_full()
+                    .bg(t.well)
+                    .border_r_1()
+                    .border_color(alpha(t.foreground, 0.08)),
+            )
+            .when(list_shown, |d| {
+                d.child(
+                    div()
+                        .w(px(LIST_WIDTH))
+                        .h_full()
+                        .border_r_1()
+                        .border_color(alpha(t.foreground, 0.08)),
+                )
+            });
         let slow = self
             .busy_since
             .is_some_and(|since| since.elapsed() > SLOW_CALL);
@@ -2234,6 +2299,7 @@ impl Render for VisiPassApp {
             .text_color(t.foreground)
             .font_family(SharedString::from(t.font_family.clone()))
             .text_size(px(t.size(1.0)))
+            .when(TITLEBAR > 0., |d| d.pt(px(TITLEBAR)).child(titlebar))
             .child(
                 div()
                     .flex_1()
@@ -2246,10 +2312,9 @@ impl Render for VisiPassApp {
                     .when(self.filter == Filter::Conflicts, |d| {
                         d.child(self.render_conflicts(cx))
                     })
-                    .when(
-                        !matches!(self.filter, Filter::Duplicates | Filter::Conflicts),
-                        |d| d.child(self.render_list(cx)).child(self.render_detail(cx)),
-                    ),
+                    .when(list_shown, |d| {
+                        d.child(self.render_list(cx)).child(self.render_detail(cx))
+                    }),
             )
             .child({
                 let (text, color) = match (&self.error, slow, &self.toast) {
