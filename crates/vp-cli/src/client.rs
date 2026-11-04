@@ -15,9 +15,11 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(330);
 
 pub use vp_core::paths::{socket, state_dir};
 
-/// visipassd next to this binary, else on PATH.
+/// visipassd next to this binary, else on PATH. The link resolved: on macOS
+/// `vp` is linked onto PATH from inside VisiPass.app.
 pub fn daemon_program() -> PathBuf {
     std::env::current_exe()
+        .and_then(std::fs::canonicalize)
         .ok()
         .and_then(|exe| exe.parent().map(|dir| dir.join("visipassd")))
         .filter(|p| p.is_file())
