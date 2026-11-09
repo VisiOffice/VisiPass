@@ -11,7 +11,7 @@ A password manager built for coding agents. Your agent finds, uses and saves sec
 - **The agent layer over 1Password is the part to rely on.** `vp` reaches your existing vaults through the 1Password CLI and adds standing grants, an approval prompt that names the agent, project and command, output masking, and a hash-chained access log. 1Password still stores and encrypts everything.
 - **VisiPass's own vault is experimental** (`vp init`, `vp import op`). Its design ([docs/crypto-design.md](docs/crypto-design.md)) has had an internal review, but neither the design nor the code has had an outside audit. Keep 1Password as your backup, and don't store anyone else's credentials in it yet.
 - **The browser extension** works in Chrome and Chromium, loaded unpacked (see [extension/README.md](extension/README.md)); it is not in the Chrome Web Store.
-- Sync goes through a folder you already sync (Dropbox, iCloud Drive, Google Drive, OneDrive, Syncthing): encrypted, signed files only, no VisiPass server. New and not yet reviewed from outside. No macOS or Windows builds yet.
+- Sync goes through a folder you already sync (Dropbox, iCloud Drive, Google Drive, OneDrive, Syncthing) or an S3-compatible bucket (Cloudflare R2, Backblaze B2, AWS, MinIO): encrypted, signed files only, no VisiPass server. New and not yet reviewed from outside. No macOS or Windows builds yet.
 - VisiPass is not a sandbox: a command given a secret by `vp run` can do anything with it.
 
 ## Install
@@ -80,6 +80,9 @@ vp emergency-kit # print your Secret Key and account ID (asks for the master pas
 vp sync setup ~/Dropbox   # keep the vault in step through a folder your sync service shares;
                           # only encrypted, signed files go there, and VisiPass runs no server
 vp sync join ~/Dropbox    # on another device: your Secret Key and master password open it there
+vp sync setup s3://my-bucket --endpoint https://<account>.r2.cloudflarestorage.com
+                          # or through an S3-compatible bucket (R2, Backblaze B2, AWS, MinIO), good
+                          # for servers with no sync app; the keys go in the VisiPass window and vault
 vp sync                   # devices heard from; items changed on two devices at once are kept
                           # both ways until you choose one in vp app → Conflicts
 ```

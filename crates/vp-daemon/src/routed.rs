@@ -6,6 +6,7 @@ use crate::approval::{self, Approver, Prompt};
 use serde_json::{Value, json};
 use vp_core::Failure;
 use vp_core::backend::{Backend, EmergencyKit, NativeStatus, SyncOp};
+use vp_core::bucket::SyncPlace;
 use vp_core::ipc::{PasteMode, PasteSpec};
 use vp_core::model::{
     Destination, Item, ItemDetail, Listed, PasswordOutcome, PasswordRequest, Receipt, Scope,
@@ -231,22 +232,37 @@ impl<U: Unlock> Backend for Routed<U> {
         let native = &self.native;
         if !native.exists() && !matches!(op, SyncOp::Join { .. } | SyncOp::Status) {
             return Err(Failure::new(
-                "Create your VisiPass vault first with `vp init`, or join one with `vp sync join <folder>`",
+                "Create your VisiPass vault first with `vp init`, or join one with `vp sync join <folder or s3://bucket>`",
             ));
         }
         let report = |r: vp_sync::Report| json!({ "written": r.written, "applied": r.applied, "newDeviceId": r.new_device_id });
         match op {
-            SyncOp::Setup { folder } => {
-                let r = native.sync_setup(&folder).await?;
+            SyncOp::Setup { place, keys } => {
+                let (r, next) = match (place, keys) {
+                    (SyncPlace::Bucket { bucket }, Some(keys)) => {
+                        let next = format!(
+                            "On each other device: install VisiPass, then run `vp sync join {} --endpoint {}` and enter the bucket's keys, your Secret Key and master password",
+                            bucket.location(),
+                            bucket.endpoint
+                        );
+                        (native.sync_setup_bucket(bucket, keys).await?, next)
+                    }
+                    (SyncPlace::Folder { path }, _) => (
+                        native.sync_setup(path.as_ref()).await?,
+                        "On each other device: install VisiPass, make sure this folder is synced there, then run `vp sync join <folder>` and enter your Secret Key and master password".to_string(),
+                    ),
+                    (SyncPlace::Bucket { .. }, None) => {
+                        return Err(Failure::new("A bucket needs its keys"));
+                    }
+                };
                 let mut status = native.sync_status();
                 status["round"] = report(r);
-                status["next"] = json!(
-                    "On each other device: install VisiPass, make sure this folder is synced there, then run `vp sync join <folder>` and enter your Secret Key and master password"
-                );
+                status["next"] = json!(next);
                 Ok(status)
             }
             SyncOp::Join {
-                folder,
+                place,
+                keys,
                 secret_key,
                 password,
             } => {
@@ -255,7 +271,19 @@ impl<U: Unlock> Backend for Routed<U> {
                         "That Secret Key is not right ({e}); nothing was changed"
                     ))
                 })?;
-                let r = native.sync_join(&folder, secret, password).await?;
+                let r = match (place, keys) {
+                    (SyncPlace::Bucket { bucket }, Some(keys)) => {
+                        native
+                            .sync_join_bucket(bucket, keys, secret, password)
+                            .await?
+                    }
+                    (SyncPlace::Folder { path }, _) => {
+                        native.sync_join(path.as_ref(), secret, password).await?
+                    }
+                    (SyncPlace::Bucket { .. }, None) => {
+                        return Err(Failure::new("A bucket needs its keys"));
+                    }
+                };
                 let mut status = native.sync_status();
                 status["round"] = report(r);
                 Ok(status)
@@ -270,7 +298,7 @@ impl<U: Unlock> Backend for Routed<U> {
             SyncOp::Off => {
                 native.sync_off()?;
                 Ok(
-                    json!({ "on": false, "note": "This device stops syncing; the files in the folder stay, and other devices go on syncing" }),
+                    json!({ "on": false, "note": "This device stops syncing; the files in the storage stay, and other devices go on syncing" }),
                 )
             }
             SyncOp::Conflicts => {

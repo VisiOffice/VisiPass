@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime};
 use vp_core::Failure;
 use vp_core::backend::Backend;
+use vp_core::bucket::{BucketConfig, BucketKeys};
 use vp_core::model::{
     Destination, Field, FieldMeta, Item, ItemDetail, ItemSummary, Listed, PasskeyInfo,
     PasswordOutcome, PasswordRequest, Receipt, Scope, SectionMeta, SectionRef, Url, UrlEntry,
@@ -55,6 +56,9 @@ pub enum Presence {
 const UNLOCK_ATTEMPTS: usize = 3;
 /// How often sync looks for other devices' changes while unlocked.
 pub const SYNC_EVERY: Duration = Duration::from_secs(60);
+/// How often a bucket is checked when nothing here changed: each check is a
+/// few requests, which providers count, and nobody is waiting on it.
+pub const BUCKET_POLL: Duration = Duration::from_secs(300);
 /// After the human cancels an unlock, requests that were waiting for it (and new
 /// ones) fail at once for this long instead of each opening another prompt.
 pub const QUIET_AFTER_CANCEL: Duration = Duration::from_secs(15);
@@ -335,6 +339,9 @@ struct Settings {
     /// The folder sync writes to (§11.1), if it is on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sync_folder: Option<PathBuf>,
+    /// The bucket sync writes to, if it is on. Its keys are in the vault.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sync_bucket: Option<BucketConfig>,
 }
 
 /// What the Emergency Kit prints (§5.1).
@@ -360,6 +367,8 @@ struct Inner<U> {
     state: Mutex<State>,
     /// One unlock at a time.
     gate: tokio::sync::Mutex<()>,
+    /// One bucket round at a time: they let go of the vault while on the network.
+    bucket_round: Mutex<()>,
     quiet_after_cancel: Duration,
     /// Woken by every commit, so sync sends it at once.
     changed: Arc<tokio::sync::Notify>,
@@ -442,6 +451,7 @@ impl<U: Unlock> NativeBackend<U> {
             quiet_after_cancel,
             changed: Arc::new(tokio::sync::Notify::new()),
             idle_watched: std::sync::atomic::AtomicBool::new(false),
+            bucket_round: Mutex::new(()),
         });
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let weak: Weak<Inner<U>> = Arc::downgrade(&inner);
@@ -460,10 +470,15 @@ impl<U: Unlock> NativeBackend<U> {
             let changed = inner.changed.clone();
             runtime.spawn(async move {
                 loop {
-                    let _ = tokio::time::timeout(SYNC_EVERY, changed.notified()).await;
+                    let woken = tokio::time::timeout(SYNC_EVERY, changed.notified())
+                        .await
+                        .is_ok();
                     match weak.upgrade() {
                         Some(inner) => {
-                            let _ = NativeBackend { inner }.sync_round().await;
+                            let backend = NativeBackend { inner };
+                            if woken || !backend.bucket_checked_recently() {
+                                let _ = backend.sync_round().await;
+                            }
                         }
                         None => break,
                     }
@@ -1747,6 +1762,187 @@ fn sync_folder_checked(folder: &std::path::Path) -> Result<PathBuf, Failure> {
     })
 }
 
+/// The vault item holding a bucket's keys (§11.1), so they sync and can be
+/// rotated like any other secret.
+fn bucket_item_title(config: &BucketConfig) -> String {
+    format!("VisiPass sync storage: {}", config.bucket)
+}
+const BUCKET_ACCESS_FIELD: &str = "accessKeyId";
+const BUCKET_SECRET_FIELD: &str = "secretAccessKey";
+
+fn bucket_entry<'a>(opened: &'a Opened, config: &BucketConfig) -> Option<&'a Entry> {
+    let title = bucket_item_title(config);
+    opened
+        .entries
+        .iter()
+        .find(|e| e.overview.title == title && !e.overview.archived)
+}
+
+fn bucket_keys(
+    store: &Store,
+    opened: &Opened,
+    config: &BucketConfig,
+) -> Result<BucketKeys, Failure> {
+    let missing = || {
+        Failure::new(format!(
+            "The vault has no complete item titled \"{}\", which holds the keys to the sync bucket",
+            bucket_item_title(config)
+        ))
+    };
+    let entry = bucket_entry(opened, config).ok_or_else(missing)?;
+    let found = details_at(store, opened, &entry.vault_id, &entry.item_id, &entry.rev)?;
+    let value = |id: &str| {
+        found
+            .fields
+            .iter()
+            .find(|f| f.id == id)
+            .and_then(|f| f.value.clone())
+            .ok_or_else(missing)
+    };
+    Ok(BucketKeys {
+        access_key: value(BUCKET_ACCESS_FIELD)?,
+        secret_key: value(BUCKET_SECRET_FIELD)?,
+    })
+}
+
+/// Saves the keys in the vault, replacing the ones there if they differ.
+fn keep_bucket_keys(
+    store: &mut Store,
+    opened: &mut Opened,
+    config: &BucketConfig,
+    keys: &BucketKeys,
+) -> Result<(), Failure> {
+    if let Ok(kept) = bucket_keys(store, opened, config)
+        && kept.access_key.expose() == keys.access_key.expose()
+        && kept.secret_key.expose() == keys.secret_key.expose()
+    {
+        return Ok(());
+    }
+    let existing = bucket_entry(opened, config).map(|e| {
+        (
+            e.vault_id.clone(),
+            e.item_id.clone(),
+            e.overview.created_at.clone(),
+        )
+    });
+    let (vault, id, created_at) = match existing {
+        Some((vault, id, created_at)) => (opened.vault(&vault)?.clone(), id, created_at),
+        None => {
+            let vault =
+                opened.vaults.first().cloned().ok_or_else(|| {
+                    Failure::new("The vault has no place to keep the bucket's keys")
+                })?;
+            (vault, new_id(), None)
+        }
+    };
+    let now = vp_core::time::now_rfc3339();
+    let field = |id: &str, label: &str, kind: &str, value: &Secret| Field {
+        id: id.into(),
+        label: Some(label.into()),
+        kind: kind.into(),
+        purpose: None,
+        section: None,
+        value: Some(value.clone()),
+        reference: None,
+    };
+    let overview = Overview {
+        title: bucket_item_title(config),
+        category: "API_CREDENTIAL".into(),
+        tags: Vec::new(),
+        urls: vec![UrlEntry {
+            href: config.endpoint.clone(),
+            label: None,
+            primary: true,
+        }],
+        favorite: false,
+        username: None,
+        created_at: created_at.or_else(|| Some(now.clone())),
+        updated_at: Some(now),
+        archived: false,
+        passkeys: Vec::new(),
+    };
+    save(
+        store,
+        opened,
+        &vault,
+        &id,
+        overview,
+        Details {
+            sections: Vec::new(),
+            fields: vec![
+                field(
+                    BUCKET_ACCESS_FIELD,
+                    "access key id",
+                    "STRING",
+                    &keys.access_key,
+                ),
+                field(
+                    BUCKET_SECRET_FIELD,
+                    "secret access key",
+                    "CONCEALED",
+                    &keys.secret_key,
+                ),
+            ],
+            passkeys: Vec::new(),
+        },
+    )?;
+    Ok(())
+}
+
+/// One round through a bucket. Only the steps touching the vault hold its
+/// lock, so a slow or absent network holds up nothing else ([`vp_sync::Mirror`]).
+/// `None` if the vault is locked.
+fn bucket_cycle<U: Unlock>(
+    inner: &Inner<U>,
+    config: &BucketConfig,
+    first: impl FnOnce(&mut Store, &mut Unlocked, &vp_sync::Mirror) -> vp_store::Result<vp_sync::Report>,
+) -> Option<Result<vp_sync::Report, Failure>> {
+    let _one_at_a_time = inner.bucket_round.lock().unwrap_or_else(|e| e.into_inner());
+    let (position, keys) = {
+        let state = inner.state();
+        let (store, opened) = (state.store.as_ref()?, state.opened.as_ref()?);
+        (
+            opened.unlocked.position(),
+            bucket_keys(store, opened, config),
+        )
+    };
+    let step =
+        |run: &mut dyn FnMut(&mut Store, &mut Unlocked) -> vp_store::Result<vp_sync::Report>| {
+            let mut state = inner.state();
+            let state = &mut *state;
+            let (Some(store), Some(opened)) = (state.store.as_mut(), state.opened.as_mut()) else {
+                return Err(Failure::new("VisiPass locked during the sync round"));
+            };
+            let report = run(store, &mut opened.unlocked).map_err(failure)?;
+            if report.applied > 0 {
+                reindex(store, opened)?;
+            }
+            Ok(report)
+        };
+    let cycle = || {
+        let bucket = vp_sync::Bucket::new(config.clone(), keys?).map_err(failure)?;
+        let mirror = vp_sync::Mirror::fetch(&bucket, &position).map_err(failure)?;
+        let mut first = Some(first);
+        let mut report = step(&mut |store, unlocked| {
+            first.take().expect("the first step runs once")(store, unlocked, &mirror)
+        })?;
+        // Another pass confirms what went out. A name another machine holds
+        // queues again under a new ID, hence more than one.
+        for _ in 0..3 {
+            if !mirror.has_outgoing() {
+                break;
+            }
+            report.written += mirror.send().map_err(failure)?;
+            let next = step(&mut |store, unlocked| vp_sync::round(store, unlocked, &mirror))?;
+            report.applied += next.applied;
+            report.new_device_id |= next.new_device_id;
+            report.devices = next.devices;
+        }
+        Ok(report)
+    };
+    Some(cycle())
+}
+
 impl<U: Unlock> NativeBackend<U> {
     /// The folder sync goes through, if it is on.
     pub fn sync_folder(&self) -> Option<PathBuf> {
@@ -1757,6 +1953,12 @@ impl<U: Unlock> NativeBackend<U> {
     /// the account record and a snapshot there, then syncs.
     pub async fn sync_setup(&self, folder: &std::path::Path) -> Result<vp_sync::Report, Failure> {
         let folder = sync_folder_checked(folder)?;
+        if let Some(bucket) = load_settings(&self.inner.paths.settings).sync_bucket {
+            return Err(Failure::new(format!(
+                "Sync already goes through {}. Turn it off first with `vp sync off`",
+                bucket.location()
+            )));
+        }
         if let Some(current) = self.sync_folder()
             && current != folder
         {
@@ -1783,6 +1985,58 @@ impl<U: Unlock> NativeBackend<U> {
         Ok(report)
     }
 
+    /// Turns sync on through a bucket, checking first that the keys reach it.
+    /// A device syncing through a folder moves over, bringing every file, so
+    /// its other devices can follow whenever they next run this.
+    pub async fn sync_setup_bucket(
+        &self,
+        config: BucketConfig,
+        keys: BucketKeys,
+    ) -> Result<vp_sync::Report, Failure> {
+        config.check().map_err(Failure::new)?;
+        let settings = load_settings(&self.inner.paths.settings);
+        if let Some(current) = settings.sync_bucket.filter(|c| *c != config) {
+            return Err(Failure::new(format!(
+                "Sync already goes through {}. Turn it off first with `vp sync off`",
+                current.location()
+            )));
+        }
+        let moving = settings.sync_folder;
+        self.open_for(Some(&format!("turn on sync through {}", config.location())))
+            .await?;
+        let (bucket, checking) = (config.clone(), keys.clone());
+        tokio::task::spawn_blocking(move || {
+            let bucket = vp_sync::Bucket::new(bucket, checking).map_err(failure)?;
+            vp_sync::Storage::list(&bucket, "").map_err(failure)?;
+            if let Some(folder) = moving {
+                vp_sync::copy_all(&vp_sync::Folder::new(&folder), &bucket).map_err(failure)?;
+            }
+            Ok::<_, Failure>(())
+        })
+        .await
+        .map_err(|_| Failure::new("Reaching the bucket failed"))??;
+        let kept = config.clone();
+        self.with(move |store, opened| keep_bucket_keys(store, opened, &kept, &keys))
+            .await?;
+        let inner = self.inner.clone();
+        let target = config.clone();
+        let report = tokio::task::spawn_blocking(move || {
+            bucket_cycle(&inner, &target, |store, unlocked, mirror| {
+                vp_sync::setup(store, unlocked, mirror)
+            })
+        })
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| Err(Failure::new("VisiPass locked while turning on sync")))?;
+        self.update_settings(|s| {
+            s.sync_bucket = Some(config);
+            s.sync_folder = None;
+        })?;
+        self.inner.state().last_sync = Some((SystemTime::now(), Ok(report.clone())));
+        Ok(report)
+    }
+
     /// Makes this device's vault from another device's sync folder, given the
     /// Secret Key and master password, and turns sync on. Refused if this
     /// device already has a vault.
@@ -1793,6 +2047,56 @@ impl<U: Unlock> NativeBackend<U> {
         password: Secret,
     ) -> Result<vp_sync::Report, Failure> {
         let folder = sync_folder_checked(folder)?;
+        let from = folder.clone();
+        self.join_from(
+            move || Ok(Box::new(vp_sync::Folder::new(&from)) as Box<dyn vp_sync::Storage>),
+            secret,
+            password,
+            |s| s.sync_folder = Some(folder),
+        )
+        .await
+    }
+
+    /// The same from a bucket, whose keys the person typed for this.
+    pub async fn sync_join_bucket(
+        &self,
+        config: BucketConfig,
+        keys: BucketKeys,
+        secret: SecretKey,
+        password: Secret,
+    ) -> Result<vp_sync::Report, Failure> {
+        let (bucket, typed) = (config.clone(), keys.clone());
+        let saved = config.clone();
+        let report = self
+            .join_from(
+                move || {
+                    vp_sync::Bucket::new(bucket, typed)
+                        .map(|b| Box::new(b) as Box<dyn vp_sync::Storage>)
+                        .map_err(failure)
+                },
+                secret,
+                password,
+                |s| s.sync_bucket = Some(saved),
+            )
+            .await?;
+        // Normally the keys came in with the vault.
+        self.with(move |store, opened| {
+            if bucket_keys(store, opened, &config).is_err() {
+                keep_bucket_keys(store, opened, &config, &keys)?;
+            }
+            Ok(())
+        })
+        .await?;
+        Ok(report)
+    }
+
+    async fn join_from(
+        &self,
+        storage: impl FnOnce() -> Result<Box<dyn vp_sync::Storage>, Failure> + Send + 'static,
+        secret: SecretKey,
+        password: Secret,
+        remember: impl FnOnce(&mut Settings),
+    ) -> Result<vp_sync::Report, Failure> {
         let _gate = self.inner.gate.lock().await;
         let paths = self.inner.paths.clone();
         if paths.exists() || paths.secret_key.exists() {
@@ -1812,11 +2116,10 @@ impl<U: Unlock> NativeBackend<U> {
             format!("{}\n", *secret.display()).as_bytes(),
         )?;
         let inner = self.inner.clone();
-        let from = folder.clone();
         let joined = tokio::task::spawn_blocking(move || {
             let paths = &inner.paths;
             let (store, unlocked, report) = vp_sync::join(
-                &vp_sync::Folder::new(&from),
+                storage()?.as_ref(),
                 &paths.vault,
                 &paths.sequence,
                 password.expose(),
@@ -1835,7 +2138,7 @@ impl<U: Unlock> NativeBackend<U> {
         .and_then(|r| r);
         match joined {
             Ok(report) => {
-                self.update_settings(|s| s.sync_folder = Some(folder))?;
+                self.update_settings(remember)?;
                 Ok(report)
             }
             Err(e) => {
@@ -1845,10 +2148,38 @@ impl<U: Unlock> NativeBackend<U> {
         }
     }
 
+    /// A timer tick need not touch a bucket checked a moment ago.
+    fn bucket_checked_recently(&self) -> bool {
+        load_settings(&self.inner.paths.settings)
+            .sync_bucket
+            .is_some()
+            && self
+                .inner
+                .state()
+                .last_sync
+                .as_ref()
+                .is_some_and(|(at, _)| at.elapsed().is_ok_and(|e| e < BUCKET_POLL))
+    }
+
     /// One sync round, if sync is on and the vault is unlocked. Never asks to
     /// unlock: sync needs the keys, and waits for the human to unlock.
     pub async fn sync_round(&self) -> Option<Result<vp_sync::Report, Failure>> {
-        let folder = self.sync_folder()?;
+        let settings = load_settings(&self.inner.paths.settings);
+        if let Some(config) = settings.sync_bucket {
+            let inner = self.inner.clone();
+            return tokio::task::spawn_blocking(move || {
+                let result = bucket_cycle(&inner, &config, |store, unlocked, mirror| {
+                    vp_sync::round(store, unlocked, mirror)
+                })?;
+                inner.state().last_sync =
+                    Some((SystemTime::now(), result.clone().map_err(|e| e.0.clone())));
+                Some(result)
+            })
+            .await
+            .ok()
+            .flatten();
+        }
+        let folder = settings.sync_folder?;
         let inner = self.inner.clone();
         tokio::task::spawn_blocking(move || {
             let mut state = inner.state();
@@ -1873,21 +2204,30 @@ impl<U: Unlock> NativeBackend<U> {
         .flatten()
     }
 
-    /// Stops syncing on this device. The files already in the folder stay.
+    /// Stops syncing on this device. The files already in the storage stay.
     pub fn sync_off(&self) -> Result<(), Failure> {
-        self.update_settings(|s| s.sync_folder = None)
+        self.update_settings(|s| {
+            s.sync_folder = None;
+            s.sync_bucket = None;
+        })
     }
 
     /// Sync on this device, for `vp sync status`. Holds no values.
     pub fn sync_status(&self) -> serde_json::Value {
         use serde_json::json;
-        let folder = self.sync_folder();
+        let settings = load_settings(&self.inner.paths.settings);
+        let bucket = settings.sync_bucket;
+        let folder = settings.sync_folder;
         let state = self.inner.state();
         let mut status = json!({
-            "on": folder.is_some(),
+            "on": folder.is_some() || bucket.is_some(),
             "folder": folder,
             "unlocked": state.opened.is_some(),
         });
+        if let Some(bucket) = &bucket {
+            status["bucket"] = json!(bucket.location());
+            status["endpoint"] = json!(bucket.endpoint);
+        }
         if let Some(opened) = &state.opened {
             let position = opened.unlocked.position();
             status["device"] = json!(vp_store::hex(&position.device));

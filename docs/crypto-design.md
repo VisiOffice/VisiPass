@@ -463,7 +463,7 @@ Constraints the local design keeps possible. Each gets its own design and review
 
 ### 11.1 Sync
 
-Designed 2026-10-16; folders implemented 2026-10-17 (`crates/vp-sync`, the storage half in `vp-store/src/sync.rs`), buckets not yet; see "As built" at the end of this section. **VisiPass runs no sync server.** Each person syncs through
+Designed 2026-10-16; folders implemented 2026-10-17 (`crates/vp-sync`, the storage half in `vp-store/src/sync.rs`), buckets 2026-11-09; see "As built" at the end of this section. **VisiPass runs no sync server.** Each person syncs through
 storage they already have: a folder that a sync service keeps in step (iCloud Drive, Dropbox,
 Google Drive, OneDrive, Syncthing) or an S3-compatible bucket (Cloudflare R2, Backblaze B2, AWS).
 Nobody has to trust the VisiPass project with their data, there is no central store of everyone's
@@ -627,7 +627,25 @@ and every few minutes).
 - *When.* Every commit wakes sync; otherwise it runs every minute and on unlock, only while the
   vault is unlocked. `vp sync setup` and `vp sync join` are refused to agents; the Secret Key and
   master password for joining are typed in the VisiPass window.
-- *Not yet:* S3-compatible buckets; deleting change files covered by a newer snapshot;
+- *Buckets (2026-11-09).* `crates/vp-sync/src/bucket.rs`: path-style requests signed with Signature
+  Version 4, `https` required except on loopback, no redirects followed. Writing is a look first,
+  `PUT` with `If-None-Match: *`, then a read back that compares the bytes, so a storage that ignores
+  the header (or answers 501, which falls back to a plain `PUT`) still shows a name another machine
+  took as a clone; on such a storage only a race inside that window can replace a file. Files sit under `<path>/visipass-sync/`, as in a folder.
+- *Bucket keys* are typed in the VisiPass window (access key ID, then secret access key), never in
+  arguments or a terminal, and kept in a vault item titled `VisiPass sync storage: <bucket>`. Only
+  the endpoint, bucket, path and region are in local settings. A new device types them once to reach
+  the vault; afterwards it reads the item, so rotating them is editing that item while the old key
+  still works.
+- *The vault's lock and the network.* A round holds the vault's lock, so a bucket round is split
+  (`Mirror`): fetch listings and unapplied change files with no lock; run the round against that
+  copy, which queues what it writes (`Created::Queued`, not confirmed); send with no lock; run the
+  round again, which confirms files now there with the same bytes and treats other bytes as a clone.
+  A commit sends at once; otherwise a bucket is checked every five minutes and on unlock.
+- *Moving.* `vp sync setup s3://...` on a device syncing through a folder copies every file first,
+  whole logs included, so a device that has not caught up finds no gap. Setting up on storage with
+  no snapshot writes one even if this device wrote one elsewhere.
+- *Not yet:* deleting change files covered by a newer snapshot;
   tombstones (items are archived, an ordinary edit, never deleted); rotation, so the only keyset
   is the first.
 
@@ -740,10 +758,11 @@ Implemented (2026-10-12), with tests that attack it (`crates/vp-store/tests`, `c
 - §11.1 sync through a folder (2026-10-17), with schema 2 (revisions and parents) and the
   migration from schema 1; conflicts are shown in the app's Conflicts view and settled there.
   Tests in `crates/vp-store/tests/sync.rs`, `crates/vp-sync/tests` and `crates/vp-cli/tests`.
+- §11.1 S3-compatible buckets (2026-11-09).
 
 Not yet: §5.2 Recovery Key; §6.1 `PR_SET_DUMPABLE`,
 `memfd_secret`/`mlock`; §6.3 password change and full
-rotation; §7.5 files; §9 fingerprints; §10 log signing; §11.1 buckets; §11.2, §11.3.
+rotation; §7.5 files; §9 fingerprints; §10 log signing; §11.2, §11.3.
 
 ## Changelog
 

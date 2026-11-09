@@ -538,6 +538,50 @@ fn assess(request: &Request, requester: &Requester) -> Assessment {
 }
 
 impl<B: Backend, A: Approver> Daemon<B, A> {
+    /// A bucket's keys, typed in the VisiPass window so they never pass
+    /// through the caller, its arguments or its terminal. None for a folder.
+    async fn bucket_keys(
+        &self,
+        place: &vp_core::bucket::SyncPlace,
+        action: &str,
+    ) -> Result<Option<vp_core::bucket::BucketKeys>, Failure> {
+        use vp_core::secret::Secret;
+        let vp_core::bucket::SyncPlace::Bucket { bucket } = place else {
+            return Ok(None);
+        };
+        let window = |secret| Prompt {
+            who: "VisiPass".into(),
+            action: action.into(),
+            details: vec![
+                ("Bucket".into(), bucket.location()),
+                ("Endpoint".into(), bucket.endpoint.clone()),
+            ],
+            secrets: vec![],
+            purpose: None,
+            timeout_secs: approval::TIMEOUT.as_secs(),
+            paste: Some(vp_core::ipc::PasteSpec {
+                mode: PasteMode::BucketKey { secret },
+                ..Default::default()
+            }),
+        };
+        let cancelled = || Failure::new("Cancelled; nothing was changed");
+        let typed = |value: Secret| Secret::new(value.expose().trim().to_string());
+        let access_key = self
+            .approver
+            .paste(&window(false))
+            .await?
+            .ok_or_else(cancelled)?;
+        let secret_key = self
+            .approver
+            .paste(&window(true))
+            .await?
+            .ok_or_else(cancelled)?;
+        Ok(Some(vp_core::bucket::BucketKeys {
+            access_key: typed(access_key),
+            secret_key: typed(secret_key),
+        }))
+    }
+
     pub fn new(backend: B, approver: A, state_dir: &Path, socket: PathBuf) -> Self {
         Self {
             backend,
@@ -1135,7 +1179,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                     None => json!({ "quickUnlock": false }),
                 })
             }
-            Request::SyncSetup { folder } => {
+            Request::SyncSetup { place } => {
                 // Where the vault's files go is the human's choice, never an agent's.
                 if requester.agent.is_some() {
                     return Err(Failure::new(
@@ -1143,13 +1187,14 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                     ));
                 }
                 let _turn = self.approvals.lock().await;
+                let keys = self
+                    .bucket_keys(&place, "turn on sync through this bucket")
+                    .await?;
                 self.backend
-                    .native_sync(SyncOp::Setup {
-                        folder: folder.into(),
-                    })
+                    .native_sync(SyncOp::Setup { place, keys })
                     .await
             }
-            Request::SyncJoin { folder } => {
+            Request::SyncJoin { place } => {
                 if requester.agent.is_some() {
                     return Err(Failure::new(
                         "Only the human can join this device to a vault: ask them to run `vp sync join <folder>` in their own terminal",
@@ -1165,7 +1210,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 let window = |mode| Prompt {
                     who: "VisiPass".into(),
                     action: "open your vault on this device".into(),
-                    details: vec![("Sync folder".into(), folder.clone())],
+                    details: vec![("Sync from".into(), place.describe())],
                     secrets: vec![],
                     purpose: None,
                     timeout_secs: approval::TIMEOUT.as_secs(),
@@ -1176,6 +1221,9 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 };
                 let cancelled = || Failure::new("Joining was cancelled; nothing was changed");
                 let _turn = self.approvals.lock().await;
+                let keys = self
+                    .bucket_keys(&place, "open your vault on this device")
+                    .await?;
                 let secret_key = self
                     .approver
                     .paste(&window(PasteMode::SecretKey))
@@ -1191,7 +1239,8 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                     .ok_or_else(cancelled)?;
                 self.backend
                     .native_sync(SyncOp::Join {
-                        folder: folder.into(),
+                        place,
+                        keys,
                         secret_key,
                         password,
                     })

@@ -83,19 +83,41 @@ enum QuickUnlockCommands {
     Off,
 }
 
+#[derive(clap::Args)]
+struct BucketFlags {
+    /// The S3 endpoint, for anything but AWS: https://<account>.r2.cloudflarestorage.com,
+    /// https://s3.<region>.backblazeb2.com, your MinIO
+    #[arg(long)]
+    endpoint: Option<String>,
+    /// The bucket's region; AWS needs it, others are usually worked out from the endpoint
+    #[arg(long)]
+    region: Option<String>,
+}
+
 #[derive(Subcommand)]
 enum SyncCommands {
     /// Sync on this device (the default)
     Status,
-    /// Sync now instead of within the minute
+    /// Sync now instead of at the next check
     Now,
     /// Turn sync on through a folder your sync service keeps on every device
-    /// (Dropbox, iCloud Drive, Google Drive, OneDrive, Syncthing). Only encrypted,
-    /// signed files go there; VisiPass runs no server
-    Setup { folder: PathBuf },
-    /// Open your vault on this device from that folder: asks for your Secret Key
-    /// and master password in the VisiPass window
-    Join { folder: PathBuf },
+    /// (Dropbox, iCloud Drive, Google Drive, OneDrive, Syncthing) or an
+    /// S3-compatible bucket (s3://bucket/path; asks for its keys in the VisiPass
+    /// window). Only encrypted, signed files go there; VisiPass runs no server
+    Setup {
+        /// A folder, or s3://bucket[/path]
+        folder: PathBuf,
+        #[command(flatten)]
+        bucket: BucketFlags,
+    },
+    /// Open your vault on this device from that folder or bucket: asks for your
+    /// Secret Key and master password in the VisiPass window
+    Join {
+        /// A folder, or s3://bucket[/path]
+        folder: PathBuf,
+        #[command(flatten)]
+        bucket: BucketFlags,
+    },
     /// Stop syncing on this device; the folder's files stay
     Off,
 }
@@ -266,7 +288,7 @@ enum Commands {
     /// Copy items into your VisiPass vault from another password manager
     #[command(subcommand)]
     Import(ImportCommands),
-    /// Keep your vault in step across devices through your own synced folder
+    /// Keep your vault in step across devices through your own synced folder or bucket
     Sync {
         #[command(subcommand)]
         command: Option<SyncCommands>,
@@ -899,17 +921,39 @@ fn execute(command: Commands) -> Result<i32, Failure> {
             })?)
         }
         Commands::Sync { command } => {
-            let folder = |folder: PathBuf| {
+            let place = |folder: PathBuf, flags: BucketFlags| {
+                use vp_core::bucket::{BucketConfig, SyncPlace};
+                let text = folder.to_string_lossy();
+                if text.starts_with("s3://") {
+                    return BucketConfig::parse(
+                        &text,
+                        flags.endpoint.as_deref(),
+                        flags.region.as_deref(),
+                    )
+                    .map(|bucket| SyncPlace::Bucket { bucket })
+                    .map_err(Failure::new);
+                }
+                if flags.endpoint.is_some() || flags.region.is_some() {
+                    return Err(Failure::new(
+                        "--endpoint and --region are for an s3://bucket address",
+                    ));
+                }
                 std::path::absolute(&folder)
-                    .map(|p| p.to_string_lossy().into_owned())
+                    .map(|p| SyncPlace::Folder {
+                        path: p.to_string_lossy().into_owned(),
+                    })
                     .map_err(|_| Failure::new(format!("{} is not a usable path", folder.display())))
             };
             print(&client::call(
                 match command.unwrap_or(SyncCommands::Status) {
                     SyncCommands::Status => Request::Sync { now: false },
                     SyncCommands::Now => Request::Sync { now: true },
-                    SyncCommands::Setup { folder: f } => Request::SyncSetup { folder: folder(f)? },
-                    SyncCommands::Join { folder: f } => Request::SyncJoin { folder: folder(f)? },
+                    SyncCommands::Setup { folder, bucket } => Request::SyncSetup {
+                        place: place(folder, bucket)?,
+                    },
+                    SyncCommands::Join { folder, bucket } => Request::SyncJoin {
+                        place: place(folder, bucket)?,
+                    },
                     SyncCommands::Off => Request::SyncOff,
                 },
             )?)

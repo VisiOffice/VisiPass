@@ -172,12 +172,15 @@ pub trait Backend: Send + Sync + 'static {
 
 /// What [`Backend::native_sync`] does.
 pub enum SyncOp {
+    /// `keys` when `place` is a bucket.
     Setup {
-        folder: std::path::PathBuf,
+        place: crate::bucket::SyncPlace,
+        keys: Option<crate::bucket::BucketKeys>,
     },
     /// `secret_key` is as the Emergency Kit prints it.
     Join {
-        folder: std::path::PathBuf,
+        place: crate::bucket::SyncPlace,
+        keys: Option<crate::bucket::BucketKeys>,
         secret_key: Secret,
         password: Secret,
     },

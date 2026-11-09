@@ -45,6 +45,8 @@ impl PasteView {
                 "Master password"
             }
             Some(PasteMode::SecretKey) => "Secret Key (VP1-…)",
+            Some(PasteMode::BucketKey { secret: false }) => "Access key ID",
+            Some(PasteMode::BucketKey { secret: true }) => "Secret access key",
             _ => "Paste the secret here (Ctrl+V)",
         };
         let field = cx.new(|cx| {
@@ -264,6 +266,7 @@ impl Render for PasteView {
             PasteMode::NewPassword { .. } => "Create your VisiPass vault".to_string(),
             PasteMode::ShowKey { .. } => "Your Secret Key".to_string(),
             PasteMode::SecretKey => "Open your vault on this device".to_string(),
+            PasteMode::BucketKey { .. } => "Connect your sync bucket".to_string(),
         };
         let highlight = if matches!(mode, PasteMode::Secret) {
             self.prompt.who.len()

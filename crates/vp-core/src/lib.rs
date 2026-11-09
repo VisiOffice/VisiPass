@@ -6,6 +6,7 @@
 
 pub mod audit;
 pub mod backend;
+pub mod bucket;
 pub mod dedupe;
 pub mod env;
 pub mod find;

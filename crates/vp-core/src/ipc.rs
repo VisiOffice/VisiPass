@@ -162,6 +162,8 @@ pub enum PasteMode {
     ShowKey { key: Secret },
     /// The Secret Key from the Emergency Kit, to open the vault on a new device.
     SecretKey,
+    /// A sync bucket's access key ID, or with `secret` its secret access key.
+    BucketKey { secret: bool },
 }
 
 impl PasteSpec {
@@ -202,6 +204,14 @@ impl PasteSpec {
             PasteMode::ShowKey { .. } => (KEY_INSTRUCTIONS.into(), "Done"),
             PasteMode::SecretKey => (
                 "Enter the Secret Key from your Emergency Kit (it starts with VP1-). With your master password it opens your vault on this device.".into(),
+                "Continue",
+            ),
+            PasteMode::BucketKey { secret: false } => (
+                "Paste the bucket's access key ID. VisiPass keeps it in your vault and uses it only to reach this bucket.".into(),
+                "Continue",
+            ),
+            PasteMode::BucketKey { secret: true } => (
+                "Paste the bucket's secret access key.".into(),
                 "Continue",
             ),
         }
@@ -392,15 +402,16 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hours: Option<u64>,
     },
-    /// Turns sync on through a folder each device can see (§11.1). Only the
-    /// human, never an agent. `folder` is absolute.
+    /// Turns sync on through a folder each device can see or a bucket
+    /// (§11.1). Only the human, never an agent. A folder's path is absolute;
+    /// a bucket's keys are typed in the VisiPass window.
     SyncSetup {
-        folder: String,
+        place: crate::bucket::SyncPlace,
     },
-    /// Makes this device's vault from a sync folder. The Secret Key and the
-    /// master password are typed in the VisiPass window.
+    /// Makes this device's vault from sync storage. The Secret Key, the
+    /// master password and any bucket keys are typed in the VisiPass window.
     SyncJoin {
-        folder: String,
+        place: crate::bucket::SyncPlace,
     },
     /// Sync on this device; with `now`, after a round.
     Sync {

@@ -1,6 +1,6 @@
 //! Sync through storage each person already has (§11.1 of
-//! `docs/crypto-design.md`): no VisiPass server. The storage holds one folder
-//! per account; inside, each device writes only its own files, and never
+//! `docs/crypto-design.md`): no VisiPass server. The storage (a synced folder
+//! or an S3-compatible bucket) holds one directory per account; inside, each device writes only its own files, and never
 //! changes a file once written:
 //!
 //! ```text
@@ -12,6 +12,12 @@
 //!
 //! So a sync service never sees two devices write one file, and needs no
 //! transactions. Everything here is untrusted: the store checks every file.
+
+pub mod bucket;
+pub mod mirror;
+
+pub use bucket::Bucket;
+pub use mirror::{Mirror, copy_all};
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -27,6 +33,9 @@ pub enum Created {
     Written,
     /// The name was taken; these are the bytes there.
     Exists(Vec<u8>),
+    /// Held to send after the round ([`Mirror`]): not yet in the storage, so
+    /// not to be confirmed.
+    Queued,
 }
 
 /// Where sync files live. Paths are relative, `/`-separated.
@@ -228,7 +237,9 @@ pub fn setup(store: &mut Store, u: &mut Unlocked, storage: &dyn Storage) -> Resu
         position.ak_generation
     );
     storage.create(&name, &record)?;
-    if position.snapshot.is_none() {
+    // Not only on first setup: this storage may be new to a device that wrote
+    // its snapshot elsewhere, and a new device can't join without one.
+    if devices_in(storage, &format!("{account}/snapshots"))?.is_empty() {
         let snapshot = store.snapshot(u)?;
         storage.create(
             &snapshot_path(&account, &snapshot.device, snapshot.seq),
@@ -247,7 +258,7 @@ pub fn round(store: &mut Store, u: &mut Unlocked, storage: &dyn Storage) -> Resu
     // must not quietly become a second, separate sync folder.
     if storage.list(&format!("{account}/accounts"))?.is_empty() {
         return Err(Error(
-            "The sync folder does not hold this vault's account record. Is the folder available on this device? Run `vp sync setup <folder>` to start over".into(),
+            "The sync storage does not hold this vault's account record. Is the folder available on this device? Run `vp sync setup <folder>` to start over".into(),
         ));
     }
 
@@ -279,6 +290,7 @@ pub fn round(store: &mut Store, u: &mut Unlocked, storage: &dyn Storage) -> Resu
                     store.confirm(seq)?;
                 }
                 Created::Exists(there) if there == bytes => store.confirm(seq)?,
+                Created::Queued => {}
                 Created::Exists(_) => {
                     taken = true;
                     break;

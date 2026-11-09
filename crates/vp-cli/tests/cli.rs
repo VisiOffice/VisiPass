@@ -3,6 +3,9 @@
 //! sentinel secrets never reach stdout, stderr, op's argv or the access log
 //! unless the command's purpose is to deliver them.
 
+#[path = "../../vp-sync/tests/support/fake_s3.rs"]
+mod fake_s3;
+
 use std::collections::VecDeque;
 use std::io::Write;
 use std::path::PathBuf;
@@ -2068,6 +2071,186 @@ fn a_second_device_joins_through_a_shared_folder_and_follows_changes() {
         let log = std::fs::read_to_string(world.path("state/access.log")).unwrap_or_default();
         assert!(!log.contains(&key));
     }
+}
+
+#[test]
+fn a_second_device_joins_through_a_bucket_and_no_key_reaches_the_caller() {
+    let (fake, endpoint) = fake_s3::Fake::start();
+    let location = format!("s3://{}/team", fake_s3::BUCKET);
+    let bucket_args = ["--endpoint", endpoint.as_str()];
+    let args = |verb: &'static str| {
+        let mut args = vec!["sync", verb, location.as_str()];
+        args.extend(bucket_args);
+        args
+    };
+
+    // init: password, confirmation, Secret Key window; then the bucket's two keys.
+    let first = World::native(&[
+        Decision::Once,
+        Decision::Once,
+        Decision::Deny,
+        Decision::Once,
+        Decision::Once,
+    ]);
+    clean(&first.vp(&["init"], None));
+    clean(&first.vp(&["import", "op"], None));
+    {
+        let mut pastes = first.approver.2.lock().unwrap();
+        pastes.clear();
+        pastes.push_back(fake_s3::ACCESS_KEY.to_string());
+        pastes.push_back(fake_s3::SECRET_KEY.to_string());
+    }
+    let set_up = first.vp(&args("setup"), None);
+    clean(&set_up);
+    let status = json(&set_up);
+    assert_eq!(status["on"], true);
+    assert_eq!(status["bucket"], location);
+    assert!(status["folder"].is_null());
+    assert!(status["next"].as_str().unwrap().contains(&location));
+    assert!(
+        fake.objects
+            .lock()
+            .unwrap()
+            .keys()
+            .all(|k| k.starts_with("team/visipass-sync/"))
+    );
+    let key = std::fs::read_to_string(first.path("data/secret-key")).unwrap();
+    let key = key.trim().to_string();
+
+    // join: the bucket's two keys, the Secret Key, the master password; then a read.
+    let second = World::native(&[Decision::Once; 5]);
+    {
+        let mut pastes = second.approver.2.lock().unwrap();
+        pastes.push_back(fake_s3::ACCESS_KEY.to_string());
+        pastes.push_back(fake_s3::SECRET_KEY.to_string());
+        pastes.push_back(key.clone());
+    }
+    let joined = second.vp(&args("join"), None);
+    clean(&joined);
+    assert_eq!(json(&joined)["bucket"], location);
+    let read = second.vp(&["read", "op://Dev/OpenAI API Key/credential"], None);
+    assert_eq!(text(&read.stdout), OPENAI);
+
+    // Rounds find the keys in the vault, which came with the sync.
+    let status = json(&second.vp(&["sync", "now"], None));
+    assert!(status["lastRound"]["error"].is_null(), "{status}");
+    assert_eq!(status["lastRound"]["devices"][0]["forked"], false);
+
+    let everything: Vec<u8> = fake
+        .objects
+        .lock()
+        .unwrap()
+        .values()
+        .flatten()
+        .copied()
+        .collect();
+    let in_bucket = String::from_utf8_lossy(&everything);
+    assert!(
+        !in_bucket.contains(fake_s3::SECRET_KEY),
+        "the storage holds ciphertext only"
+    );
+    for world in [&first, &second] {
+        world.assert_contained();
+        let log = std::fs::read_to_string(world.path("state/access.log")).unwrap_or_default();
+        let settings =
+            std::fs::read_to_string(world.path("state/vault-settings.json")).unwrap_or_default();
+        assert!(settings.contains("syncBucket"), "{settings}");
+        for place in [log, settings] {
+            assert!(!place.contains(fake_s3::SECRET_KEY));
+            assert!(!place.contains(fake_s3::ACCESS_KEY));
+        }
+    }
+    for output in [&set_up, &joined] {
+        for stream in [&output.stdout, &output.stderr] {
+            assert!(!text(stream).contains(fake_s3::SECRET_KEY));
+            assert!(!text(stream).contains(fake_s3::ACCESS_KEY));
+        }
+    }
+}
+
+#[test]
+fn a_device_syncing_through_a_folder_moves_to_a_bucket_with_its_files() {
+    let shared = tempfile::tempdir().unwrap();
+    let (fake, endpoint) = fake_s3::Fake::start();
+    let location = format!("s3://{}", fake_s3::BUCKET);
+    let world = World::native(&[
+        Decision::Once,
+        Decision::Once,
+        Decision::Deny,
+        Decision::Once,
+        Decision::Once,
+    ]);
+    clean(&world.vp(&["init"], None));
+    clean(&world.vp(&["import", "op"], None));
+    clean(&world.vp(&["sync", "setup", shared.path().to_str().unwrap()], None));
+    {
+        let mut pastes = world.approver.2.lock().unwrap();
+        pastes.clear();
+        pastes.push_back(fake_s3::ACCESS_KEY.to_string());
+        pastes.push_back(fake_s3::SECRET_KEY.to_string());
+    }
+    let moved = world.vp(&["sync", "setup", &location, "--endpoint", &endpoint], None);
+    clean(&moved);
+    let status = json(&moved);
+    assert_eq!(status["bucket"], location);
+    assert!(status["folder"].is_null(), "{status}");
+    assert!(
+        fake.objects
+            .lock()
+            .unwrap()
+            .keys()
+            .any(|k| k.contains("/snapshots/"))
+    );
+
+    let off = world.vp(&["sync", "off"], None);
+    clean(&off);
+    assert_eq!(json(&world.vp(&["sync"], None))["on"], false);
+    world.assert_contained();
+}
+
+#[test]
+fn a_bucket_must_be_reached_over_https_and_is_the_humans_to_choose() {
+    let world = World::native(&[]);
+    let plain = world.vp(
+        &[
+            "sync",
+            "setup",
+            "s3://vault-sync",
+            "--endpoint",
+            "http://storage.example.com",
+        ],
+        None,
+    );
+    assert!(
+        text(&plain.stderr).contains("must be https"),
+        "{}",
+        text(&plain.stderr)
+    );
+    assert_eq!(world.approver.asked(), 0);
+
+    let agents = World::native_agent(&[Decision::Once, Decision::Once, Decision::Deny]);
+    clean(&agents.vp(&["init"], None));
+    let asked = agents.approver.asked();
+    let agent = agents.vp(
+        &[
+            "sync",
+            "setup",
+            "s3://vault-sync",
+            "--endpoint",
+            "https://storage.example.com",
+        ],
+        None,
+    );
+    assert!(
+        text(&agent.stderr).contains("Only the human"),
+        "{}",
+        text(&agent.stderr)
+    );
+    assert_eq!(
+        agents.approver.asked(),
+        asked,
+        "no window opens for an agent"
+    );
 }
 
 #[test]
