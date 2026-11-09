@@ -66,7 +66,7 @@ const commands = [
             href="https://github.com/VisiOffice/VisiPass/releases"
             class="inline-flex items-center gap-2 rounded-full border border-ink-800 bg-ink-900/60 px-3 py-1 text-xs text-ink-400 hover:text-white hover:border-ink-700 transition"
           >
-            <span class="w-1.5 h-1.5 rounded-full bg-tn-green"></span> Open source · Linux · on 1Password or its own vault
+            <span class="w-1.5 h-1.5 rounded-full bg-tn-green"></span> Open source · Linux and macOS · on 1Password or its own vault
           </a>
           <h1 id="hero-heading" class="mt-6 text-4xl sm:text-5xl lg:text-6xl font-bold tracking-tight text-white text-balance">
             A password manager<br />
@@ -249,7 +249,10 @@ const commands = [
               <li>· Erases keys before sleep</li>
               <li>· Fingerprint quick unlock</li>
             </ul>
-            <p class="mt-4 text-xs text-ink-500">Internally reviewed, not yet audited from outside. Keep 1Password as your backup for now.</p>
+            <p class="mt-4 text-xs text-ink-500">
+              Idle, screen-lock and sleep locking are on Linux; on macOS it locks after 10 minutes unused. Internally reviewed, not yet audited from
+              outside. Keep 1Password as your backup for now.
+            </p>
           </div>
         </div>
       </div>
@@ -289,16 +292,16 @@ const commands = [
 
     <!-- Install -->
     <section id="install" class="section border-t border-ink-900">
-      <div class="container-narrow">
+      <div class="container-wide">
         <div data-reveal class="text-center">
           <div class="eyebrow">Install</div>
           <h2 class="h2">Running in a minute.</h2>
-          <p class="lede mx-auto">Linux on x86_64 and aarch64, Omarchy first. Needs the 1Password CLI with app integration turned on.</p>
+          <p class="lede mx-auto">Linux (x86_64 and aarch64, Omarchy first) and macOS. Needs the 1Password CLI with app integration turned on.</p>
         </div>
-        <div data-reveal class="mt-10 grid md:grid-cols-3 gap-4">
+        <div data-reveal class="mt-10 grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <div class="card">
             <div class="text-sm text-ink-500">1 · Arch / Omarchy</div>
-            <pre class="mt-3 font-mono text-[12.5px] text-white whitespace-pre-wrap">yay -S visipass-bin 1password-cli</pre>
+            <pre class="mt-3 font-mono text-[12.5px] text-white whitespace-pre-wrap [overflow-wrap:anywhere]">yay -S visipass-bin 1password-cli</pre>
           </div>
           <div class="card">
             <div class="text-sm text-ink-500">1 · Any Linux</div>
@@ -308,14 +311,21 @@ const commands = [
             </p>
           </div>
           <div class="card">
+            <div class="text-sm text-ink-500">1 · macOS, from source</div>
+            <pre class="mt-3 font-mono text-[12.5px] text-white whitespace-pre-wrap [overflow-wrap:anywhere]">cargo install --locked \
+  --git https://github.com/VisiOffice/VisiPass \
+  vp-cli vp-daemon vp-gui</pre>
+            <p class="mt-2 text-[13px] text-ink-400">The approval window’s first build takes a few minutes.</p>
+          </div>
+          <div class="card">
             <div class="text-sm text-ink-500">2 · Teach your agent</div>
-            <pre class="mt-3 font-mono text-[12.5px] text-white whitespace-pre-wrap">cp SKILL.md ~/.claude/skills/visipass/</pre>
+            <pre class="mt-3 font-mono text-[12.5px] text-white whitespace-pre-wrap [overflow-wrap:anywhere]">cp SKILL.md ~/.claude/skills/visipass/</pre>
             <p class="mt-2 text-[13px] text-ink-400">Then <code class="font-mono">vp doctor</code>.</p>
           </div>
         </div>
         <div data-reveal class="mt-8 rounded-xl border border-ink-800 bg-ink-900/40 p-5 text-sm text-ink-400 leading-relaxed">
-          <span class="text-white font-medium">Where it stands.</span> 0.x, Linux only. The browser extension loads unpacked in Chrome and Chromium; it isn’t in
-          the Chrome Web Store yet. No macOS or Windows builds yet. AGPL-3.0.
+          <span class="text-white font-medium">Where it stands.</span> 0.x. Prebuilt for Linux; on macOS, build from source. The browser extension loads unpacked in Chrome and Chromium; it isn’t in
+          the Chrome Web Store yet. No Windows yet. AGPL-3.0.
         </div>
       </div>
     </section>

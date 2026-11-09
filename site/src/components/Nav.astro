@@ -1,5 +1,6 @@
 ---
 import Mark from './Mark.astro';
+import { visiProducts } from '../products';
 
 const links = [
   { href: '/#how', label: 'How it works' },
@@ -19,6 +20,30 @@ const links = [
       {links.map((l) => <a href={l.href} class="hover:text-white transition-colors">{l.label}</a>)}
     </div>
     <div class="flex items-center gap-3">
+      <details class="product-switcher relative">
+        <summary class="flex items-center gap-1 text-sm text-ink-400 hover:text-white transition-colors cursor-pointer select-none list-none">
+          <span class="hidden sm:inline">Explore VisiOffice</span><span class="sm:hidden">VisiOffice</span>
+          <svg class="chev w-3.5 h-3.5 transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"
+            ><path d="m6 9 6 6 6-6"></path></svg
+          >
+        </summary>
+        <div
+          class="absolute right-0 mt-3 w-[min(19rem,calc(100vw-2rem))] rounded-xl border border-ink-800 bg-ink-950/95 backdrop-blur-md p-2 shadow-2xl shadow-black/60"
+        >
+          <p class="px-3 pt-2 pb-1.5 font-mono text-[10.5px] tracking-[0.16em] text-ink-500">THE VISIOFFICE SUITE</p>
+          {
+            visiProducts.map((p) => (
+              <a href={p.url} class="flex items-center justify-between gap-3 rounded-lg px-3 py-2 hover:bg-ink-900 group">
+                <span>
+                  <span class="block text-sm font-medium text-white">{p.name}</span>
+                  <span class="block text-xs text-ink-500">{p.description}</span>
+                </span>
+                <span class="text-ink-600 group-hover:text-tn-accent" aria-hidden="true">↗</span>
+              </a>
+            ))
+          }
+        </div>
+      </details>
       <a
         href="https://github.com/VisiOffice/VisiPass"
         class="text-ink-400 hover:text-white transition-colors"
@@ -35,3 +60,26 @@ const links = [
     </div>
   </nav>
 </header>
+
+<style>
+  .product-switcher summary::-webkit-details-marker {
+    display: none;
+  }
+  .product-switcher[open] .chev {
+    transform: rotate(180deg);
+  }
+</style>
+
+<script>
+  // Close the product menu on an outside click or Escape, as the other Visi sites do.
+  const menu = document.querySelector<HTMLDetailsElement>('.product-switcher')!;
+  document.addEventListener('click', (e) => {
+    if (e.target instanceof Node && !menu.contains(e.target)) menu.open = false;
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && menu.open) {
+      menu.open = false;
+      menu.querySelector('summary')?.focus();
+    }
+  });
+</script>

@@ -1,5 +1,6 @@
 ---
 import Mark from './Mark.astro';
+import { visiProducts } from '../products';
 const year = new Date().getFullYear();
 ---
 
@@ -15,6 +16,11 @@ const year = new Date().getFullYear();
       <a class="hover:text-white" href="https://github.com/VisiOffice/VisiPass/blob/main/docs/crypto-design.md">Security design</a>
       <a class="hover:text-white" href="https://github.com/VisiOffice/VisiPass/blob/main/skills/visipass/SKILL.md">Agent skill</a>
       <a class="hover:text-white" href="https://github.com/VisiOffice/VisiPass/issues">Issues</a>
+      <a class="hover:text-white" href="/privacy">Privacy</a>
     </nav>
+  </div>
+  <div class="container-wide mt-8 pt-6 border-t border-ink-900 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm text-ink-500">
+    <span class="font-mono text-[10.5px] tracking-[0.16em] text-ink-600">ALSO FROM VISIOFFICE</span>
+    {visiProducts.map((p) => <a class="hover:text-white" href={p.url}>{p.name}</a>)}
   </div>
 </footer>

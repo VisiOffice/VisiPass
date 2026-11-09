@@ -1,0 +1,125 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import Nav from '../components/Nav.astro';
+import Footer from '../components/Footer.astro';
+
+const updated = 'November 2, 2026';
+const repo = 'https://github.com/VisiOffice/VisiPass';
+---
+
+<BaseLayout
+  title="Privacy — VisiPass"
+  description="VisiPass runs on your computer. It has no accounts, no servers and no analytics, and the browser extension talks only to VisiPass on your machine."
+>
+  <Nav />
+  <main class="pt-28 pb-20">
+    <article class="container-narrow max-w-3xl privacy">
+      <p class="eyebrow">Privacy policy</p>
+      <h1 class="mt-3 text-4xl md:text-5xl font-bold tracking-tight text-white">Your secrets stay on your computer.</h1>
+      <p class="mt-4 text-ink-500 text-sm">Last updated {updated}</p>
+
+      <div class="card mt-10">
+        <p class="text-ink-200 leading-relaxed">
+          VisiPass is software you run on your own computer. There is no VisiPass account and no VisiPass server.
+          VisiOffice does not collect, receive, sell or share your passwords, browsing, or anything else you keep in
+          VisiPass, and there are no analytics or tracking in the app, the browser extension or this website.
+        </p>
+      </div>
+
+      <h2>The browser extension</h2>
+      <p>
+        The extension talks to one thing: the <code>vp</code> program on your computer, through Chrome's native
+        messaging. It makes no requests to the internet. To do its job it handles:
+      </p>
+      <ul>
+        <li>
+          <strong>The address of the page you are on</strong>, to find the logins saved for that site and to fill only
+          that site.
+        </li>
+        <li>
+          <strong>The login fields on the page</strong>, when you choose a login to fill or a strong password to use.
+        </li>
+        <li>
+          <strong>A password you submit</strong>, held in the browser's session memory (cleared when the browser
+          closes) until you save or dismiss the offer to save it. Pages never get it back.
+        </li>
+        <li>
+          <strong>A screenshot of the visible tab</strong>, only when you click to add a two-factor code from a QR code.
+          VisiPass on your computer reads the code from it; the image is not kept.
+        </li>
+        <li>
+          <strong>Three settings</strong> stored in the browser: whether the menu stays quiet, the sites you told it
+          never to offer saving on, and which vault new logins are saved to.
+        </li>
+      </ul>
+      <p>
+        Site icons come from Chrome's own icon cache, so no outside service learns which sites are in your vault. The
+        extension uses this information only to fill and save logins for you. It complies with the Chrome Web Store
+        User Data Policy, including the Limited Use requirements.
+      </p>
+
+      <h2>The app and your vault</h2>
+      <ul>
+        <li>
+          <strong>VisiPass's own vault</strong> is encrypted on your computer. Only you can unlock it; VisiOffice cannot
+          read it or recover it.
+        </li>
+        <li>
+          <strong>Sync</strong>, if you turn it on, writes encrypted files to a folder you choose, such as one your
+          Dropbox or iCloud already syncs. That provider stores the encrypted files under its own terms; it cannot read
+          them.
+        </li>
+        <li>
+          <strong>1Password</strong>, if you use it as the backend, is reached through 1Password's own <code>op</code>
+          program, under 1Password's privacy policy.
+        </li>
+        <li>
+          <strong>The access log</strong> of what was requested and approved stays on your computer.
+        </li>
+      </ul>
+
+      <h2>Coding agents</h2>
+      <p>
+        VisiPass is built so an agent uses a secret without seeing it: the agent gets references, and values go only
+        to commands you approve, with output masked. VisiPass sends nothing to any AI provider. What your agent sends
+        to its own provider is governed by that provider's policy.
+      </p>
+
+      <h2>This website</h2>
+      <p>
+        visipass.app is a static site on Cloudflare, which keeps standard request logs under its own privacy policy.
+        Fonts load from Google Fonts. The site sets no cookies and runs no analytics. Its demos run entirely in your
+        browser.
+      </p>
+
+      <h2>Changes and questions</h2>
+      <p>
+        VisiPass is open source, so you can check all of this in <a href={repo}>the code</a>. Changes to this policy
+        are posted here and in the repository's history. Questions go to
+        <a href={`${repo}/issues`}>GitHub issues</a>.
+      </p>
+    </article>
+  </main>
+  <Footer />
+</BaseLayout>
+
+<style>
+  .privacy h2 {
+    @apply mt-12 text-2xl font-semibold tracking-tight text-white;
+  }
+  .privacy p {
+    @apply mt-4 text-ink-300 leading-relaxed;
+  }
+  .privacy ul {
+    @apply mt-4 space-y-3 list-disc pl-5 text-ink-300 leading-relaxed marker:text-ink-600;
+  }
+  .privacy strong {
+    @apply text-ink-100 font-medium;
+  }
+  .privacy a {
+    @apply text-tn-accent underline underline-offset-2 hover:text-white;
+  }
+  .privacy code {
+    @apply font-mono text-[0.9em] px-1 py-0.5 rounded bg-ink-900 text-ink-200;
+  }
+</style>
