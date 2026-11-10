@@ -95,6 +95,11 @@ impl Paths {
     }
 }
 
+/// Sync storage the embedding program supplies (one this crate has no settings
+/// for): called once per round, from a blocking thread. Its rounds run like a
+/// bucket's, so the vault is never locked while it waits on a network.
+pub type SyncStorage = Arc<dyn Fn() -> Result<Box<dyn vp_sync::Storage>, Failure> + Send + Sync>;
+
 /// Where this device keeps its Secret Key (§4.4). [`SecretKeyFile`], a 0600
 /// file, unless the platform has a better place (its own keystore).
 pub trait SecretKeyStore: Send + Sync + 'static {
@@ -440,6 +445,8 @@ struct Inner<U> {
     gate: tokio::sync::Mutex<()>,
     /// One bucket round at a time: they let go of the vault while on the network.
     bucket_round: Mutex<()>,
+    /// Set by [`NativeBackend::set_sync_storage`]; used before any setting.
+    sync_storage: Mutex<Option<SyncStorage>>,
     quiet_after_cancel: Duration,
     /// Woken by every commit, so sync sends it at once.
     changed: Arc<tokio::sync::Notify>,
@@ -566,6 +573,7 @@ impl<U: Unlock> NativeBackend<U> {
             changed: Arc::new(tokio::sync::Notify::new()),
             idle_watched: std::sync::atomic::AtomicBool::new(false),
             bucket_round: Mutex::new(()),
+            sync_storage: Mutex::new(None),
         });
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let weak: Weak<Inner<U>> = Arc::downgrade(&inner);
@@ -2143,15 +2151,31 @@ fn bucket_cycle<U: Unlock>(
     config: &BucketConfig,
     first: impl FnOnce(&mut Store, &mut Unlocked, &vp_sync::Mirror) -> vp_store::Result<vp_sync::Report>,
 ) -> Option<Result<vp_sync::Report, Failure>> {
-    let _one_at_a_time = inner.bucket_round.lock().unwrap_or_else(|e| e.into_inner());
-    let (position, keys) = {
+    let keys = {
         let state = inner.state();
-        let (store, opened) = (state.store.as_ref()?, state.opened.as_ref()?);
-        (
-            opened.unlocked.position(),
-            bucket_keys(store, opened, config),
-        )
+        bucket_keys(state.store.as_ref()?, state.opened.as_ref()?, config)
     };
+    let config = config.clone();
+    remote_cycle(
+        inner,
+        move || {
+            vp_sync::Bucket::new(config, keys?)
+                .map(|b| Box::new(b) as Box<dyn vp_sync::Storage>)
+                .map_err(failure)
+        },
+        first,
+    )
+}
+
+/// A round against storage on a network: fetch with the vault's lock let go,
+/// run the round against the copy, send with the lock let go, then confirm.
+fn remote_cycle<U: Unlock>(
+    inner: &Inner<U>,
+    storage: impl FnOnce() -> Result<Box<dyn vp_sync::Storage>, Failure>,
+    first: impl FnOnce(&mut Store, &mut Unlocked, &vp_sync::Mirror) -> vp_store::Result<vp_sync::Report>,
+) -> Option<Result<vp_sync::Report, Failure>> {
+    let _one_at_a_time = inner.bucket_round.lock().unwrap_or_else(|e| e.into_inner());
+    let position = inner.state().opened.as_ref()?.unlocked.position();
     let step =
         |run: &mut dyn FnMut(&mut Store, &mut Unlocked) -> vp_store::Result<vp_sync::Report>| {
             let mut state = inner.state();
@@ -2166,8 +2190,8 @@ fn bucket_cycle<U: Unlock>(
             Ok(report)
         };
     let cycle = || {
-        let bucket = vp_sync::Bucket::new(config.clone(), keys?).map_err(failure)?;
-        let mirror = vp_sync::Mirror::fetch(&bucket, &position).map_err(failure)?;
+        let remote = storage()?;
+        let mirror = vp_sync::Mirror::fetch(remote.as_ref(), &position).map_err(failure)?;
         let mut first = Some(first);
         let mut report = step(&mut |store, unlocked| {
             first.take().expect("the first step runs once")(store, unlocked, &mirror)
@@ -2190,6 +2214,35 @@ fn bucket_cycle<U: Unlock>(
 }
 
 impl<U: Unlock> NativeBackend<U> {
+    /// Syncs through storage the embedding program supplies, before any
+    /// folder or bucket in this device's settings; `None` stops using it. Not
+    /// remembered: set it each time the program starts.
+    pub fn set_sync_storage(&self, storage: Option<SyncStorage>) {
+        *self
+            .inner
+            .sync_storage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = storage;
+        self.inner.changed.notify_one();
+    }
+
+    /// Makes this device's vault from the account in `storage`, given the
+    /// Secret Key and master password, and syncs through it from then on.
+    /// Refused if this device already has a vault.
+    pub async fn sync_join_with(
+        &self,
+        storage: SyncStorage,
+        secret: SecretKey,
+        password: Secret,
+    ) -> Result<vp_sync::Report, Failure> {
+        let make = storage.clone();
+        let report = self
+            .join_from(move || make(), secret, password, |_| {})
+            .await?;
+        self.set_sync_storage(Some(storage));
+        Ok(report)
+    }
+
     /// The folder sync goes through, if it is on.
     pub fn sync_folder(&self) -> Option<PathBuf> {
         load_settings(&self.inner.paths.settings).sync_folder
@@ -2407,6 +2460,28 @@ impl<U: Unlock> NativeBackend<U> {
     /// One sync round, if sync is on and the vault is unlocked. Never asks to
     /// unlock: sync needs the keys, and waits for the human to unlock.
     pub async fn sync_round(&self) -> Option<Result<vp_sync::Report, Failure>> {
+        let external = self
+            .inner
+            .sync_storage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(storage) = external {
+            let inner = self.inner.clone();
+            return tokio::task::spawn_blocking(move || {
+                let result = remote_cycle(
+                    &inner,
+                    move || storage(),
+                    |store, unlocked, mirror| vp_sync::round(store, unlocked, mirror),
+                )?;
+                inner.state().last_sync =
+                    Some((SystemTime::now(), result.clone().map_err(|e| e.0.clone())));
+                Some(result)
+            })
+            .await
+            .ok()
+            .flatten();
+        }
         let settings = load_settings(&self.inner.paths.settings);
         if let Some(config) = settings.sync_bucket {
             let inner = self.inner.clone();
@@ -2449,6 +2524,7 @@ impl<U: Unlock> NativeBackend<U> {
 
     /// Stops syncing on this device. The files already in the storage stay.
     pub fn sync_off(&self) -> Result<(), Failure> {
+        self.set_sync_storage(None);
         self.update_settings(|s| {
             s.sync_folder = None;
             s.sync_bucket = None;
@@ -2462,8 +2538,15 @@ impl<U: Unlock> NativeBackend<U> {
         let bucket = settings.sync_bucket;
         let folder = settings.sync_folder;
         let state = self.inner.state();
+        let external = self
+            .inner
+            .sync_storage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
         let mut status = json!({
-            "on": folder.is_some() || bucket.is_some(),
+            "on": folder.is_some() || bucket.is_some() || external,
+            "external": external,
             "folder": folder,
             "unlocked": state.opened.is_some(),
         });
