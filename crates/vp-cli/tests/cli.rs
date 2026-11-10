@@ -910,8 +910,9 @@ fn native(
 const ORIGIN: &str = "chrome-extension://pmfmecknoobmojibgpbkpeckpdnmhnpm/";
 
 #[test]
-fn browser_lists_logins_for_the_site_and_fills_only_there() {
-    let world = World::browser(&[Decision::Always]);
+fn browser_lists_logins_for_the_site_and_fills_there_without_asking() {
+    // Elsewhere only by override: denied, then once, never remembered.
+    let world = World::browser(&[Decision::Deny, Decision::Once]);
     let id = "l".repeat(26);
     let vault = "v".repeat(26);
     let (replies, code) = native(
@@ -973,20 +974,21 @@ fn browser_lists_logins_for_the_site_and_fills_only_there() {
     );
     assert_eq!(filled[0]["result"]["password"], LOGIN, "{filled:?}");
     assert_eq!(filled[0]["result"]["username"], "me@example.com");
-    assert_eq!(world.approver.asked(), 1);
-    let (again, _) = native(
-        &world,
-        ORIGIN,
-        &[
-            serde_json::json!({"id": 6, "type": "fill", "url": "https://dashboard.stripe.com/x", "item": id, "vault": vault}),
-        ],
-    );
-    assert_eq!(again[0]["ok"], true);
     assert_eq!(
         world.approver.asked(),
-        1,
-        "a standing grant for this site and login"
+        0,
+        "on its own site the click on the menu is the approval"
     );
+
+    let force = serde_json::json!({"id": 6, "type": "fill", "url": "https://evil.example/login", "item": id, "vault": vault, "force": true});
+    let (denied, _) = native(&world, ORIGIN, std::slice::from_ref(&force));
+    assert_eq!(denied[0]["ok"], false);
+    assert!(!denied[0].to_string().contains(LOGIN));
+    let (once, _) = native(&world, ORIGIN, std::slice::from_ref(&force));
+    assert_eq!(once[0]["result"]["password"], LOGIN, "{once:?}");
+    let (again, _) = native(&world, ORIGIN, std::slice::from_ref(&force));
+    assert_eq!(again[0]["ok"], false, "an override is never remembered");
+    assert_eq!(world.approver.asked(), 3);
     world.assert_contained();
 }
 
@@ -1753,7 +1755,7 @@ fn the_browser_saves_new_logins_and_asks_before_changing_one() {
 }
 
 #[test]
-fn passkeys_are_made_on_their_site_and_sign_in_only_after_the_fill_approval() {
+fn passkeys_are_made_on_their_site_and_sign_in_there_without_asking() {
     use p256::ecdsa::signature::Verifier;
     use p256::pkcs8::DecodePublicKey;
     use sha2::Digest;
@@ -1764,9 +1766,6 @@ fn passkeys_are_made_on_their_site_and_sign_in_only_after_the_fill_approval() {
         Decision::Once,
         Decision::Once,
         Decision::Deny,
-        // the first sign-in: denied, then allowed for good
-        Decision::Deny,
-        Decision::Always,
     ]);
     clean(&world.vp(&["init"], None));
     clean(&world.vp(&["import", "op"], None));
@@ -1845,7 +1844,8 @@ fn passkeys_are_made_on_their_site_and_sign_in_only_after_the_fill_approval() {
         serde_json::json!([])
     );
 
-    // Signing in asks as a fill does; the answer verifies against the public key.
+    // Signing in is the person's click, like a fill on the login's own site, and
+    // only there; the answer verifies against the public key.
     let get = |url: &str| {
         host(
             &world,
@@ -1853,8 +1853,8 @@ fn passkeys_are_made_on_their_site_and_sign_in_only_after_the_fill_approval() {
                 "credential_id": credential_id, "challenge": challenge}),
         )
     };
-    let denied = get("https://login.example.com/");
-    assert_eq!(denied["ok"], false, "{denied}");
+    let elsewhere = get("https://evil.example/");
+    assert_eq!(elsewhere["ok"], false, "{elsewhere}");
     let signed = get("https://login.example.com/");
     let signed = &signed["result"];
     assert_eq!(signed["user_handle"], b64(b"user-1"));
@@ -1873,7 +1873,7 @@ fn passkeys_are_made_on_their_site_and_sign_in_only_after_the_fill_approval() {
     let mut message = auth.clone();
     message.extend_from_slice(&sha2::Sha256::digest(&client_json));
     public.verify(&message, &signature).unwrap();
-    assert_eq!(world.approver.asked(), asked + 2);
+    assert_eq!(world.approver.asked(), asked);
 
     // Editing the login in the popup keeps the passkey, whatever the edit sends.
     let opened = host(
@@ -1895,11 +1895,7 @@ fn passkeys_are_made_on_their_site_and_sign_in_only_after_the_fill_approval() {
     );
     let after = get("https://login.example.com/settings");
     assert_eq!(after["ok"], true, "{after}");
-    assert_eq!(
-        world.approver.asked(),
-        asked + 2,
-        "the standing grant covers it"
-    );
+    assert_eq!(world.approver.asked(), asked);
 
     // A page load on a locked vault learns nothing and prompts for nothing.
     world.vp(&["lock"], None);

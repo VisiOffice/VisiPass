@@ -34,6 +34,7 @@ impl<A: Approver> Unlock for WindowUnlock<A> {
             secrets: vec![],
             purpose: None,
             timeout_secs: approval::TIMEOUT.as_secs(),
+            every_time: false,
             paste: Some(PasteSpec {
                 mode: PasteMode::Unlock {
                     retry,

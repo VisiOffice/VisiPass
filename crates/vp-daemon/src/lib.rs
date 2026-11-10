@@ -337,6 +337,7 @@ fn assess(request: &Request, requester: &Requester) -> Assessment {
                     purpose: purpose.clone(),
                     timeout_secs: approval::TIMEOUT.as_secs(),
                     paste: None,
+                    every_time: false,
                 }),
                 refs,
                 detail,
@@ -371,6 +372,7 @@ fn assess(request: &Request, requester: &Requester) -> Assessment {
                 purpose: purpose.clone(),
                 timeout_secs: approval::TIMEOUT.as_secs(),
                 paste: None,
+                every_time: false,
             }),
         },
         Request::Password {
@@ -407,6 +409,7 @@ fn assess(request: &Request, requester: &Requester) -> Assessment {
                     purpose: purpose.clone(),
                     timeout_secs: approval::TIMEOUT.as_secs(),
                     paste: None,
+                    every_time: false,
                 }),
             }
         }
@@ -441,6 +444,7 @@ fn assess(request: &Request, requester: &Requester) -> Assessment {
                 purpose: purpose.clone(),
                 timeout_secs: approval::TIMEOUT.as_secs(),
                 paste: None,
+                every_time: false,
             }),
         },
         Request::BrowserSave { url, id, check, .. } => {
@@ -512,6 +516,7 @@ fn assess(request: &Request, requester: &Requester) -> Assessment {
                     purpose: purpose.clone(),
                     timeout_secs: approval::TIMEOUT.as_secs(),
                     paste: None,
+                    every_time: false,
                 }),
             }
         }
@@ -559,6 +564,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
             secrets: vec![],
             purpose: None,
             timeout_secs: approval::TIMEOUT.as_secs(),
+            every_time: false,
             paste: Some(vp_core::ipc::PasteSpec {
                 mode: PasteMode::BucketKey { secret },
                 ..Default::default()
@@ -780,6 +786,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
             purpose: None,
             timeout_secs: approval::TIMEOUT.as_secs(),
             paste: None,
+            every_time: false,
         })
         .await?;
         let mut report = Vec::new();
@@ -942,9 +949,13 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
     /// Asks the human, every time, and never records a grant: for changes to a
     /// saved login that would be lost if a page could make them unasked.
     async fn ask_each_time(&self, prompt: &Prompt) -> Result<(), Failure> {
+        let prompt = Prompt {
+            every_time: true,
+            ..prompt.clone()
+        };
         let decision = {
             let _turn = self.approvals.lock().await;
-            self.approver.ask(prompt).await?
+            self.approver.ask(&prompt).await?
         };
         if decision == Decision::Deny {
             return Err(Failure::new(
@@ -1081,6 +1092,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                     secrets: vec![],
                     purpose: None,
                     timeout_secs: approval::TIMEOUT.as_secs(),
+                    every_time: false,
                     paste: Some(vp_core::ipc::PasteSpec {
                         mode,
                         ..Default::default()
@@ -1140,6 +1152,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                     secrets: vec![],
                     purpose: None,
                     timeout_secs: approval::TIMEOUT.as_secs(),
+                    every_time: false,
                     paste: Some(vp_core::ipc::PasteSpec {
                         mode: PasteMode::Unlock {
                             retry: false,
@@ -1212,6 +1225,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                         secrets: vec![],
                         purpose: None,
                         timeout_secs: approval::TIMEOUT.as_secs(),
+                        every_time: false,
                         paste: Some(vp_core::ipc::PasteSpec {
                             mode: PasteMode::Unlock {
                                 retry: false,
@@ -1287,6 +1301,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                     secrets: vec![],
                     purpose: None,
                     timeout_secs: approval::TIMEOUT.as_secs(),
+                    every_time: false,
                     paste: Some(vp_core::ipc::PasteSpec {
                         mode,
                         ..Default::default()
@@ -1452,6 +1467,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                     secrets: vec![],
                     purpose,
                     timeout_secs: approval::TIMEOUT.as_secs(),
+                    every_time: false,
                     paste: Some(vp_core::ipc::PasteSpec {
                         title: destination.title.clone(),
                         vault: destination.vault.clone(),
@@ -1565,6 +1581,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                     purpose,
                     timeout_secs: approval::TIMEOUT.as_secs(),
                     paste: None,
+                    every_time: true,
                 };
                 let decision = {
                     let _turn = self.approvals.lock().await;
@@ -1707,38 +1724,32 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                     ),
                     ("Vault".to_string(), item.vault.name.clone()),
                 ];
+                // On its own site the person's click on the menu or popup is the
+                // approval, as in other password managers: the browser is served
+                // only to a host it started, and the extension acts only on
+                // trusted input with its menu visible (invariant 13).
                 if !matches_page {
                     details.push((
                         "Warning".to_string(),
                         format!("This login is saved for {}, not this site. Only continue if you are sure.", saved_for.join(", ")),
                     ));
-                }
-                let need = Need {
-                    operation: Operation::Fill,
-                    refs: BTreeSet::from([format!("{page}#{}", item.id)]),
-                    vaults: BTreeSet::new(),
-                };
-                let prompt = Prompt {
-                    who: who(requester),
-                    action: format!("fill your \"{}\" login on {page}", item.title),
-                    details,
-                    secrets: vec![],
-                    purpose: None,
-                    timeout_secs: approval::TIMEOUT.as_secs(),
-                    paste: None,
-                };
-                if matches_page {
-                    *grant = Some(self.authorize(requester, &need, &prompt).await?);
-                } else {
+                    let prompt = Prompt {
+                        who: who(requester),
+                        action: format!("fill your \"{}\" login on {page}", item.title),
+                        details,
+                        secrets: vec![],
+                        purpose: None,
+                        timeout_secs: approval::TIMEOUT.as_secs(),
+                        paste: None,
+                        every_time: true,
+                    };
                     // An override is asked every time and never becomes a standing grant.
                     let decision = {
                         let _turn = self.approvals.lock().await;
                         self.approver.ask(&prompt).await?
                     };
                     if decision == Decision::Deny {
-                        return Err(Failure::new(
-                            "The human denied this request. Do not retry it; ask them how to proceed",
-                        ));
+                        return Err(Failure::new("Not filled: you declined"));
                     }
                     *grant = Some("once".into());
                 }
@@ -1869,42 +1880,17 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
             } => {
                 let (origin, rp_id) = passkey_page(&url, &rp_id)?;
                 passkey::unb64(&challenge)?;
-                let found = self
+                if !self
                     .backend
                     .native_passkeys(&rp_id)
                     .await?
-                    .into_iter()
-                    .find(|f| f.passkey.credential_id == credential_id)
-                    .ok_or_else(|| Failure::new("That passkey is not in VisiPass"))?;
-                // The same approval as filling the login's password on this page:
-                // a passkey is never easier to use than the password beside it.
-                let page = find::page_host(&url);
-                let need = Need {
-                    operation: Operation::Fill,
-                    refs: BTreeSet::from([format!("{page}#{}", found.item)]),
-                    vaults: BTreeSet::new(),
-                };
-                let prompt = Prompt {
-                    who: who(requester),
-                    action: format!("sign in to {page} with your \"{}\" passkey", found.title),
-                    details: vec![
-                        ("Website".to_string(), page.clone()),
-                        (
-                            "Passkey".to_string(),
-                            if found.passkey.user_name.is_empty() {
-                                found.title.clone()
-                            } else {
-                                format!("{}  ({})", found.title, found.passkey.user_name)
-                            },
-                        ),
-                        ("Vault".to_string(), found.vault.clone()),
-                    ],
-                    secrets: vec![],
-                    purpose: None,
-                    timeout_secs: approval::TIMEOUT.as_secs(),
-                    paste: None,
-                };
-                *grant = Some(self.authorize(requester, &need, &prompt).await?);
+                    .iter()
+                    .any(|f| f.passkey.credential_id == credential_id)
+                {
+                    return Err(Failure::new("That passkey is not in VisiPass"));
+                }
+                // As filling the password beside it: the person's click, on the
+                // passkey's own site only (passkey_page), with no prompt.
                 let assertion = self
                     .backend
                     .native_passkey_sign(&passkey::Request {
@@ -2021,6 +2007,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                                 purpose: None,
                                 timeout_secs: approval::TIMEOUT.as_secs(),
                                 paste: None,
+                                every_time: false,
                             };
                             self.ask_each_time(&prompt).await?;
                             *grant = Some("once".into());
@@ -2087,6 +2074,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                     purpose: None,
                     timeout_secs: approval::TIMEOUT.as_secs(),
                     paste: None,
+                    every_time: false,
                 };
                 self.ask_each_time(&prompt).await?;
                 *grant = Some("once".into());

@@ -2,8 +2,9 @@
 //!
 //! Chrome starts `vp chrome-extension://<id>/` and exchanges messages on
 //! stdin/stdout: a 4-byte native-endian length, then JSON. Each message is
-//! relayed to visipassd as one request; the daemon matches logins, enforces the
-//! phishing guard and asks the human before the first fill on a site.
+//! relayed to visipassd as one request; the daemon matches logins and enforces
+//! the phishing guard: a login fills on its own site when the person picks it,
+//! and anywhere else only after they confirm, every time.
 //!
 //! `vp browser install` registers this host with Chrome, Chromium and Brave.
 
