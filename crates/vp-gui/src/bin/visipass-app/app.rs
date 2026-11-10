@@ -6,7 +6,8 @@ use crate::keymap::{Keymap, SHORTCUTS, actions::*, pretty};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, Render, ScrollStrategy,
-    SharedString, UniformListScrollHandle, Window, deferred, div, prelude::*, px, uniform_list,
+    SharedString, UniformListScrollHandle, Window, anchored, deferred, div, prelude::*, px,
+    uniform_list,
 };
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -46,6 +47,12 @@ enum Menu {
     New,
 }
 
+/// The menu a right-click on a row opens, where the pointer was.
+struct ContextMenu {
+    item: ItemSummary,
+    at: gpui::Point<gpui::Pixels>,
+}
+
 pub struct VisiPassApp {
     theme: Theme,
     client: Arc<Client>,
@@ -60,6 +67,7 @@ pub struct VisiPassApp {
     cursor: Option<usize>,
     scroll: UniformListScrollHandle,
     menu: Option<Menu>,
+    context: Option<ContextMenu>,
     show_help: bool,
     keymap: Rc<Keymap>,
     open_generation: u64,
@@ -152,7 +160,9 @@ impl VisiPassApp {
             InputEvent::Submit => this.open_cursor(cx),
             InputEvent::Cancel => {
                 // Esc: close a menu first, then clear the search to start over.
-                if this.menu.is_some() {
+                if this.context.is_some() {
+                    this.context = None;
+                } else if this.menu.is_some() {
                     this.menu = None;
                 } else if !input.read(cx).text().is_empty() {
                     input.update(cx, |input, cx| input.set_text("", cx));
@@ -187,6 +197,7 @@ impl VisiPassApp {
             cursor: None,
             scroll: UniformListScrollHandle::new(),
             menu: None,
+            context: None,
             show_help: false,
             keymap,
             open_generation: 0,
@@ -649,6 +660,7 @@ impl VisiPassApp {
                 this.detail = None;
                 this.selected = None;
                 this.confirm_archive = false;
+                this.context = None;
                 this.toast = Some((
                     "Moved to the archive.".into(),
                     Instant::now() + Duration::from_secs(4),
@@ -656,6 +668,72 @@ impl VisiPassApp {
                 this.reload(cx);
             },
         );
+    }
+
+    /// The open item, if it is the one `id` names (the row right-clicked).
+    fn detail_of(&self, id: &str) -> Option<&Item> {
+        self.detail.as_ref().filter(|d| d.id == id)
+    }
+
+    /// Opens the editor on a copy, saved only when the person saves it.
+    /// Passkeys stay with the original: a site knows a passkey by its ID.
+    fn duplicate(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(mut copy) = self.detail_of(id).cloned() else {
+            return self.note("Still loading the item; try again", cx);
+        };
+        copy.id = String::new();
+        copy.title = format!("{} copy", copy.title);
+        copy.passkeys.clear();
+        copy.imported_passkeys.clear();
+        copy.favorite = false;
+        copy.created_at = None;
+        copy.updated_at = None;
+        self.start_editing(copy, window, cx);
+    }
+
+    /// `op://vault/item/field` for the item's main secret, as an agent would
+    /// use it. Names when they are unambiguous, IDs otherwise.
+    fn copy_reference(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(item) = self.detail_of(id) else {
+            return self.note("Still loading the item; try again", cx);
+        };
+        let field = item
+            .fields
+            .iter()
+            .find(|f| f.purpose.as_deref() == Some("PASSWORD") || f.id == "credential")
+            .or_else(|| item.fields.iter().find(|f| f.concealed()))
+            .or_else(|| item.fields.iter().find(|f| f.purpose.is_none()))
+            .or_else(|| item.fields.first());
+        let Some(field) = field else {
+            return self.note("This item has no fields to refer to", cx);
+        };
+        let plain = |name: &str| !name.is_empty() && !name.contains(['/', '?', '\n']);
+        let vault_unique = self
+            .vaults
+            .iter()
+            .filter(|v| v.name == item.vault.name)
+            .count()
+            == 1;
+        let title_unique = self
+            .items
+            .iter()
+            .filter(|i| i.vault.id == item.vault.id && i.title == item.title)
+            .count()
+            == 1;
+        let vault = if vault_unique && plain(&item.vault.name) {
+            item.vault.name.clone()
+        } else {
+            item.vault.id.clone()
+        };
+        let title = if title_unique && plain(&item.title) {
+            item.title.clone()
+        } else {
+            item.id.clone()
+        };
+        // Field IDs are matched before labels, so the ID is never ambiguous.
+        let field = field.id.clone();
+        let reference = format!("op://{vault}/{title}/{field}");
+        self.copy(&format!("reference {reference}"), &reference, false, cx);
     }
 
     fn load_duplicates(&mut self, cx: &mut Context<Self>) {
@@ -1049,6 +1127,170 @@ impl VisiPassApp {
                 .flex_1(),
             )
             .when_some(self.menu, |d, menu| d.child(self.render_menu(menu, cx)))
+            .when_some(self.context.as_ref(), |d, menu| {
+                d.child(self.render_context_menu(menu, cx))
+            })
+    }
+
+    fn render_context_menu(&self, menu: &ContextMenu, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = self.theme.clone();
+        let id = menu.item.id.clone();
+        let loaded = self.detail_of(&id).is_some();
+        let favorite = self
+            .detail_of(&id)
+            .map_or(menu.item.favorite, |d| d.favorite);
+        let entry = |key: &str, glyph: Option<Icon>, label: String, enabled: bool, danger: bool| {
+            let color = if !enabled {
+                t.muted
+            } else if danger {
+                t.danger
+            } else {
+                t.foreground
+            };
+            div()
+                .id(gpui::ElementId::Name(format!("ctx-{key}").into()))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .px(px(10.))
+                .py(px(4.))
+                .text_color(color)
+                .when(enabled, |d| {
+                    d.cursor_pointer()
+                        .hover(|s| s.bg(alpha(t.foreground, t.controls.hover_fill_alpha)))
+                })
+                .child(
+                    div()
+                        .w(px(16.))
+                        .flex()
+                        .when_some(glyph, |d, g| d.child(icon(g, 15.).text_color(t.muted))),
+                )
+                .child(div().flex_1().child(label))
+        };
+        let separator = || div().my(px(4.)).h(px(1.)).bg(t.border);
+        let (edit_id, fav_id, dup_id, ref_id, uuid_id, arch_id) = (
+            id.clone(),
+            id.clone(),
+            id.clone(),
+            id.clone(),
+            id.clone(),
+            id.clone(),
+        );
+        let list = div()
+            .flex()
+            .flex_col()
+            .py(px(4.))
+            .child(
+                entry("edit", Some(Icon::Note), "Edit".into(), loaded, false).on_click(
+                    cx.listener(move |this, _, window, cx| {
+                        if let Some(item) = this.detail_of(&edit_id).cloned() {
+                            this.context = None;
+                            this.start_editing(item, window, cx);
+                        }
+                    }),
+                ),
+            )
+            .child(
+                entry(
+                    "favorite",
+                    Some(if favorite {
+                        Icon::StarFilled
+                    } else {
+                        Icon::Star
+                    }),
+                    if favorite {
+                        "Remove from Favorites".into()
+                    } else {
+                        "Add to Favorites".into()
+                    },
+                    loaded,
+                    false,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if this.detail_of(&fav_id).is_some() {
+                        this.context = None;
+                        this.toggle_favorite(cx);
+                    }
+                })),
+            )
+            .child(
+                entry(
+                    "duplicate",
+                    Some(Icon::Copy),
+                    "Duplicate".into(),
+                    loaded,
+                    false,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.context = None;
+                    this.duplicate(&dup_id, window, cx);
+                })),
+            )
+            .child(separator())
+            .child(
+                entry(
+                    "reference",
+                    Some(Icon::Code),
+                    "Copy reference (op://)".into(),
+                    loaded,
+                    false,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.context = None;
+                    this.copy_reference(&ref_id, cx);
+                })),
+            )
+            .child(
+                entry("uuid", None, "Copy item ID".into(), true, false).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        this.context = None;
+                        this.copy("item ID", &uuid_id, false, cx);
+                    },
+                )),
+            )
+            .child(separator())
+            .child(
+                entry(
+                    "archive",
+                    Some(Icon::Vault),
+                    if self.confirm_archive && loaded {
+                        "Press again to archive".into()
+                    } else {
+                        "Archive".into()
+                    },
+                    loaded,
+                    true,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    // The first press asks; the menu stays open for the second.
+                    if this.detail_of(&arch_id).is_some() {
+                        this.archive(cx);
+                    }
+                })),
+            );
+        deferred(
+            anchored()
+                .position(menu.at)
+                .snap_to_window_with_margin(px(8.))
+                .child(
+                    div()
+                        .id("context-menu")
+                        .w(px(230.))
+                        .occlude()
+                        .bg(t.background)
+                        .border_1()
+                        .border_color(t.border)
+                        .rounded(px(t.radius))
+                        .shadow_lg()
+                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                            this.context = None;
+                            this.confirm_archive = false;
+                            cx.notify();
+                        }))
+                        .child(list),
+                ),
+        )
+        .with_priority(2)
     }
 
     fn toggle_menu(&mut self, menu: Menu, cx: &mut Context<Self>) {
@@ -1205,6 +1447,7 @@ impl VisiPassApp {
             None => item.vault.name.clone(),
         };
         let open = item.clone();
+        let context_item = item.clone();
         div()
             .id(("row", row))
             .w_full()
@@ -1228,6 +1471,22 @@ impl VisiPassApp {
                 this.cursor = Some(row);
                 this.open(open.clone(), cx)
             }))
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                    this.cursor = Some(row);
+                    if this.selected.as_deref() != Some(context_item.id.as_str()) {
+                        this.open(context_item.clone(), cx);
+                    }
+                    this.confirm_archive = false;
+                    this.menu = None;
+                    this.context = Some(ContextMenu {
+                        item: context_item.clone(),
+                        at: event.position,
+                    });
+                    cx.notify();
+                }),
+            )
             .child(
                 div()
                     .w(px(18.))
@@ -2377,6 +2636,8 @@ impl Render for VisiPassApp {
             .on_action(cx.listener(|this, _: &Dismiss, _, cx| {
                 if this.show_help {
                     this.show_help = false;
+                } else if this.context.is_some() {
+                    this.context = None;
                 } else if this.menu.is_some() {
                     this.menu = None;
                 } else {
