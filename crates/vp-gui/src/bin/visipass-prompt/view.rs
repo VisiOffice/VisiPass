@@ -171,13 +171,16 @@ impl ApprovalView {
         let shift = event.keystroke.modifiers.shift;
         match key {
             "escape" => self.answer(Answer::Deny, cx),
-            "enter" => self.answer(CHOICES[self.selected].answer, cx),
+            "enter" => self.answer(self.choices()[self.selected].answer, cx),
             "left" => self.selected = self.selected.saturating_sub(1),
-            "right" => self.selected = (self.selected + 1).min(CHOICES.len() - 1),
-            "tab" if shift => self.selected = (self.selected + CHOICES.len() - 1) % CHOICES.len(),
-            "tab" => self.selected = (self.selected + 1) % CHOICES.len(),
+            "right" => self.selected = (self.selected + 1).min(self.choices().len() - 1),
+            "tab" if shift => {
+                let n = self.choices().len();
+                self.selected = (self.selected + n - 1) % n
+            }
+            "tab" => self.selected = (self.selected + 1) % self.choices().len(),
             _ => {
-                if let Some(choice) = CHOICES.iter().find(|c| c.key == key) {
+                if let Some(choice) = self.choices().iter().find(|c| c.key == key) {
                     self.answer(choice.answer, cx);
                 }
             }
@@ -185,10 +188,23 @@ impl ApprovalView {
         cx.notify();
     }
 
+    /// Deny and Once only when the answer is never remembered.
+    fn choices(&self) -> &'static [Choice] {
+        if self.prompt.every_time {
+            &CHOICES[..2]
+        } else {
+            &CHOICES
+        }
+    }
+
     fn explain(&self, answer: Answer) -> String {
         let who = &self.prompt.who;
         match answer {
+            Answer::Deny if self.prompt.every_time => "Refuse. Nothing changes.".into(),
             Answer::Deny => "Refuse. The agent is told not to retry.".into(),
+            Answer::Once if self.prompt.every_time => {
+                "Allow this one request. VisiPass asks again next time.".into()
+            }
             Answer::Once => "Allow this one request.".into(),
             Answer::Task => format!("Allow until this {who} session ends."),
             Answer::Hours => format!("Allow {who} in this project for 8 hours."),
@@ -208,7 +224,7 @@ impl ApprovalView {
     fn button(&self, index: usize, cx: &mut Context<Self>) -> impl IntoElement {
         let t = &self.theme;
         let c = &t.controls;
-        let choice = &CHOICES[index];
+        let choice = &self.choices()[index];
         let selected = index == self.selected;
         let armed = self.armed();
         let text = if choice.answer == Answer::Deny {
@@ -395,7 +411,7 @@ impl Render for ApprovalView {
         }
 
         let mut buttons = div().flex().gap(px(8.));
-        for index in 0..CHOICES.len() {
+        for index in 0..self.choices().len() {
             buttons = buttons.child(self.button(index, cx));
         }
 
@@ -444,7 +460,7 @@ impl Render for ApprovalView {
             .justify_between()
             .text_size(px(t.size(0.833)))
             .text_color(t.muted)
-            .child(self.explain(CHOICES[self.selected].answer))
+            .child(self.explain(self.choices()[self.selected].answer))
             .child(format!(
                 "Esc denies · {}:{:02}",
                 remaining / 60,

@@ -46,6 +46,7 @@ fn demo() -> ApprovalPrompt {
         purpose: Some("run the integration tests against the sandbox accounts".into()),
         timeout_secs: 120,
         paste: None,
+        every_time: false,
     }
 }
 

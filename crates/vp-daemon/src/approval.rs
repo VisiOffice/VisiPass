@@ -297,14 +297,18 @@ impl Desktop {
                 "Deny",
                 "--default-cancel",
             ])
-            .args([
-                "--extra-button",
-                TASK,
-                "--extra-button",
-                HOURS,
-                "--extra-button",
-                ALWAYS,
-            ])
+            .args(if prompt.every_time {
+                &[][..]
+            } else {
+                &[
+                    "--extra-button",
+                    TASK,
+                    "--extra-button",
+                    HOURS,
+                    "--extra-button",
+                    ALWAYS,
+                ][..]
+            })
             .args(["--timeout", &TIMEOUT.as_secs().to_string()])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -343,7 +347,11 @@ end run"#;
         let mut child = tokio::process::Command::new(OSASCRIPT)
             .args(["-e", SCRIPT])
             .arg(plain(prompt))
-            .args(["Deny", ONCE, TASK, HOURS, ALWAYS])
+            .args(if prompt.every_time {
+                &["Deny", ONCE][..]
+            } else {
+                &["Deny", ONCE, TASK, HOURS, ALWAYS][..]
+            })
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -378,11 +386,16 @@ end run"#;
 
     async fn terminal(prompt: &Prompt) -> Result<Decision, Failure> {
         let text = plain(prompt);
+        let every_time = prompt.every_time;
         let answer = tokio::task::spawn_blocking(move || {
             use std::io::{BufRead, Write};
             let tty = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty").ok()?;
             let mut out = &tty;
-            write!(out, "\n{text}  [d]eny  [o]nce  [t]his task  [p]roject {STANDING_HOURS}h  [a]lways for project: ").ok()?;
+            if every_time {
+                write!(out, "\n{text}  [d]eny  [o]nce: ").ok()?;
+            } else {
+                write!(out, "\n{text}  [d]eny  [o]nce  [t]his task  [p]roject {STANDING_HOURS}h  [a]lways for project: ").ok()?;
+            }
             out.flush().ok()?;
             let mut line = String::new();
             std::io::BufReader::new(&tty).read_line(&mut line).ok()?;
@@ -394,6 +407,7 @@ end run"#;
         .ok_or_else(|| Failure::new("Could not read an answer from the visipassd terminal"))?;
         Ok(match answer.as_str() {
             "o" | "once" => Decision::Once,
+            _ if every_time => Decision::Deny,
             "t" | "task" => Decision::Task,
             "p" | "project" => Decision::Hours(STANDING_HOURS),
             "a" | "always" => Decision::Always,
@@ -735,6 +749,7 @@ mod tests {
             purpose: Some("<b>trust me</b>".into()),
             timeout_secs: 120,
             paste: None,
+            every_time: false,
         };
         let text = markup(&prompt);
         assert!(text.contains("Claude &lt;Code&gt;"));

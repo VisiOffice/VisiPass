@@ -123,7 +123,7 @@ function select(i) {
 
 async function choose(login, force = false) {
   if (!login || !onPage()) return;
-  say(force ? "Waiting for your approval in VisiPass…" : "Filling… approve in VisiPass if it asks.");
+  say(force ? "Waiting for your approval in VisiPass…" : "Filling…");
   try {
     // The background worker fills: it outlives this popup, which closes when the
     // approval window takes focus.

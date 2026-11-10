@@ -74,6 +74,10 @@ pub struct ApprovalPrompt {
     /// Set when the human is asked to paste a new secret rather than approve.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paste: Option<PasteSpec>,
+    /// Asked every time and never remembered: approvers offer only Deny and
+    /// Allow once.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub every_time: bool,
 }
 
 /// Characters that change how text reads without being seen: bidirectional

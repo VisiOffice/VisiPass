@@ -447,7 +447,7 @@
     if (entry.kind === "generate") return useSuggestion(entry.password);
     if (entry.kind === "passkey") return signConditional(entry.passkey);
     const login = entry.login;
-    renderMenu("Filling… approve in VisiPass if it asks.");
+    renderMenu("Filling…");
     try {
       const { filled, totp } = await send({ kind: "page-fill", login });
       if (mode === "otp" && !totp) {
@@ -791,7 +791,7 @@
   async function signConditional(passkey) {
     const request = conditional;
     if (!request) return;
-    renderMenu("Signing in… approve in VisiPass if it asks.");
+    renderMenu("Signing in…");
     try {
       const result = await send({
         kind: "page-passkey-get",
@@ -872,7 +872,7 @@
 
   async function signIn(passkey) {
     const { request } = pk;
-    renderCard({ status: "passkey-working", line: "Signing in… approve in VisiPass if it asks." });
+    renderCard({ status: "passkey-working", line: "Signing in…" });
     try {
       const result = await send({
         kind: "page-passkey-get",
