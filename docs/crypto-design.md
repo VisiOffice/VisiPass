@@ -667,6 +667,10 @@ and every few minutes).
   copy, which queues what it writes (`Created::Queued`, not confirmed); send with no lock; run the
   round again, which confirms files now there with the same bytes and treats other bytes as a clone.
   A commit sends at once; otherwise a bucket is checked every five minutes and on unlock.
+- *Storage a program supplies* (`NativeBackend::set_sync_storage`, 2026-11-10): any other
+  `vp_sync::Storage` an embedding program brings, such as another provider's API. Its rounds run
+  as a bucket's do, and every file is checked the same way; the storage is trusted no more than
+  a folder or a bucket. Not kept in settings: the program sets it each time it starts.
 - *Moving.* `vp sync setup s3://...` on a device syncing through a folder copies every file first,
   whole logs included, so a device that has not caught up finds no gap. Setting up on storage with
   no snapshot writes one even if this device wrote one elsewhere.
@@ -811,3 +815,4 @@ rotation; §7.5 files; §9 fingerprints; §10 log signing; §11.2, §11.3.
 - 2026-11-10: §4.3 device keys, the storage half: AK wrapped under a caller's hardware-held key,
   bound to the account, `ak_generation` and a caller's context. §4.4: where the Secret Key lives
   is a `SecretKeyStore`, a 0600 file unless a platform supplies another.
+- 2026-11-10: §11.1 sync through storage the embedding program supplies, run like a bucket.

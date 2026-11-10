@@ -845,3 +845,90 @@ async fn a_device_key_unlock_takes_the_stored_auto_lock_like_a_password_unlock()
         .unwrap();
     assert_eq!(backend.auto_lock(), remote);
 }
+
+/// A folder reached through `set_sync_storage`, counting the files it writes.
+struct Counted {
+    folder: vp_sync::Folder,
+    written: Arc<AtomicUsize>,
+}
+
+impl vp_sync::Storage for Counted {
+    fn list(&self, dir: &str) -> vp_store::Result<Vec<String>> {
+        self.folder.list(dir)
+    }
+    fn read(&self, path: &str) -> vp_store::Result<Option<Vec<u8>>> {
+        self.folder.read(path)
+    }
+    fn create(&self, path: &str, bytes: &[u8]) -> vp_store::Result<vp_sync::Created> {
+        self.written.fetch_add(1, Ordering::SeqCst);
+        self.folder.create(path, bytes)
+    }
+    fn modified(&self, path: &str) -> Option<std::time::SystemTime> {
+        self.folder.modified(path)
+    }
+}
+
+#[tokio::test]
+async fn a_device_can_sync_through_storage_its_program_supplies() {
+    let (one, two, shared) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    let a = NativeBackend::with_params(paths(&one), Scripted::new(vec![]), CHEAP);
+    let shown = a.init(Secret::new(PASSWORD.into())).await.unwrap();
+    let item = login("o2kmam7av67ewmcgxllw2t7dda", "Example", &private(), "first");
+    a.import(&private(), vec![item]).await.unwrap();
+    a.sync_setup(shared.path()).await.unwrap();
+
+    let written = Arc::new(AtomicUsize::new(0));
+    let (root, count) = (shared.path().to_path_buf(), written.clone());
+    let storage: vp_native::SyncStorage = Arc::new(move || {
+        Ok(Box::new(Counted {
+            folder: vp_sync::Folder::new(&root),
+            written: count.clone(),
+        }) as Box<dyn vp_sync::Storage>)
+    });
+    let b = NativeBackend::with_params(paths(&two), Scripted::new(vec![]), CHEAP);
+    b.sync_join_with(
+        storage,
+        vp_crypto::SecretKey::parse(&shown).unwrap(),
+        Secret::new(PASSWORD.into()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(b.sync_status()["external"], true);
+    let value = |backend: &NativeBackend<Scripted>| {
+        let backend = backend.clone();
+        async move {
+            backend
+                .resolve(&[SecretRef::parse("op://Private/Example/password").unwrap()])
+                .await
+                .unwrap()[0]
+                .expose()
+                .to_string()
+        }
+    };
+    assert_eq!(value(&b).await, "first");
+
+    // An edit on B goes out through the supplied storage and reaches A.
+    let before = written.load(Ordering::SeqCst);
+    let mut edited = b.item("Example", "Private").await.unwrap();
+    edited.fields[1].value = Some(Secret::new("from b".into()));
+    b.save_item(&edited).await.unwrap();
+    b.sync_round().await.unwrap().unwrap();
+    assert!(written.load(Ordering::SeqCst) > before);
+    assert_eq!(a.sync_round().await.unwrap().unwrap().applied, 1);
+    assert_eq!(value(&a).await, "from b");
+
+    // And back.
+    let mut edited = a.item("Example", "Private").await.unwrap();
+    edited.fields[1].value = Some(Secret::new("from a".into()));
+    a.save_item(&edited).await.unwrap();
+    a.sync_round().await.unwrap().unwrap();
+    assert_eq!(b.sync_round().await.unwrap().unwrap().applied, 1);
+    assert_eq!(value(&b).await, "from a");
+
+    b.sync_off().unwrap();
+    assert!(b.sync_round().await.is_none());
+}
