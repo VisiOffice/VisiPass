@@ -22,8 +22,14 @@ actions!(
         Delete,
         Left,
         Right,
+        WordLeft,
+        WordRight,
         SelectLeft,
         SelectRight,
+        SelectWordLeft,
+        SelectWordRight,
+        DeleteWordLeft,
+        DeleteWordRight,
         SelectAll,
         Home,
         End,
@@ -37,6 +43,32 @@ actions!(
 
 const MASK: char = '•';
 
+// Moving by word: Ctrl on Linux, Option on macOS, as each platform's own fields do.
+#[cfg(target_os = "macos")]
+const WORD_LEFT: &str = "alt-left";
+#[cfg(target_os = "macos")]
+const WORD_RIGHT: &str = "alt-right";
+#[cfg(target_os = "macos")]
+const SELECT_WORD_LEFT: &str = "alt-shift-left";
+#[cfg(target_os = "macos")]
+const SELECT_WORD_RIGHT: &str = "alt-shift-right";
+#[cfg(target_os = "macos")]
+const DELETE_WORD_LEFT: &str = "alt-backspace";
+#[cfg(target_os = "macos")]
+const DELETE_WORD_RIGHT: &str = "alt-delete";
+#[cfg(not(target_os = "macos"))]
+const WORD_LEFT: &str = "ctrl-left";
+#[cfg(not(target_os = "macos"))]
+const WORD_RIGHT: &str = "ctrl-right";
+#[cfg(not(target_os = "macos"))]
+const SELECT_WORD_LEFT: &str = "ctrl-shift-left";
+#[cfg(not(target_os = "macos"))]
+const SELECT_WORD_RIGHT: &str = "ctrl-shift-right";
+#[cfg(not(target_os = "macos"))]
+const DELETE_WORD_LEFT: &str = "ctrl-backspace";
+#[cfg(not(target_os = "macos"))]
+const DELETE_WORD_RIGHT: &str = "ctrl-delete";
+
 /// Registers the field's key bindings. Call once at startup.
 pub fn bind_keys(cx: &mut App) {
     let context = Some("TextInput");
@@ -47,6 +79,12 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("right", Right, context),
         KeyBinding::new("shift-left", SelectLeft, context),
         KeyBinding::new("shift-right", SelectRight, context),
+        KeyBinding::new(WORD_LEFT, WordLeft, context),
+        KeyBinding::new(WORD_RIGHT, WordRight, context),
+        KeyBinding::new(SELECT_WORD_LEFT, SelectWordLeft, context),
+        KeyBinding::new(SELECT_WORD_RIGHT, SelectWordRight, context),
+        KeyBinding::new(DELETE_WORD_LEFT, DeleteWordLeft, context),
+        KeyBinding::new(DELETE_WORD_RIGHT, DeleteWordRight, context),
         KeyBinding::new("secondary-a", SelectAll, context),
         KeyBinding::new("secondary-v", Paste, context),
         KeyBinding::new("secondary-c", Copy, context),
@@ -166,6 +204,64 @@ impl TextInput {
         }
     }
 
+    fn word_left(&mut self, _: &WordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        let from = if self.selected_range.is_empty() {
+            self.cursor_offset()
+        } else {
+            self.selected_range.start
+        };
+        self.move_to(self.previous_word(from), cx);
+    }
+
+    fn word_right(&mut self, _: &WordRight, _: &mut Window, cx: &mut Context<Self>) {
+        let from = if self.selected_range.is_empty() {
+            self.cursor_offset()
+        } else {
+            self.selected_range.end
+        };
+        self.move_to(self.next_word(from), cx);
+    }
+
+    fn select_word_left(&mut self, _: &SelectWordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.previous_word(self.cursor_offset()), cx);
+    }
+
+    fn select_word_right(&mut self, _: &SelectWordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.next_word(self.cursor_offset()), cx);
+    }
+
+    fn delete_word_left(
+        &mut self,
+        _: &DeleteWordLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            let to = self.previous_word(self.cursor_offset());
+            if to == self.cursor_offset() {
+                return;
+            }
+            self.select_to(to, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx)
+    }
+
+    fn delete_word_right(
+        &mut self,
+        _: &DeleteWordRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            let to = self.next_word(self.cursor_offset());
+            if to == self.cursor_offset() {
+                return;
+            }
+            self.select_to(to, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx)
+    }
+
     fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.previous_boundary(self.cursor_offset()), cx);
     }
@@ -224,11 +320,26 @@ impl TextInput {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle, cx);
+        let at = self.index_for_mouse_position(event.position);
+        if event.click_count >= 3 || (event.click_count == 2 && self.masked) {
+            // A masked field is one word: say nothing about where its spaces are.
+            self.selection_reversed = false;
+            self.move_to(0, cx);
+            self.select_to(self.content.len(), cx);
+            return;
+        }
+        if event.click_count == 2 {
+            let (start, end) = word_at(&self.content, at);
+            self.selection_reversed = false;
+            self.move_to(start, cx);
+            self.select_to(end, cx);
+            return;
+        }
         self.is_selecting = true;
         if event.modifiers.shift {
-            self.select_to(self.index_for_mouse_position(event.position), cx);
+            self.select_to(at, cx);
         } else {
-            self.move_to(self.index_for_mouse_position(event.position), cx)
+            self.move_to(at, cx)
         }
     }
 
@@ -353,6 +464,23 @@ impl TextInput {
             .rev()
             .find_map(|(idx, _)| (idx < offset).then_some(idx))
             .unwrap_or(0)
+    }
+
+    /// The start of the word before `offset`. A masked field is one word, so
+    /// moving through it says nothing about where the secret has spaces.
+    fn previous_word(&self, offset: usize) -> usize {
+        if self.masked {
+            return 0;
+        }
+        previous_word(&self.content, offset)
+    }
+
+    /// The end of the word after `offset`.
+    fn next_word(&self, offset: usize) -> usize {
+        if self.masked {
+            return self.content.len();
+        }
+        next_word(&self.content, offset)
     }
 
     fn next_boundary(&self, offset: usize) -> usize {
@@ -688,6 +816,12 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
+            .on_action(cx.listener(Self::word_left))
+            .on_action(cx.listener(Self::word_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
+            .on_action(cx.listener(Self::delete_word_left))
+            .on_action(cx.listener(Self::delete_word_right))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
             .on_action(cx.listener(Self::select_all))
@@ -723,5 +857,88 @@ impl Render for TextInput {
 impl Focusable for TextInput {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+/// The word, or the run of spaces and punctuation, under `offset`, as a
+/// double-click selects it.
+fn word_at(text: &str, offset: usize) -> (usize, usize) {
+    let offset = offset.min(text.len());
+    let kind = text[offset..]
+        .chars()
+        .next()
+        .or_else(|| text[..offset].chars().next_back())
+        .map(word_char);
+    let Some(kind) = kind else {
+        return (0, 0);
+    };
+    let start = text[..offset]
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| word_char(*c) == kind)
+        .last()
+        .map_or(offset, |(i, _)| i);
+    let end = text[offset..]
+        .char_indices()
+        .find(|(_, c)| word_char(*c) != kind)
+        .map_or(text.len(), |(i, _)| offset + i);
+    (start, end)
+}
+
+fn word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// From `offset`, back over anything that is not a word, then back over the
+/// word: "example.com|" goes to "example.|com". Dots, @ and slashes end a word,
+/// so moving through a URL or an address stops at each part.
+fn previous_word(text: &str, offset: usize) -> usize {
+    let mut chars = text[..offset].char_indices().rev().peekable();
+    while chars.next_if(|(_, c)| !word_char(*c)).is_some() {}
+    let mut start = chars.peek().map_or(0, |(i, c)| i + c.len_utf8());
+    while let Some((i, _)) = chars.next_if(|(_, c)| word_char(*c)) {
+        start = i;
+    }
+    start
+}
+
+/// From `offset`, forward over anything that is not a word, then over the word.
+fn next_word(text: &str, offset: usize) -> usize {
+    let mut chars = text[offset..].char_indices().peekable();
+    while chars.next_if(|(_, c)| !word_char(*c)).is_some() {}
+    while chars.next_if(|(_, c)| word_char(*c)).is_some() {}
+    chars.peek().map_or(text.len(), |(i, _)| offset + i)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{next_word, previous_word, word_at};
+
+    #[test]
+    fn double_click_takes_the_word_under_it() {
+        let text = "api.example.com  my user";
+        assert_eq!(word_at(text, 6), (4, 11));
+        assert_eq!(word_at(text, 4), (4, 11));
+        assert_eq!(word_at(text, 15), (15, 17));
+        assert_eq!(word_at(text, 24), (20, 24));
+        assert_eq!(word_at("", 0), (0, 0));
+    }
+
+    #[test]
+    fn words_skip_spaces_and_punctuation() {
+        let text = "api.example.com  my user";
+        // api . example . com    my   user
+        // 0   3 4       11 12 15 17 19 20
+        assert_eq!(previous_word(text, text.len()), 20);
+        assert_eq!(previous_word(text, 20), 17);
+        assert_eq!(previous_word(text, 17), 12);
+        assert_eq!(previous_word(text, 3), 0);
+        assert_eq!(previous_word(text, 0), 0);
+        assert_eq!(next_word(text, 0), 3);
+        assert_eq!(next_word(text, 3), 11);
+        assert_eq!(next_word(text, 15), 19);
+        assert_eq!(next_word(text, 24), 24);
+        assert_eq!(previous_word("  ", 2), 0);
+        assert_eq!(next_word("é ü", 0), 2);
     }
 }

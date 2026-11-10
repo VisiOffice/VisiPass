@@ -80,6 +80,8 @@ pub struct VisiPassApp {
     keep: HashMap<String, String>,
     not_duplicates: HashSet<String>,
     duplicates_shown: usize,
+    /// "Merge all" was pressed once; the next press merges.
+    confirm_merge_all: bool,
     /// Items sync found edited on two devices at once: each version (its
     /// revision and contents), the one shown everywhere else first.
     conflicts: Vec<Vec<(String, Item)>>,
@@ -203,6 +205,7 @@ impl VisiPassApp {
             keep: HashMap::new(),
             not_duplicates: HashSet::new(),
             duplicates_shown: DUPLICATES_PAGE,
+            confirm_merge_all: false,
             conflicts: Vec::new(),
             conflicts_revealed: HashMap::new(),
         };
@@ -670,6 +673,7 @@ impl VisiPassApp {
                         .any(|g| &group_key(g) == key && g.items.iter().any(|m| &m.id == id))
                 });
                 this.duplicates = Some(groups);
+                this.confirm_merge_all = false;
             },
         );
     }
@@ -694,6 +698,11 @@ impl VisiPassApp {
 
     fn merge_for(&self, group: &Group) -> Option<Merge> {
         let keep = self.kept_in(group)?;
+        // A passkey cannot move to the kept login, so the daemon refuses to
+        // archive one; leave such a group for the human to choose in.
+        if group.items.iter().any(|m| m.passkey && m.id != keep.id) {
+            return None;
+        }
         let key = |m: &vp_core::dedupe::Member| ItemKey {
             id: m.id.clone(),
             vault: m.vault.id.clone(),
@@ -766,6 +775,27 @@ impl VisiPassApp {
     }
 
     // ---- rendering ---------------------------------------------------------
+
+    /// A field's value that copies itself when clicked, as other password
+    /// managers' values do; the Copy button beside it stays for the keyboard.
+    fn copyable(
+        &self,
+        id: String,
+        cx: &mut Context<Self>,
+        on: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+    ) -> gpui::Stateful<gpui::Div> {
+        let t = &self.theme;
+        div()
+            .id(gpui::ElementId::Name(id.into()))
+            .flex_1()
+            .min_w(px(0.))
+            .px(px(4.))
+            .mx(px(-4.))
+            .rounded(px(t.radius))
+            .cursor_pointer()
+            .hover(|s| s.bg(alpha(t.foreground, t.controls.hover_fill_alpha)))
+            .on_click(cx.listener(move |this, _, _, cx| on(this, cx)))
+    }
 
     fn button(
         &self,
@@ -1369,16 +1399,17 @@ impl VisiPassApp {
                         let shown =
                             format!("{} {}", &code[..code.len() / 2], &code[code.len() / 2..]);
                         let copy_code = code.clone();
+                        let click_code = code.clone();
                         row = row
                             .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.))
-                                    .text_size(px(t.size(1.333)))
-                                    .text_color(t.accent)
-                                    .font_family(SharedString::from(t.mono_family.clone()))
-                                    .font_weight(FontWeight::BOLD)
-                                    .child(shown),
+                                self.copyable(format!("value-{key}"), cx, move |this, cx| {
+                                    this.copy("one-time code", &click_code, true, cx)
+                                })
+                                .text_size(px(t.size(1.333)))
+                                .text_color(t.accent)
+                                .font_family(SharedString::from(t.mono_family.clone()))
+                                .font_weight(FontWeight::BOLD)
+                                .child(shown),
                             )
                             .child(
                                 div()
@@ -1409,16 +1440,17 @@ impl VisiPassApp {
                 let toggle_key = key.clone();
                 let copy_value = value.clone();
                 let copy_label = label.clone();
+                let (click_value, click_label) = (value.clone(), label.clone());
                 row = row
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .text_color(t.foreground)
-                            .font_family(SharedString::from(t.mono_family.clone()))
-                            .overflow_hidden()
-                            .truncate()
-                            .child(shown),
+                        self.copyable(format!("value-{key}"), cx, move |this, cx| {
+                            this.copy(&click_label, click_value.expose(), true, cx)
+                        })
+                        .text_color(t.foreground)
+                        .font_family(SharedString::from(t.mono_family.clone()))
+                        .overflow_hidden()
+                        .truncate()
+                        .child(shown),
                     )
                     .child(self.button(
                         format!("reveal-{key}"),
@@ -1445,15 +1477,27 @@ impl VisiPassApp {
                 let copy_value = value.clone();
                 let copy_label = label.clone();
                 let multiline = field.purpose.as_deref() == Some("NOTES");
+                let (click_value, click_label) = (value.clone(), label.clone());
                 row = row
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
+                    .when(multiline, |d| {
+                        d.child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .text_color(t.foreground)
+                                .child(value.expose().to_string()),
+                        )
+                    })
+                    .when(!multiline, |d| {
+                        d.child(
+                            self.copyable(format!("value-{key}"), cx, move |this, cx| {
+                                this.copy(&click_label, click_value.expose(), false, cx)
+                            })
                             .text_color(t.foreground)
-                            .when(!multiline, |d| d.truncate())
+                            .truncate()
                             .child(value.expose().to_string()),
-                    )
+                        )
+                    })
                     .when(!multiline, |d| {
                         d.child(self.button(
                             format!("copy-{key}"),
@@ -1632,15 +1676,14 @@ impl VisiPassApp {
                 .text_size(px(t.size(0.917)))
                 .child(text)
         };
-        let mut page = div()
-            .id("duplicates")
-            .flex_1()
-            .h_full()
-            .overflow_y_scroll()
-            .p(px(24.))
+        // The heading and the merge buttons stay put; only the groups scroll.
+        let mut top = div()
             .flex()
             .flex_col()
-            .gap(px(16.))
+            .gap(px(12.))
+            .px(px(24.))
+            .pt(px(24.))
+            .pb(px(12.))
             .child(
                 div()
                     .text_size(px(t.size(1.333)))
@@ -1648,57 +1691,102 @@ impl VisiPassApp {
                     .child("Duplicates"),
             )
             .child(div().text_color(t.muted).child(
-                "Logins saved more than once for the same site and username. Keeping one copies \
-                 onto it what only the others have (websites, two-factor codes, notes, fields, and \
-                 a password that differs, as \"other password\"), then archives the others. \
-                 Passwords are compared, never shown here.",
+                "Logins saved more than once for the same site and username. Merging keeps the \
+                 selected login, copies onto it what only the others have (websites, two-factor \
+                 codes, notes, fields, and a password that differs, as \"other password\"), then \
+                 archives the others. Passwords are compared, never shown here.",
             ));
+        let page = div().flex_1().h_full().min_w(px(0.)).flex().flex_col();
         let Some(_) = &self.duplicates else {
-            return page.child(div().text_color(t.muted).child("Looking for duplicates…"));
+            return page
+                .child(top.child(div().text_color(t.muted).child("Looking for duplicates…")));
         };
         let groups = self.open_groups();
         if groups.is_empty() {
-            return page.child(div().text_color(t.muted).child("No duplicate logins."));
+            return page.child(top.child(div().text_color(t.muted).child("No duplicate logins.")));
         }
         let exact: Vec<Merge> = groups
             .iter()
             .filter(|g| g.same_password)
             .filter_map(|g| self.merge_for(g))
             .collect();
+        let all: Vec<Merge> = groups.iter().filter_map(|g| self.merge_for(g)).collect();
         let different = groups.iter().filter(|g| !g.same_password).count();
-        page = page.child(
+        let held = groups.len() - all.len();
+        top = top.child(
             div()
                 .flex()
+                .flex_wrap()
                 .items_center()
-                .gap(px(12.))
-                .child(div().flex_1().child(format!(
-                    "{} exact copies (same password) · {} with different passwords",
-                    exact.len(),
-                    different
+                .gap(px(8.))
+                .child(div().flex_1().min_w(px(240.)).child(format!(
+                    "{} groups: {} exact copies (same password) · {} with different passwords{}",
+                    groups.len(),
+                    groups.len() - different,
+                    different,
+                    if held > 0 {
+                        format!(" · {held} with a passkey to choose by hand")
+                    } else {
+                        String::new()
+                    }
                 )))
                 .when(!exact.is_empty(), |d| {
-                    let label = format!("Merge all {} exact copies", exact.len());
+                    let label = format!("Merge {} exact copies", exact.len());
                     d.child(self.button("merge-exact", label, cx, move |this, _, cx| {
                         this.merge(exact.clone(), cx)
                     }))
+                })
+                .when(!all.is_empty(), |d| {
+                    let label = if self.confirm_merge_all {
+                        format!("Press again to merge all {}", all.len())
+                    } else {
+                        format!("Merge all {}", all.len())
+                    };
+                    d.child(self.button("merge-all", label, cx, move |this, _, cx| {
+                        if this.confirm_merge_all {
+                            this.confirm_merge_all = false;
+                            this.merge(all.clone(), cx);
+                        } else {
+                            this.confirm_merge_all = true;
+                            cx.notify();
+                        }
+                    }))
                 }),
         );
+        if self.confirm_merge_all {
+            top = top.child(div().text_color(t.muted).child(
+                "Merge all keeps the selected login in every group (the suggested one unless you \
+                 picked another: the most complete, or for different passwords the most recently \
+                 edited). Other passwords are kept on it as \"other password\"; archived logins \
+                 are not deleted.",
+            ));
+        }
+        let mut list = div()
+            .id("duplicates")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .px(px(24.))
+            .pb(px(24.))
+            .flex()
+            .flex_col()
+            .gap(px(16.));
         let mut last_kind = None;
         for group in groups.iter().take(self.duplicates_shown) {
             if last_kind != Some(group.same_password) {
                 last_kind = Some(group.same_password);
-                page = page.child(heading(if group.same_password {
+                list = list.child(heading(if group.same_password {
                     "SAME PASSWORD · keeping one loses nothing".into()
                 } else {
                     "DIFFERENT PASSWORDS · choose the one that is current; open them to compare"
                         .into()
                 }));
             }
-            page = page.child(self.render_group(group, cx));
+            list = list.child(self.render_group(group, cx));
         }
         if groups.len() > self.duplicates_shown {
             let more = groups.len() - self.duplicates_shown;
-            page = page.child(self.button(
+            list = list.child(self.button(
                 "duplicates-more",
                 format!("Show more ({more} left)"),
                 cx,
@@ -1708,7 +1796,7 @@ impl VisiPassApp {
                 },
             ));
         }
-        page
+        page.child(top).child(list)
     }
 
     fn render_group(&self, group: &Group, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1721,6 +1809,9 @@ impl VisiPassApp {
             let mut facts = Vec::new();
             if let Some(p) = &member.password {
                 facts.push(format!("password {p}"));
+            }
+            if member.passkey {
+                facts.push("passkey".into());
             }
             if member.codes > 0 {
                 facts.push("2FA".into());
@@ -1829,7 +1920,7 @@ impl VisiPassApp {
                         d.child(self.button(
                             format!("dup-merge-{key}"),
                             format!(
-                                "Keep selected, archive {others} other{}",
+                                "Merge (archive {others} other{})",
                                 if others == 1 { "" } else { "s" }
                             ),
                             cx,

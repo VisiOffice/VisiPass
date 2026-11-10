@@ -52,6 +52,9 @@ pub struct Member {
     pub notes: bool,
     /// Fields besides username, password, codes and notes.
     pub fields: usize,
+    /// Holds a passkey, which cannot move to another item: this one must be kept.
+    #[serde(default)]
+    pub passkey: bool,
     /// The one to keep if the human does not choose.
     pub suggested: bool,
 }
@@ -128,22 +131,24 @@ pub fn group(site: String, username: String, items: &[Item]) -> Group {
                     .filter(filled)
                     .filter(|f| is_extra(f))
                     .count(),
+                passkey: !item.passkeys.is_empty(),
                 suggested: false,
             }
         })
         .collect();
     let same_password = passwords.len() <= 1;
-    // With one password, keep the fullest; with several, the most recently
-    // changed, whose password is likeliest to be the current one.
+    // A login with a passkey first, since only it can keep the passkey. Then,
+    // with one password, the fullest; with several, the most recently changed,
+    // whose password is likeliest to be the current one.
     let best = (0..members.len()).max_by(|&a, &b| {
         let (a, b) = (&members[a], &members[b]);
         let fullness = |m: &Member| m.codes * 4 + m.fields * 2 + m.urls.len() + m.notes as usize;
         let newer = a.updated_at.cmp(&b.updated_at);
-        if same_password {
+        a.passkey.cmp(&b.passkey).then(if same_password {
             fullness(a).cmp(&fullness(b)).then(newer)
         } else {
             newer.then(fullness(a).cmp(&fullness(b)))
-        }
+        })
     });
     if let Some(best) = best {
         members[best].suggested = true;
@@ -380,6 +385,21 @@ mod tests {
         assert!(!group.same_password);
         assert_eq!(group.items[1].password.as_deref(), Some("B"));
         assert!(group.items[1].suggested);
+    }
+
+    #[test]
+    fn a_login_with_a_passkey_is_kept_whatever_else() {
+        let new = login("a", "2026-01-01T00:00:00Z", "one", vec![]);
+        let mut with_passkey = login("b", "2020-01-01T00:00:00Z", "two", vec![]);
+        with_passkey.passkeys.push(crate::model::PasskeyInfo {
+            credential_id: "c".into(),
+            rp_id: "chase.com".into(),
+            user_name: String::new(),
+            created_at: None,
+        });
+        let group = group("chase.com".into(), "robert".into(), &[new, with_passkey]);
+        assert!(group.items[1].passkey && group.items[1].suggested);
+        assert!(!group.items[0].suggested);
     }
 
     #[test]
