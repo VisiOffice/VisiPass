@@ -32,12 +32,18 @@ sees a purchase.
 
 ### 2.1 What it provides
 
-One JSON file per card in `data/us/<issuer>/`, validated by `schema/card.schema.json`. As of
-2026-11-01 it covers 30 cards (20 personal, 10 business) from Amex, Capital One, Chase, Citi,
-Discover, U.S. Bank and Wells Fargo.
+One JSON file per card in `data/us/<issuer>/`, validated by `schema/card.schema.json`. Catalog
+`2026.11.08-draft` (schema 3) covers 30 cards (20 personal, 10 business) from Amex, Capital One,
+Chase, Citi, Discover, U.S. Bank and Wells Fargo.
 
-Each card has `id`, `network`, `rewards` (`program`, and `unit`: cash or points), `fees`,
-`earn_rates` and `sources`. Each earn rate has a category from `vocab/earn-categories.json` and a
+Each card has `id`, `networks`, `rewards` (`program`, and `unit`: cash or points), `fees` (dated
+versions, like earn rates), `earn_rates` and `sources`.
+
+`networks` is `{values, status, source, last_verified, notes}`. `values` lists every network the
+product is issued on (Capital One Venture has been both Visa and Mastercard). An entry with status
+`to_verify` has an empty list, which means not yet confirmed, not "no network".
+
+Each earn rate has a category from `vocab/earn-categories.json` and a
 list of dated `versions`, each with:
 
 | Field | Use in VisiPass |
@@ -61,29 +67,33 @@ software_cloud`.
 
 ### 2.2 How VisiPass takes it
 
-CardFacts' build writes `dist/cards.min.json` and `dist/SHA256SUMS`, but it has no tagged
-releases yet. VisiPass therefore:
+CardFacts publishes catalog releases on GitHub (tagged `catalog-2026.11.08-draft`, marked
+prerelease while the data is a draft), each with `cards.min.json` and `SHA256SUMS`. VisiPass:
 
-1. Pins a CardFacts commit in this repository (`data/cardfacts.lock`: commit and SHA-256 of the
-   built file).
-2. Builds `cards.min.json` from that commit in CI and checks the hash.
+1. Pins a release in this repository: `data/cardfacts.lock` holds the tag, `schema_version` and the
+   SHA-256 of `cards.min.json`.
+2. Downloads that asset in CI, checks the hash, and refuses a `schema_version` it doesn't know.
 3. Ships it inside the extension, so a release of VisiPass is also the data release. A later
    version may fetch a newer signed snapshot between releases.
 
 Moving the pin is an ordinary pull request that shows the diff of card terms, so a bad change
-upstream reaches nobody until someone reviews it here.
+upstream reaches nobody until someone reviews it here. CardFacts also serves read-only JSON at
+`https://weiqizhou2002.github.io/cardfacts/api/v1/`, rebuilt daily. It is handy for looking things up
+and diffing revisions, but the extension never fetches it: daily files change without review here.
 
 ### 2.3 Gaps found so far, to fix upstream
 
-- `network` is null on 15 of the 30 cards (most Chase, Citi and Capital One cards), because the product
-  pages CardFacts cites don't state it and its rule is never to guess. The acceptance check (§5)
-  needs it. Asked upstream ([cardfacts#8](https://github.com/WeiqiZhou2002/cardfacts/issues/8)) to source it from issuer terms, and to allow a list where a product is
-  issued on more than one network. Until then, the person picks the network when saving a card.
+- Networks. Asked upstream ([cardfacts#8](https://github.com/WeiqiZhou2002/cardfacts/issues/8))
+  to source them from issuer terms and to allow a list. Both are done in schema 3: 15 cards are
+  verified, and the other 15 (most Chase, Citi and Capital One cards) are `to_verify` while
+  CardFacts sources them from pricing and terms, cardmember agreements and benefit guides. VisiPass
+  needs this less than first thought: the network of the person's own card comes from its number
+  (§3), and CardFacts' list is the fallback.
 - Merchant exclusions (Amex grocery bonuses exclude superstores and warehouse clubs) are only in
   `notes`. The merchant map handles this from the other side: walmart.com is not `groceries`. If
   that proves insufficient, propose an `excludes` condition to CardFacts.
-- The catalogue is marked `phase2-draft`, has one maintainer, and is days old. If it stalls, the
-  CC0 data can be forked and kept going.
+- The catalogue is still marked draft and has one maintainer, who answered #8 within two days and
+  took both suggestions. If it stalls, the CC0 data can be forked and kept going.
 
 ## 3. What the vault stores
 
@@ -93,6 +103,11 @@ On a card item, beside number, expiry, name and CVV:
 |---|---|---|
 | `product` | `us-chase-freedom-flex` | A CardFacts `id`. Chosen from a list when the card is saved; imports can't fill it. |
 | `activations` | `["2026-Q4"]` | Rotating periods the person has activated. |
+
+The card's network is not stored: it comes from the number's leading digits (4 Visa, 51–55 and
+2221–2720 Mastercard, 34 and 37 Amex, 6011 and 65 Discover), which is exact for that card even when
+the product has been issued on more than one network. If CardFacts lists verified networks for the
+`product` and the number's network isn't among them, the editor asks whether the product is right.
 
 Per person, not per card:
 
@@ -190,8 +205,11 @@ own markup (schema.org `Restaurant`, `GroceryStore`) may be used as a hint later
 For each card in the vault that has a `product`:
 
 1. **Category.** From the merchant file, or unknown.
-2. **Acceptance.** If the merchant's `accepts` excludes the card's network, keep the card in the
-   list as "not accepted here" and don't rank it. This is the "good card, but restricted" case.
+2. **Acceptance.** The card's network comes from its number (§3); without a number, from CardFacts
+   when `networks` is verified with a single value. If the merchant's `accepts` excludes it, keep
+   the card in the list as "not accepted here" and don't rank it. This is the "good card, but
+   restricted" case. When the network is unknown (no number, and `to_verify` or several values),
+   rank the card and say "check this site takes it" instead of guessing.
 3. **Matching rates.** From the card's CardFacts record, take each earn rate's version in effect
    today whose category matches, or whose `conditions.merchants` names this merchant. Skip it when:
    - its category is in the merchant's `not`
@@ -204,8 +222,9 @@ For each card in the vault that has a `product`:
 4. **Caps.** With the person's spending estimate, apply `rate_after_cap` once the cap is passed.
    Without one, show "5%, up to $1,500 this quarter".
 5. **Value.** Cash rates as they are; points times the person's cents per point.
-6. **Foreign fee.** Subtract `fees.foreign_transaction_fee_percent` when the site is outside the
-   card's country.
+6. **Foreign fee.** Subtract `foreign_transaction_fee_percent` from the fee version in effect today
+   when the site is outside the card's country. A null fee is unknown, not zero: say so rather than
+   subtract nothing silently.
 
 Cards are ranked by cents per dollar. When two are within 0.25¢, both are shown with what differs
 (cash or points, which program, a cap nearly used), and the person picks. Otherwise the best card
@@ -215,11 +234,13 @@ is pre-selected, with one line on why, and filled when the person confirms.
 
 In VisiPass CI:
 
-- The pinned CardFacts build's hash matches `data/cardfacts.lock`.
+- The pinned release's `cards.min.json` matches the hash and `schema_version` in
+  `data/cardfacts.lock`.
 - Every category a merchant file names exists in the pinned CardFacts vocabulary.
 - Tests rank fixed cases from real records: Amex Gold against Citi Double Cash at a restaurant, Blue
   Cash Preferred at walmart.com (bonus skipped, reason shown), Freedom Flex with and without
-  activation.
+  activation, and a Visa-numbered Venture at a Visa-only merchant (accepted, though CardFacts lists
+  both networks).
 
 In the merchant repository:
 
