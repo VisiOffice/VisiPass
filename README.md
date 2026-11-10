@@ -75,6 +75,9 @@ vp import proton ~/Downloads/Proton\ Pass_export.zip
                  # copies first; keep one and the rest's websites, codes and notes move onto it
 vp lock          # erase the keys from memory; it also locks once the computer has been
                  # idle for 10 minutes, when the screen locks, and before the machine sleeps
+vp auto-lock --minutes 240 --screen-lock off
+                 # driving this computer from elsewhere (SSH, a phone)? lock after 4 hours
+                 # idle instead, and not with the screen; asks for the master password
 vp quick-unlock on   # optional: for 8 hours after you type the master password, unlocking
                      # again takes your fingerprint or login password (polkit)
 vp lock --full   # lock and end that window

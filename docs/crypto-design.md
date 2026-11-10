@@ -246,6 +246,17 @@ overviews; grants are kept but unusable) on:
   mistaken signal costs a master password, never a key;
 - `vp lock`, and quitting the app if the user chose that.
 
+As built (2026-11-10): the idle time and locking with the screen are a setting, `vp auto-lock
+--minutes N --screen-lock on|off` (1 to 480 minutes; default 10 and on), for a computer the person
+drives from elsewhere, whose own keyboard is always idle and whose screen locks while they work.
+Sleep always locks. Agents are refused, and anything that keeps the vault open longer asks for the
+master password. The setting sits in `vault-settings.json` beside a tag, `HKDF-Expand(
+HKDF-Expand(AK, AD("VisiPass local settings", 1, account_id, ak_generation)), AD("VisiPass local
+settings tag", 1, AD("VisiPass auto-lock", 1, minutes, screen_lock)))`; the daemon uses the default
+until an unlock checks the tag, so editing the file (anything running as the user can) changes
+nothing. The compositor reports idleness after a minute; the vault counts from then against the
+setting.
+
 The approval rules (grants, per-agent scopes) are unchanged: a locked vault first asks the human
 to unlock, then evaluates the request as today.
 

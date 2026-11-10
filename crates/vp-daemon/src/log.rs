@@ -67,27 +67,52 @@ impl AccessLog {
         let mut intact = true;
         let mut entries = Vec::new();
         for line in text.lines() {
-            let Ok(mut value) = serde_json::from_str::<serde_json::Value>(line) else {
-                intact = false;
-                continue;
-            };
-            let hash = value
-                .as_object_mut()
-                .and_then(|o| o.remove("hash"))
-                .and_then(|h| h.as_str().map(String::from));
-            let body = serde_json::to_string(&value).unwrap_or_default();
-            let ok = value.get("prev").and_then(|p| p.as_str()) == Some(previous.as_str())
-                && hash.as_deref() == Some(hex(&Sha256::digest(body.as_bytes())).as_str());
-            intact &= ok;
-            previous = hash.unwrap_or_default();
-            if let Some(o) = value.as_object_mut() {
-                o.remove("prev");
+            let checked = without_hash(line).and_then(|(body, hash)| {
+                let mut value = serde_json::from_str::<serde_json::Value>(&body).ok()?;
+                let ok = value.get("prev").and_then(|p| p.as_str()) == Some(previous.as_str())
+                    && hash == hex(&Sha256::digest(body.as_bytes()));
+                if let Some(o) = value.as_object_mut() {
+                    o.remove("prev");
+                }
+                Some((value, hash, ok))
+            });
+            match checked {
+                Some((value, hash, ok)) => {
+                    intact &= ok;
+                    previous = hash;
+                    entries.push(value);
+                }
+                None => intact = false,
             }
-            entries.push(value);
         }
         let skip = entries.len().saturating_sub(limit);
         serde_json::json!({ "intact": intact, "entries": entries.split_off(skip) })
     }
+}
+
+/// The line as it was hashed (everything but its `"hash"` member), and that
+/// hash. Done on the text itself, so checking does not depend on how a JSON
+/// library orders keys: early builds wrote them sorted, later ones in order.
+fn without_hash(line: &str) -> Option<(String, String)> {
+    const KEY: &str = "\"hash\":\"";
+    let start = line.find(KEY)?;
+    let value_start = start + KEY.len();
+    let hash = line.get(value_start..value_start + 64)?;
+    if !hash.bytes().all(|b| b.is_ascii_hexdigit())
+        || line.get(value_start + 64..value_start + 65) != Some("\"")
+    {
+        return None;
+    }
+    let end = value_start + 65;
+    // Take the comma that joins it to a neighbour: before it, or after if first.
+    let body = if line[..start].ends_with(',') {
+        format!("{}{}", &line[..start - 1], &line[end..])
+    } else if line[end..].starts_with(',') {
+        format!("{}{}", &line[..start], &line[end + 1..])
+    } else {
+        format!("{}{}", &line[..start], &line[end..])
+    };
+    Some((body, hash.to_string()))
 }
 
 #[cfg(test)]
@@ -127,5 +152,27 @@ mod tests {
             .replacen("denied", "allowed", 1);
         std::fs::write(&file, text).unwrap();
         assert_eq!(AccessLog::open(file).tail(10)["intact"], false);
+    }
+
+    /// Early builds wrote each line's keys sorted, with the hash among them;
+    /// later builds write them in order with the hash last. Both must verify.
+    #[test]
+    fn lines_with_keys_in_either_order_verify() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("access.log");
+        let body = format!(
+            r#"{{"agent":"Claude Code","at":"2026-10-12T00:00:00Z","outcome":"allowed","pid":1,"prev":"{}","project":"/p","request":"status"}}"#,
+            "0".repeat(64)
+        );
+        let hash = hex(&Sha256::digest(body.as_bytes()));
+        let sorted = body.replacen(r#""outcome""#, &format!(r#""hash":"{hash}","outcome""#), 1);
+        assert!(sorted.find("hash") < sorted.find("request"));
+        std::fs::write(&file, format!("{sorted}\n")).unwrap();
+        let mut log = AccessLog::open(file.clone());
+        log.append(&entry("allowed")).unwrap();
+        let tail = log.tail(10);
+        assert_eq!(tail["intact"], true, "{tail}");
+        assert_eq!(tail["entries"][0]["request"], "status");
+        assert!(tail["entries"][0].get("prev").is_none());
     }
 }

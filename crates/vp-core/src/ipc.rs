@@ -402,6 +402,15 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hours: Option<u64>,
     },
+    /// Shows (no fields) or changes when the native vault locks by itself.
+    /// Only the human changes it; keeping the vault open longer asks for the
+    /// master password in the VisiPass window.
+    AutoLock {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        minutes: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        screen_lock: Option<bool>,
+    },
     /// Turns sync on through a folder each device can see or a bucket
     /// (§11.1). Only the human, never an agent. A folder's path is absolute;
     /// a bucket's keys are typed in the VisiPass window.
@@ -642,6 +651,7 @@ impl Request {
             Request::InitVault => "vault-init",
             Request::LockVault { .. } => "vault-lock",
             Request::QuickUnlock { .. } => "vault-quick-unlock",
+            Request::AutoLock { .. } => "vault-auto-lock",
             Request::EmergencyKit => "vault-emergency-kit",
             Request::ImportOp { .. } => "vault-import",
             Request::ImportProton { .. } => "vault-import-proton",

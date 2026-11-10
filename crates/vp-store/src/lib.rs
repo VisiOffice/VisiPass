@@ -395,6 +395,16 @@ impl Unlocked {
     fn derived(&self, label: &str) -> Key {
         derive(&self.ak, label, &self.account_id, self.ak_generation)
     }
+
+    /// A MAC over this device's local settings, so a file anyone running as
+    /// the user can write cannot loosen them: HKDF-Expand is HMAC-SHA-256
+    /// under a key only the unlocked account has.
+    pub fn settings_tag(&self, settings: &[u8]) -> [u8; 32] {
+        *self
+            .derived("VisiPass local settings")
+            .expand(&ad("VisiPass local settings tag", &[Part::Bytes(settings)]))
+            .expose()
+    }
 }
 
 fn derive(ak: &Key, label: &str, account_id: &[u8; 16], generation: u64) -> Key {

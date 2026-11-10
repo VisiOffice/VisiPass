@@ -131,6 +131,7 @@ impl<U: Unlock> Backend for Routed<U> {
         Some(NativeStatus {
             exists: self.native.exists(),
             unlocked: self.native.is_unlocked(),
+            auto_lock: self.native.auto_lock(),
             quick_unlock: quick.as_ref().map(|q| q.window),
             quick_unlock_remaining: quick.and_then(|q| q.remaining),
         })
@@ -156,6 +157,19 @@ impl<U: Unlock> Backend for Routed<U> {
             secret_key: Secret::new(kit.secret_key.to_string()),
             vault_file: kit.vault_file,
         })
+    }
+
+    async fn native_set_auto_lock(
+        &self,
+        auto_lock: vp_core::backend::AutoLock,
+        password: Option<Secret>,
+    ) -> Result<(), Failure> {
+        if !self.native.exists() {
+            return Err(Failure::new(
+                "Create your VisiPass vault first with `vp init`",
+            ));
+        }
+        self.native.set_auto_lock(auto_lock, password).await
     }
 
     async fn native_quick_unlock(

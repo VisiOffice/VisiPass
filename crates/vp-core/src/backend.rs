@@ -100,6 +100,16 @@ pub trait Backend: Send + Sync + 'static {
         async { Err(Failure::new(NO_NATIVE)) }
     }
 
+    /// Changes when the vault locks by itself. `password` is the master
+    /// password, needed when the vault is locked or the change keeps it open longer.
+    fn native_set_auto_lock(
+        &self,
+        _auto_lock: AutoLock,
+        _password: Option<Secret>,
+    ) -> impl Future<Output = Result<(), Failure>> + Send {
+        async { Err(Failure::new(NO_NATIVE)) }
+    }
+
     /// Turns quick unlock on for `window` (after the master password) or off.
     fn native_quick_unlock(
         &self,
@@ -209,10 +219,54 @@ pub struct EmergencyKit {
 pub struct NativeStatus {
     pub exists: bool,
     pub unlocked: bool,
+    /// When the vault locks by itself.
+    pub auto_lock: AutoLock,
     /// Quick unlock's window, when it is on.
     pub quick_unlock: Option<std::time::Duration>,
     /// Time left in the open quick-unlock window.
     pub quick_unlock_remaining: Option<std::time::Duration>,
+}
+
+/// When the native vault locks by itself, besides sleep and `vp lock`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoLock {
+    /// After this many minutes without keyboard or mouse input (or, where the
+    /// computer's idle time cannot be watched, without a request).
+    pub minutes: u64,
+    /// Also when the screen locks.
+    pub screen_lock: bool,
+}
+
+impl AutoLock {
+    /// As 1Password does: ten minutes, and with the screen.
+    pub const DEFAULT: AutoLock = AutoLock {
+        minutes: 10,
+        screen_lock: true,
+    };
+    /// Eight hours: a working day, never "never".
+    pub const MAX_MINUTES: u64 = 8 * 60;
+
+    /// Whether this keeps the vault open in some case where `than` would lock it.
+    pub fn looser_than(&self, than: &AutoLock) -> bool {
+        self.minutes > than.minutes || (than.screen_lock && !self.screen_lock)
+    }
+
+    pub fn check(&self) -> Result<(), Failure> {
+        if (1..=Self::MAX_MINUTES).contains(&self.minutes) {
+            Ok(())
+        } else {
+            Err(Failure::new(
+                "Choose an auto-lock time from 1 minute to 8 hours (480 minutes)",
+            ))
+        }
+    }
+}
+
+impl Default for AutoLock {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
 }
 
 const NO_NATIVE: &str = "This visipassd has no native vault";

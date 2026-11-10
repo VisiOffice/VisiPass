@@ -66,7 +66,7 @@ const QUIET: &str = "VisiPass is locked: unlocking was just cancelled. Try again
 /// How long the computer may sit idle before the vault locks, as 1Password's
 /// default. Without a way to see the computer's idle time (see
 /// `NativeBackend::computer_idle_watched`), the vault counts from its own last use.
-pub const IDLE_LOCK: Duration = Duration::from_secs(10 * 60);
+pub use vp_core::backend::AutoLock;
 pub const QUICK_UNLOCK_DEFAULT: Duration = Duration::from_secs(8 * 60 * 60);
 pub const QUICK_UNLOCK_MAX: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -299,6 +299,14 @@ struct State {
     quiet_until: Option<Instant>,
     /// The last sync round: when, and what it did or why it failed.
     last_sync: Option<(SystemTime, Result<vp_sync::Report, String>)>,
+    /// When the vault locks by itself. The default until an unlock has checked
+    /// the stored setting's tag.
+    auto_lock: AutoLock,
+    /// The stored setting and its tag, not yet checked.
+    stored_auto_lock: Option<(AutoLock, String)>,
+    /// Since when the computer has had no keyboard or mouse input, while that
+    /// is watched.
+    idle_since: Option<Instant>,
 }
 
 impl State {
@@ -322,9 +330,29 @@ impl State {
         }
     }
 
+    /// Takes the stored auto-lock setting once an unlock can check its tag; a
+    /// setting whose tag does not match (edited by hand, or by anything else
+    /// running as the user) is ignored and the default stays.
+    fn adopt_auto_lock(&mut self) {
+        let (Some(opened), Some((stored, tag))) = (&self.opened, self.stored_auto_lock.take())
+        else {
+            return;
+        };
+        if vp_store::hex(&opened.unlocked.settings_tag(&auto_lock_bytes(&stored))) == tag
+            && stored.check().is_ok()
+        {
+            self.auto_lock = stored;
+        } else {
+            eprintln!(
+                "visipassd: the stored auto-lock setting failed its check; using the default"
+            );
+        }
+    }
+
     /// After a master-password unlock.
     fn opened_with_password(&mut self, opened: Opened) {
         self.opened = Some(opened);
+        self.adopt_auto_lock();
         self.kept = None;
         self.last_use = Instant::now();
         self.window_end = self.quick_unlock.map(|window| Instant::now() + window);
@@ -336,6 +364,11 @@ impl State {
 struct Settings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     quick_unlock_secs: Option<u64>,
+    /// When the vault locks by itself, and its tag under the account's keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    auto_lock: Option<AutoLock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    auto_lock_tag: Option<String>,
     /// The folder sync writes to (§11.1), if it is on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sync_folder: Option<PathBuf>,
@@ -372,8 +405,8 @@ struct Inner<U> {
     quiet_after_cancel: Duration,
     /// Woken by every commit, so sync sends it at once.
     changed: Arc<tokio::sync::Notify>,
-    /// Something watches the computer's own idle time and locks the vault after
-    /// IDLE_LOCK of it; the vault's own last-use timer then stands down.
+    /// Something watches the computer's own idle time; the vault then locks
+    /// after the auto-lock time without input, and its own last-use timer stands down.
     idle_watched: std::sync::atomic::AtomicBool,
 }
 
@@ -385,7 +418,15 @@ impl<U> Inner<U> {
     fn expire_if_idle(&self) {
         let mut state = self.state();
         let watched = self.idle_watched.load(std::sync::atomic::Ordering::Relaxed);
-        if state.opened.is_some() && !watched && state.last_use.elapsed() >= IDLE_LOCK {
+        let after = Duration::from_secs(state.auto_lock.minutes * 60);
+        let idle = if watched {
+            state
+                .idle_since
+                .is_some_and(|since| since.elapsed() >= after)
+        } else {
+            state.last_use.elapsed() >= after
+        };
+        if state.opened.is_some() && idle {
             state.lock(false);
         }
         if state.opened.is_none() && state.kept.is_some() && !state.window_open() {
@@ -429,9 +470,11 @@ impl<U: Unlock> NativeBackend<U> {
     }
 
     fn build(paths: Paths, unlock: U, params: KdfParams, quiet_after_cancel: Duration) -> Self {
-        let quick_unlock = load_settings(&paths.settings)
+        let settings = load_settings(&paths.settings);
+        let quick_unlock = settings
             .quick_unlock_secs
             .map(|secs| Duration::from_secs(secs).min(QUICK_UNLOCK_MAX));
+        let stored_auto_lock = settings.auto_lock.zip(settings.auto_lock_tag);
         let inner = Arc::new(Inner {
             paths,
             params,
@@ -446,6 +489,9 @@ impl<U: Unlock> NativeBackend<U> {
                 epoch: 0,
                 quiet_until: None,
                 last_sync: None,
+                auto_lock: AutoLock::DEFAULT,
+                stored_auto_lock,
+                idle_since: None,
             }),
             gate: tokio::sync::Mutex::new(()),
             quiet_after_cancel,
@@ -497,16 +543,84 @@ impl<U: Unlock> NativeBackend<U> {
     }
 
     /// Whether the computer's own idle time is watched (true while the daemon
-    /// holds a compositor's idle notification). Then the vault locks after
-    /// IDLE_LOCK without keyboard or mouse, however long since VisiPass was last
-    /// used; otherwise after IDLE_LOCK without a request.
+    /// holds a compositor's idle notification). Then the vault locks after the
+    /// auto-lock time without keyboard or mouse, however long since VisiPass was
+    /// last used; otherwise after that long without a request.
     pub fn computer_idle_watched(&self, watched: bool) {
         // Either way the last-use timer starts again from now, so a watch that
         // ends does not lock at once for a request made long ago.
-        self.inner.state().last_use = Instant::now();
+        {
+            let mut state = self.inner.state();
+            state.last_use = Instant::now();
+            state.idle_since = None;
+        }
         self.inner
             .idle_watched
             .store(watched, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The computer has had no input since `since`, or (`None`) has input again.
+    pub fn computer_idle(&self, since: Option<Instant>) {
+        self.inner.state().idle_since = since;
+        self.inner.expire_if_idle();
+    }
+
+    /// When the vault locks by itself, as it applies now.
+    pub fn auto_lock(&self) -> AutoLock {
+        self.inner.state().auto_lock
+    }
+
+    /// Whether a screen lock locks the vault.
+    pub fn locks_with_screen(&self) -> bool {
+        self.inner.state().auto_lock.screen_lock
+    }
+
+    /// Changes when the vault locks by itself. The setting is stored with a tag
+    /// under the account's keys, from the open vault or, given `password`, from
+    /// unlocking with it (which leaves the lock state alone). Keeping the vault
+    /// open longer than now needs `password`: the caller asks the human for it.
+    pub async fn set_auto_lock(
+        &self,
+        auto_lock: AutoLock,
+        password: Option<Secret>,
+    ) -> Result<(), Failure> {
+        auto_lock.check()?;
+        let bytes = auto_lock_bytes(&auto_lock);
+        let tag = match password {
+            Some(password) => {
+                let secret = self.secret_key()?;
+                let paths = self.inner.paths.clone();
+                tokio::task::spawn_blocking(move || {
+                    let store = Store::open(&paths.vault, &paths.sequence).map_err(failure)?;
+                    let unlocked = store.unlock(password.expose(), &secret).map_err(failure)?;
+                    Ok::<_, Failure>(unlocked.settings_tag(&bytes))
+                })
+                .await
+                .map_err(|_| Failure::new("Checking the password failed"))??
+            }
+            None => {
+                let state = self.inner.state();
+                if auto_lock.looser_than(&state.auto_lock) {
+                    return Err(Failure::new(
+                        "Keeping the vault open longer needs the master password",
+                    ));
+                }
+                let opened = state
+                    .opened
+                    .as_ref()
+                    .ok_or_else(|| Failure::new("Unlock VisiPass first"))?;
+                opened.unlocked.settings_tag(&bytes)
+            }
+        };
+        self.update_settings(|s| {
+            s.auto_lock = Some(auto_lock);
+            s.auto_lock_tag = Some(vp_store::hex(&tag));
+        })?;
+        let mut state = self.inner.state();
+        state.auto_lock = auto_lock;
+        state.stored_auto_lock = None;
+        state.last_use = Instant::now();
+        Ok(())
     }
 
     /// Locks. Within a quick-unlock window the Account Key stays, so the next
@@ -786,6 +900,7 @@ impl<U: Unlock> NativeBackend<U> {
                 return false;
             };
             state.opened = Some(opened);
+            state.adopt_auto_lock();
             state.last_use = Instant::now();
             true
         })
@@ -1130,6 +1245,17 @@ fn replace_private(path: &std::path::Path, contents: &[u8]) -> Result<(), Failur
 }
 
 /// Missing or unreadable settings mean the defaults: quick unlock off.
+/// What the auto-lock tag covers.
+fn auto_lock_bytes(auto_lock: &AutoLock) -> Vec<u8> {
+    vp_crypto::ad(
+        "VisiPass auto-lock",
+        &[
+            vp_crypto::Part::Uint(auto_lock.minutes),
+            vp_crypto::Part::Uint(u64::from(auto_lock.screen_lock)),
+        ],
+    )
+}
+
 fn load_settings(path: &std::path::Path) -> Settings {
     std::fs::read(path)
         .ok()

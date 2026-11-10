@@ -353,6 +353,84 @@ async fn init_refuses_an_existing_vault_and_short_passwords() {
 const HOURS_8: Duration = Duration::from_secs(8 * 3600);
 
 #[tokio::test]
+async fn auto_lock_is_kept_only_with_its_tag_and_loosening_takes_the_password() {
+    use vp_native::AutoLock;
+    let dir = tempfile::tempdir().unwrap();
+    drop(created(&dir).await);
+    let unlock = Scripted::new(vec![Some(PASSWORD), Some(PASSWORD)]);
+    let backend = NativeBackend::with_params(paths(&dir), unlock.clone(), CHEAP);
+    assert_eq!(backend.auto_lock(), AutoLock::DEFAULT);
+    assert!(backend.locks_with_screen());
+
+    let remote = AutoLock {
+        minutes: 240,
+        screen_lock: false,
+    };
+    // Open, but keeping it open longer still needs the password.
+    backend.list(&Scope::default()).await.unwrap();
+    let refused = backend.set_auto_lock(remote, None).await.unwrap_err();
+    assert!(refused.0.contains("master password"));
+    assert!(
+        backend
+            .set_auto_lock(remote, Some(Secret::new("wrong".into())))
+            .await
+            .is_err()
+    );
+    assert_eq!(backend.auto_lock(), AutoLock::DEFAULT);
+    backend
+        .set_auto_lock(remote, Some(Secret::new(PASSWORD.into())))
+        .await
+        .unwrap();
+    assert_eq!(backend.auto_lock(), remote);
+    assert!(!backend.locks_with_screen());
+    // Tightening needs no password while the vault is open.
+    let tighter = AutoLock {
+        minutes: 60,
+        screen_lock: false,
+    };
+    backend.set_auto_lock(tighter, None).await.unwrap();
+    drop(backend);
+
+    // A new daemon uses the default until an unlock checks the stored tag.
+    let backend = NativeBackend::with_params(paths(&dir), unlock.clone(), CHEAP);
+    assert_eq!(backend.auto_lock(), AutoLock::DEFAULT);
+    backend.list(&Scope::default()).await.unwrap();
+    assert_eq!(backend.auto_lock(), tighter);
+    drop(backend);
+
+    // Anything running as the user can write the file, but not the tag.
+    let settings = paths(&dir).settings;
+    let edited = std::fs::read_to_string(&settings)
+        .unwrap()
+        .replace("\"minutes\": 60", "\"minutes\": 480");
+    assert!(edited.contains("480"));
+    std::fs::write(&settings, edited).unwrap();
+    let unlock = Scripted::new(vec![Some(PASSWORD)]);
+    let backend = NativeBackend::with_params(paths(&dir), unlock, CHEAP);
+    backend.list(&Scope::default()).await.unwrap();
+    assert_eq!(backend.auto_lock(), AutoLock::DEFAULT);
+}
+
+#[tokio::test]
+async fn the_computer_idle_for_the_auto_lock_time_locks_the_vault() {
+    use std::time::Instant;
+    let dir = tempfile::tempdir().unwrap();
+    drop(created(&dir).await);
+    let backend =
+        NativeBackend::with_params(paths(&dir), Scripted::new(vec![Some(PASSWORD)]), CHEAP);
+    backend.computer_idle_watched(true);
+    backend.list(&Scope::default()).await.unwrap();
+    backend.computer_idle(Some(Instant::now() - Duration::from_secs(5 * 60)));
+    assert!(
+        backend.is_unlocked(),
+        "five minutes is under the default ten"
+    );
+    backend.computer_idle(None);
+    backend.computer_idle(Some(Instant::now() - Duration::from_secs(11 * 60)));
+    assert!(!backend.is_unlocked());
+}
+
+#[tokio::test]
 async fn without_quick_unlock_every_lock_needs_the_master_password() {
     let dir = tempfile::tempdir().unwrap();
     drop(created(&dir).await);

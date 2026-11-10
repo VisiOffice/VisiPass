@@ -285,6 +285,17 @@ enum Commands {
     /// after each master-password unlock
     #[command(subcommand)]
     QuickUnlock(QuickUnlockCommands),
+    /// Show or change when the vault locks by itself. With no options, shows it.
+    /// Keeping it open longer asks for the master password; agents cannot change it
+    AutoLock {
+        /// Lock after this many minutes without keyboard or mouse (1 to 480; default 10)
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=480))]
+        minutes: Option<u64>,
+        /// Whether a screen lock also locks the vault (default on). Off suits a
+        /// computer you drive from elsewhere, whose screen locks while you work
+        #[arg(long, value_parser = ["on", "off"])]
+        screen_lock: Option<String>,
+    },
     /// Copy items into your VisiPass vault from another password manager
     #[command(subcommand)]
     Import(ImportCommands),
@@ -903,6 +914,13 @@ fn execute(command: Commands) -> Result<i32, Failure> {
                 .and_then(|_| stdout.flush());
             Ok(0)
         }
+        Commands::AutoLock {
+            minutes,
+            screen_lock,
+        } => print(&client::call(Request::AutoLock {
+            minutes,
+            screen_lock: screen_lock.map(|s| s == "on"),
+        })?),
         Commands::QuickUnlock(command) => {
             let hours = match command {
                 QuickUnlockCommands::On { hours } => Some(hours),

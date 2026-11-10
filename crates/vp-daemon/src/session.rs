@@ -1,17 +1,20 @@
 //! Locks VisiPass's own vault when the screen locks, the machine sleeps, or the
-//! computer has been idle (no keyboard, mouse or touch) for `vp_native::IDLE_LOCK`.
+//! computer has been idle (no keyboard, mouse or touch) for the auto-lock time
+//! (`vp auto-lock`; ten minutes unless the human chose otherwise).
 //!
 //! Four sources, any of which locks:
 //! - The Wayland compositor's idle notification (ext-idle-notify; Hyprland, Sway,
 //!   KDE, niri), as 1Password locks after the computer is idle. While it is held
 //!   the vault's own last-use timer stands down; without one (no Wayland, or a
-//!   compositor without the protocol) the vault locks after IDLE_LOCK unused.
+//!   compositor without the protocol) the vault locks after that long unused.
 //! - Hyprland, asked every few seconds while the vault is unlocked. Omarchy's lock
 //!   screen tells nobody else, but Hyprland always knows a session lock is up.
 //! - logind's `Lock` signal and `LockedHint`, which other desktops send.
 //! - logind's `PrepareForSleep`, held off by a delay inhibitor until the keys are gone.
 //!
 //! Every source only ever locks, so a false alarm costs a master password, never a key.
+//! The human may turn off locking with the screen (`vp auto-lock --screen-lock off`),
+//! for a computer driven from elsewhere; sleep always locks.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -27,6 +30,17 @@ pub trait Lockable: Send + Sync + 'static {
     fn lock_fully(&self);
     /// Whether the computer's idle time is being watched for it.
     fn computer_idle_watched(&self, _watched: bool) {}
+    /// No input since `since`, or (`None`) input again; the vault decides
+    /// whether that is long enough to lock.
+    fn computer_idle(&self, since: Option<std::time::Instant>) {
+        if since.is_some() {
+            self.lock();
+        }
+    }
+    /// Whether a screen lock locks the vault.
+    fn locks_with_screen(&self) -> bool {
+        true
+    }
 }
 
 impl<U: vp_native::Unlock + Send + Sync + 'static> Lockable for vp_native::NativeBackend<U> {
@@ -41,6 +55,12 @@ impl<U: vp_native::Unlock + Send + Sync + 'static> Lockable for vp_native::Nativ
     }
     fn computer_idle_watched(&self, watched: bool) {
         vp_native::NativeBackend::computer_idle_watched(self, watched)
+    }
+    fn computer_idle(&self, since: Option<std::time::Instant>) {
+        vp_native::NativeBackend::computer_idle(self, since)
+    }
+    fn locks_with_screen(&self) -> bool {
+        vp_native::NativeBackend::locks_with_screen(self)
     }
 }
 
@@ -61,7 +81,7 @@ pub async fn watch<V: Lockable + Clone>(vault: V) {
         }
     };
     #[cfg(target_os = "linux")]
-    let idle = idle::watch(vault.clone(), vp_native::IDLE_LOCK);
+    let idle = idle::watch(vault.clone(), idle::PROBE);
     #[cfg(not(target_os = "linux"))]
     let idle = std::future::ready(());
     tokio::join!(polling, logind::watch(vault), idle);
@@ -82,8 +102,14 @@ pub mod idle {
     /// How long to wait before looking for a compositor again.
     const RETRY: Duration = Duration::from_secs(15);
 
-    /// Locks the vault each time the computer has been idle for `after`, for the
-    /// daemon's whole life, reconnecting when the compositor restarts.
+    /// How long without input before the compositor tells us the computer is
+    /// idle. The vault then counts from when input stopped, against whatever
+    /// auto-lock time is set, so changing it needs no new notification.
+    pub const PROBE: Duration = Duration::from_secs(60);
+
+    /// Tells the vault each time the computer goes idle for `after` and each
+    /// time input comes back, for the daemon's whole life, reconnecting when
+    /// the compositor restarts.
     pub async fn watch<V: Lockable + Clone>(vault: V, after: Duration) {
         loop {
             let (done, ended) = tokio::sync::oneshot::channel();
@@ -102,6 +128,7 @@ pub mod idle {
 
     struct State<V> {
         vault: V,
+        after: Duration,
     }
 
     /// Connects to the session's compositor and asks to be told when the
@@ -131,7 +158,7 @@ pub mod idle {
         };
         connection.flush().map_err(|e| e.to_string())?;
         vault.computer_idle_watched(true);
-        let mut state = State { vault };
+        let mut state = State { vault, after };
         loop {
             queue
                 .blocking_dispatch(&mut state)
@@ -148,11 +175,19 @@ pub mod idle {
             _: &Connection,
             _: &QueueHandle<Self>,
         ) {
-            if let ext_idle_notification_v1::Event::Idled = event
-                && state.vault.is_unlocked()
-            {
-                state.vault.lock();
-                eprintln!("visipassd: the computer was idle, so the vault locked");
+            match event {
+                ext_idle_notification_v1::Event::Idled => {
+                    let since = std::time::Instant::now()
+                        .checked_sub(state.after)
+                        .unwrap_or_else(std::time::Instant::now);
+                    let was = state.vault.is_unlocked();
+                    state.vault.computer_idle(Some(since));
+                    if was && !state.vault.is_unlocked() {
+                        eprintln!("visipassd: the computer was idle, so the vault locked");
+                    }
+                }
+                ext_idle_notification_v1::Event::Resumed => state.vault.computer_idle(None),
+                _ => {}
             }
         }
     }
@@ -198,7 +233,7 @@ pub mod idle {
 pub async fn watch_hyprland<V: Lockable>(vault: V, hypr_dir: PathBuf, every: Duration) {
     loop {
         tokio::time::sleep(every).await;
-        if vault.is_unlocked() && hyprland_locked(&hypr_dir).await {
+        if vault.is_unlocked() && vault.locks_with_screen() && hyprland_locked(&hypr_dir).await {
             vault.lock();
             eprintln!("visipassd: the screen locked, so the vault locked");
         }
@@ -298,7 +333,7 @@ mod logind {
                     }
                 }
                 Some(Ok(message)) = session_signals.next() => {
-                    if locks(&message) && vault.is_unlocked() {
+                    if locks(&message) && vault.is_unlocked() && vault.locks_with_screen() {
                         vault.lock();
                         eprintln!("visipassd: the session locked, so the vault locked");
                     }

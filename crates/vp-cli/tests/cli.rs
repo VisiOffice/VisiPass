@@ -1121,6 +1121,59 @@ fn an_agent_cannot_turn_on_quick_unlock() {
 }
 
 #[test]
+fn auto_lock_is_the_humans_and_keeping_it_open_longer_takes_the_password() {
+    let world = World::native(&[
+        // init: password, confirmation, Secret Key window
+        Decision::Once,
+        Decision::Once,
+        Decision::Deny,
+        // auto-lock for four hours, through screen locks: the master password
+        Decision::Once,
+    ]);
+    clean(&world.vp(&["init"], None));
+    let shown = json(&world.vp(&["auto-lock"], None));
+    assert_eq!(shown["autoLock"]["minutes"], 10);
+    assert_eq!(shown["autoLock"]["screenLock"], true);
+
+    let set = world.vp(
+        &["auto-lock", "--minutes", "240", "--screen-lock", "off"],
+        None,
+    );
+    clean(&set);
+    assert_eq!(json(&set)["autoLock"]["minutes"], 240);
+    assert_eq!(world.approver.asked(), 4);
+    let status = json(&world.vp(&["status"], None));
+    assert_eq!(status["vault"]["autoLock"]["minutes"], 240);
+    assert_eq!(status["vault"]["autoLock"]["screenLock"], false);
+
+    let too_long = world.vp(&["auto-lock", "--minutes", "481"], None);
+    assert!(!too_long.status.success());
+    world.assert_contained();
+}
+
+#[test]
+fn an_agent_cannot_change_auto_lock() {
+    let world = World::native_agent(&[Decision::Once, Decision::Once, Decision::Deny]);
+    clean(&world.vp(&["init"], None));
+    let asked = world.approver.asked();
+    assert_eq!(
+        json(&world.vp(&["auto-lock"], None))["autoLock"]["minutes"],
+        10,
+        "reading it is fine"
+    );
+    for change in [
+        &["auto-lock", "--minutes", "480"][..],
+        &["auto-lock", "--minutes", "5"],
+        &["auto-lock", "--screen-lock", "off"],
+    ] {
+        let refused = world.vp(change, None);
+        assert!(!refused.status.success());
+        assert!(text(&refused.stderr).contains("Only the human"));
+    }
+    assert_eq!(world.approver.asked(), asked, "not even a password window");
+}
+
+#[test]
 fn quick_unlock_needs_presence_after_a_lock_and_the_password_after_a_full_one() {
     let world = World::native(&[
         // init: password, confirmation, Secret Key window

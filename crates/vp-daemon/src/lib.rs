@@ -1052,6 +1052,10 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                     let mut vault = json!({
                         "exists": status.exists,
                         "unlocked": status.unlocked,
+                        "autoLock": {
+                            "minutes": status.auto_lock.minutes,
+                            "screenLock": status.auto_lock.screen_lock,
+                        },
                     });
                     if let Some(window) = status.quick_unlock {
                         vault["quickUnlock"] = json!({
@@ -1158,6 +1162,75 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                     "where": "your browser, from a file in memory that is deleted in 10 minutes",
                     "next": "Print it or write the Secret Key down, and keep it apart from your master password",
                 }))
+            }
+            Request::AutoLock {
+                minutes,
+                screen_lock,
+            } => {
+                let Some(status) = self.backend.native_status().filter(|s| s.exists) else {
+                    return Err(Failure::new(
+                        "There is no VisiPass vault yet. Run `vp init` to create one",
+                    ));
+                };
+                let current = status.auto_lock;
+                let shown = |a: vp_core::backend::AutoLock| {
+                    json!({
+                        "minutes": a.minutes,
+                        "screenLock": a.screen_lock,
+                    })
+                };
+                if minutes.is_none() && screen_lock.is_none() {
+                    return Ok(json!({ "autoLock": shown(current) }));
+                }
+                // How long the vault stays open is the human's choice: an agent
+                // that could lengthen it could keep every grant usable unwatched.
+                if requester.agent.is_some() {
+                    return Err(Failure::new(
+                        "Only the human can change when VisiPass locks: ask them to run `vp auto-lock` in their own terminal",
+                    ));
+                }
+                let wanted = vp_core::backend::AutoLock {
+                    minutes: minutes.unwrap_or(current.minutes),
+                    screen_lock: screen_lock.unwrap_or(current.screen_lock),
+                };
+                wanted.check()?;
+                let _turn = self.approvals.lock().await;
+                let password = if wanted.looser_than(&current) || !status.unlocked {
+                    let purpose = format!(
+                        "let VisiPass stay unlocked until {} minutes without keyboard or mouse{}",
+                        wanted.minutes,
+                        if wanted.screen_lock {
+                            ""
+                        } else {
+                            ", and through screen locks"
+                        }
+                    );
+                    let prompt = Prompt {
+                        who: "VisiPass".into(),
+                        action: purpose.clone(),
+                        details: vec![],
+                        secrets: vec![],
+                        purpose: None,
+                        timeout_secs: approval::TIMEOUT.as_secs(),
+                        paste: Some(vp_core::ipc::PasteSpec {
+                            mode: PasteMode::Unlock {
+                                retry: false,
+                                purpose: Some(purpose),
+                            },
+                            ..Default::default()
+                        }),
+                    };
+                    Some(
+                        self.approver
+                            .paste(&prompt)
+                            .await?
+                            .ok_or_else(|| Failure::new("Changing auto-lock was cancelled"))?,
+                    )
+                } else {
+                    None
+                };
+                self.backend.native_set_auto_lock(wanted, password).await?;
+                Ok(json!({ "autoLock": shown(wanted) }))
             }
             Request::QuickUnlock { hours } => {
                 // Turning it on lowers what unlocks the vault, so it is the human's
