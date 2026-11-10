@@ -909,6 +909,7 @@ impl<U: Unlock> NativeBackend<U> {
                 .map_err(failure)?;
             let opened = load(store, unlocked)?;
             state.opened = Some(opened);
+            state.adopt_auto_lock();
             state.last_use = Instant::now();
             Ok(())
         })

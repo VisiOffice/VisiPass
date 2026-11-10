@@ -787,3 +787,32 @@ async fn a_device_key_unlocks_without_the_password_only_while_it_matches() {
         "the password was asked only the first time"
     );
 }
+
+#[tokio::test]
+async fn a_device_key_unlock_takes_the_stored_auto_lock_like_a_password_unlock() {
+    use vp_native::AutoLock;
+    let dir = tempfile::tempdir().unwrap();
+    drop(created(&dir).await);
+    let backend =
+        NativeBackend::with_params(paths(&dir), Scripted::new(vec![Some(PASSWORD)]), CHEAP);
+    backend.list(&Scope::default()).await.unwrap();
+    let remote = AutoLock {
+        minutes: 240,
+        screen_lock: false,
+    };
+    backend
+        .set_auto_lock(remote, Some(Secret::new(PASSWORD.into())))
+        .await
+        .unwrap();
+    let wrap_key = vp_crypto::Key::random();
+    let wrapped = backend.wrap_for_device(&wrap_key, b"ctx").unwrap();
+    drop(backend);
+
+    let backend = NativeBackend::with_params(paths(&dir), Scripted::new(vec![]), CHEAP);
+    assert_eq!(backend.auto_lock(), AutoLock::DEFAULT);
+    backend
+        .unlock_with_device_key(wrap_key, b"ctx".to_vec(), wrapped)
+        .await
+        .unwrap();
+    assert_eq!(backend.auto_lock(), remote);
+}
