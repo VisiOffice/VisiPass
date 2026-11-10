@@ -6582,7 +6582,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vp-cli"
-version = "0.13.3"
+version = "0.14.0"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -6603,7 +6603,7 @@ dependencies = [
 
 [[package]]
 name = "vp-core"
-version = "0.13.3"
+version = "0.14.0"
 dependencies = [
  "aho-corasick",
  "base64 0.22.1",
@@ -6624,7 +6624,7 @@ dependencies = [
 
 [[package]]
 name = "vp-crypto"
-version = "0.13.3"
+version = "0.14.0"
 dependencies = [
  "argon2",
  "chacha20poly1305",
@@ -6638,7 +6638,7 @@ dependencies = [
 
 [[package]]
 name = "vp-daemon"
-version = "0.13.3"
+version = "0.14.0"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
@@ -6665,7 +6665,7 @@ dependencies = [
 
 [[package]]
 name = "vp-gui"
-version = "0.13.3"
+version = "0.14.0"
 dependencies = [
  "gpui",
  "gpui_platform",
@@ -6679,7 +6679,7 @@ dependencies = [
 
 [[package]]
 name = "vp-native"
-version = "0.13.3"
+version = "0.14.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -6694,7 +6694,7 @@ dependencies = [
 
 [[package]]
 name = "vp-op"
-version = "0.13.3"
+version = "0.14.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -6705,7 +6705,7 @@ dependencies = [
 
 [[package]]
 name = "vp-store"
-version = "0.13.3"
+version = "0.14.0"
 dependencies = [
  "rusqlite",
  "tempfile",
@@ -6715,7 +6715,7 @@ dependencies = [
 
 [[package]]
 name = "vp-sync"
-version = "0.13.3"
+version = "0.14.0"
 dependencies = [
  "hmac",
  "httpdate",
