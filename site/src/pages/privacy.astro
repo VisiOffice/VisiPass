@@ -3,7 +3,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 import Nav from '../components/Nav.astro';
 import Footer from '../components/Footer.astro';
 
-const updated = 'November 2, 2026';
+const updated = 'November 10, 2026';
 const repo = 'https://github.com/VisiOffice/VisiPass';
 ---
 
@@ -46,6 +46,11 @@ const repo = 'https://github.com/VisiOffice/VisiPass';
         <li>
           <strong>A screenshot of the visible tab</strong>, only when you click to add a two-factor code from a QR code.
           VisiPass on your computer reads the code from it; the image is not kept.
+        </li>
+        <li>
+          <strong>A site's passkey requests</strong>: when a site creates a passkey or asks you to sign in with one,
+          the request goes to VisiPass on your computer, which keeps the passkey's private key and signs there. The key
+          never reaches the browser or the site.
         </li>
         <li>
           <strong>Three settings</strong> stored in the browser: whether the menu stays quiet, the sites you told it
