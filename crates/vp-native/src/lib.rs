@@ -645,7 +645,7 @@ impl<U: Unlock> NativeBackend<U> {
 
     /// Changes when the vault locks by itself. The setting is stored with a tag
     /// under the account's keys, from the open vault or, given `password`, from
-    /// unlocking with it (which leaves the lock state alone). Keeping the vault
+    /// unlocking with it (which also opens a locked vault). Keeping the vault
     /// open longer than now needs `password`: the caller asks the human for it.
     pub async fn set_auto_lock(
         &self,
@@ -656,12 +656,25 @@ impl<U: Unlock> NativeBackend<U> {
         let bytes = auto_lock_bytes(&auto_lock);
         let tag = match password {
             Some(password) => {
+                // A locked vault opens with the same password, so the human
+                // types it once (after a restart, say), not again for the next request.
+                let _gate = self.inner.gate.lock().await;
                 let secret = self.secret_key()?;
-                let paths = self.inner.paths.clone();
+                self.open_store()?;
+                let inner = self.inner.clone();
                 tokio::task::spawn_blocking(move || {
-                    let store = Store::open(&paths.vault, &paths.sequence).map_err(failure)?;
+                    let mut state = inner.state();
+                    let store = state
+                        .store
+                        .as_ref()
+                        .ok_or_else(|| Failure::new("Could not open the vault"))?;
                     let unlocked = store.unlock(password.expose(), &secret).map_err(failure)?;
-                    Ok::<_, Failure>(unlocked.settings_tag(&bytes))
+                    let tag = unlocked.settings_tag(&bytes);
+                    if state.opened.is_none() {
+                        let opened = load(store, unlocked)?;
+                        state.opened_with_password(opened);
+                    }
+                    Ok::<_, Failure>(tag)
                 })
                 .await
                 .map_err(|_| Failure::new("Checking the password failed"))??

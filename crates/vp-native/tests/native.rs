@@ -412,6 +412,35 @@ async fn auto_lock_is_kept_only_with_its_tag_and_loosening_takes_the_password() 
 }
 
 #[tokio::test]
+async fn the_auto_lock_password_also_unlocks_a_locked_vault() {
+    use vp_native::AutoLock;
+    let dir = tempfile::tempdir().unwrap();
+    drop(created(&dir).await);
+    let unlock = Scripted::new(vec![]);
+    let backend = NativeBackend::with_params(paths(&dir), unlock.clone(), CHEAP);
+    assert!(!backend.is_unlocked());
+    let remote = AutoLock {
+        minutes: 240,
+        screen_lock: false,
+    };
+    assert!(
+        backend
+            .set_auto_lock(remote, Some(Secret::new("wrong".into())))
+            .await
+            .is_err()
+    );
+    assert!(!backend.is_unlocked());
+    backend
+        .set_auto_lock(remote, Some(Secret::new(PASSWORD.into())))
+        .await
+        .unwrap();
+    assert!(backend.is_unlocked());
+    assert_eq!(backend.auto_lock(), remote);
+    backend.list(&Scope::default()).await.unwrap();
+    assert_eq!(unlock.asked(), 0, "no second password");
+}
+
+#[tokio::test]
 async fn the_computer_idle_for_the_auto_lock_time_locks_the_vault() {
     use std::time::Instant;
     let dir = tempfile::tempdir().unwrap();
