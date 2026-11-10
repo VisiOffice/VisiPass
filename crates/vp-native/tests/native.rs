@@ -8,7 +8,7 @@ use vp_core::model::{Destination, Field, Item, PasswordRequest, Scope, UrlEntry,
 use vp_core::refs::SecretRef;
 use vp_core::secret::Secret;
 use vp_crypto::KdfParams;
-use vp_native::{NativeBackend, Paths, Presence, Unlock};
+use vp_native::{NativeBackend, Paths, Presence, SecretKeyStore, Unlock};
 
 const CHEAP: KdfParams = KdfParams {
     m_kib: 65_536,
@@ -689,4 +689,101 @@ async fn two_devices_sync_through_a_folder_and_settle_a_conflict() {
 
     b.sync_off().unwrap();
     assert!(b.sync_round().await.is_none());
+}
+
+/// A Secret Key kept in memory, as a platform keystore would keep it.
+#[derive(Clone, Default)]
+struct Held(Arc<Mutex<Option<String>>>);
+
+impl SecretKeyStore for Held {
+    fn read(&self) -> Result<Option<zeroize::Zeroizing<String>>, Failure> {
+        Ok(self.0.lock().unwrap().clone().map(zeroize::Zeroizing::new))
+    }
+    fn create(&self, shown: &str) -> Result<(), Failure> {
+        let mut held = self.0.lock().unwrap();
+        if held.is_some() {
+            return Err(Failure::new("already there"));
+        }
+        *held = Some(shown.into());
+        Ok(())
+    }
+    fn remove(&self) {
+        self.0.lock().unwrap().take();
+    }
+    fn location(&self) -> String {
+        "in memory".into()
+    }
+}
+
+#[tokio::test]
+async fn the_secret_key_can_live_somewhere_other_than_a_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let held = Held::default();
+    let backend = NativeBackend::with_secret_key_store(
+        paths(&dir),
+        Scripted::new(vec![Some(PASSWORD)]),
+        CHEAP,
+        Duration::ZERO,
+        held.clone(),
+    );
+    let shown = backend.init(Secret::new(PASSWORD.into())).await.unwrap();
+    assert_eq!(held.0.lock().unwrap().as_deref(), Some(shown.as_str()));
+    assert!(!paths(&dir).secret_key.exists());
+
+    backend.lock_fully();
+    backend.list(&Scope::default()).await.unwrap();
+    assert!(backend.is_unlocked());
+
+    held.remove();
+    backend.lock_fully();
+    let error = backend.list(&Scope::default()).await.unwrap_err();
+    assert!(error.0.contains("no Secret Key in memory"), "{}", error.0);
+}
+
+#[tokio::test]
+async fn a_device_key_unlocks_without_the_password_only_while_it_matches() {
+    let dir = tempfile::tempdir().unwrap();
+    drop(created(&dir).await);
+    let unlock = Scripted::new(vec![Some(PASSWORD)]);
+    let backend = NativeBackend::with_params(paths(&dir), unlock.clone(), CHEAP);
+    let wrap_key = vp_crypto::Key::random();
+    assert!(
+        backend.wrap_for_device(&wrap_key, b"ctx").is_err(),
+        "locked"
+    );
+
+    backend.list(&Scope::default()).await.unwrap();
+    let wrapped = backend.wrap_for_device(&wrap_key, b"ctx").unwrap();
+    assert!(!format!("{wrapped:?}").contains(SENTINEL));
+    backend.lock_fully();
+
+    let other = vp_crypto::Key::random();
+    assert!(
+        backend
+            .unlock_with_device_key(other, b"ctx".to_vec(), wrapped.clone())
+            .await
+            .is_err()
+    );
+    assert!(
+        backend
+            .unlock_with_device_key(
+                vp_crypto::Key::from_slice(wrap_key.expose()).unwrap(),
+                b"other".to_vec(),
+                wrapped.clone()
+            )
+            .await
+            .is_err()
+    );
+    assert!(!backend.is_unlocked());
+
+    backend
+        .unlock_with_device_key(wrap_key, b"ctx".to_vec(), wrapped)
+        .await
+        .unwrap();
+    assert!(backend.is_unlocked());
+    assert_eq!(
+        unlock.asked(),
+        1,
+        "the password was asked only the first time"
+    );
 }

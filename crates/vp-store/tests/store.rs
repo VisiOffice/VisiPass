@@ -1,6 +1,6 @@
 use rusqlite::Connection;
 use std::path::PathBuf;
-use vp_crypto::{KdfParams, SecretKey};
+use vp_crypto::{KdfParams, Key, SecretKey};
 use vp_store::{Rev, Store};
 
 const CHEAP: KdfParams = KdfParams {
@@ -232,6 +232,36 @@ fn an_account_key_from_another_vault_is_refused() {
         .unwrap()
         .into_account_key();
     assert!(b.store().unlock_with_key(key).is_err());
+}
+
+#[test]
+fn a_device_key_opens_the_vault_only_with_its_own_key_and_context() {
+    let (f, other) = (Fixture::new(), Fixture::new());
+    f.populated();
+    other.populated();
+    let wrap_key = Key::random();
+    let wrapped = f
+        .store()
+        .unlock("hunter2!", &f.secret())
+        .unwrap()
+        .wrap_for_device(&wrap_key, b"expires 2026-11-24");
+
+    let unlocked = f
+        .store()
+        .unlock_with_device_key(&wrap_key, b"expires 2026-11-24", &wrapped)
+        .unwrap();
+    assert_eq!(unlocked.vault_ids(), vec!["V1".to_string()]);
+
+    let refused = |store: Store, key: &Key, context: &[u8]| match store
+        .unlock_with_device_key(key, context, &wrapped)
+    {
+        Ok(_) => panic!("must be refused"),
+        Err(e) => assert!(e.0.contains("master password"), "{}", e.0),
+    };
+    refused(f.store(), &Key::random(), b"expires 2026-11-24");
+    // A context changed after wrapping (a later expiry, say) does not open it.
+    refused(f.store(), &wrap_key, b"expires 2099-01-01");
+    refused(other.store(), &wrap_key, b"expires 2026-11-24");
 }
 
 #[test]

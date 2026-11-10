@@ -162,6 +162,20 @@ make the login keyring, not Argon2, the protection of a backed-up vault. A TPM2-
 with a PIN policy (so the TPM's anti-hammering limits guesses) and its expiry bound into the
 wrapping's associated data is the candidate for a later version.
 
+**Device keys, the storage half.** For platforms with hardware that releases a key only to its
+owner (a TPM or similar key behind a PIN or biometric check), the store can wrap AK under a key the
+caller supplies and open the vault with it:
+
+```
+wrapped_AK_device = XChaCha20-Poly1305(device_wrap_key, nonce, AK,
+                                       AD("VisiPass device key", 1, account_id, ak_generation, context))
+```
+
+`context` is the caller's (an expiry, a device ID) and must be given again to open it. Opening runs
+every check a password unlock runs, and fails once `ak_generation` moves on. Where
+`device_wrap_key` comes from, and the policy around it, belong to each platform's design and its
+own review; no desktop platform uses this yet, so §1's goal 2 is unchanged there.
+
 ### 4.4 Where the Secret Key lives on a device
 
 Default: `~/.local/share/visipass/secret-key`, mode 0600. A home-directory backup that contains
@@ -771,6 +785,9 @@ Implemented (2026-10-12), with tests that attack it (`crates/vp-store/tests`, `c
   Tests in `crates/vp-store/tests/sync.rs`, `crates/vp-sync/tests` and `crates/vp-cli/tests`.
 - §11.1 S3-compatible buckets (2026-11-09).
 
+- §4.3 device keys, the storage half (`Unlocked::wrap_for_device`, `Store::unlock_with_device_key`),
+  and §4.4's Secret Key behind a `SecretKeyStore` (a 0600 file by default), 2026-11-10.
+
 Not yet: §5.2 Recovery Key; §6.1 `PR_SET_DUMPABLE`,
 `memfd_secret`/`mlock`; §6.3 password change and full
 rotation; §7.5 files; §9 fingerprints; §10 log signing; §11.2, §11.3.
@@ -791,3 +808,6 @@ rotation; §7.5 files; §9 fingerprints; §10 log signing; §11.2, §11.3.
   keys in the native vault's details, an unlocked vault as user verification.
 - 2026-10-30: §7.6 passkeys import from Proton Pass exports (P-256), also into logins already
   imported; `vp import op` reports the passkeys that stay in 1Password.
+- 2026-11-10: §4.3 device keys, the storage half: AK wrapped under a caller's hardware-held key,
+  bound to the account, `ak_generation` and a caller's context. §4.4: where the Secret Key lives
+  is a `SecretKeyStore`, a 0600 file unless a platform supplies another.

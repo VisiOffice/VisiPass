@@ -354,6 +354,19 @@ impl Unlocked {
         }
     }
 
+    /// The Account Key wrapped under a key this device keeps outside the vault,
+    /// in hardware that releases it only to its owner (a TPM key behind a PIN or
+    /// a biometric, say), so the vault can open without the master password.
+    /// `context` is bound in (an expiry, say): opening needs the same bytes. Bound
+    /// to this account and Account Key generation, so a rotation ends it.
+    pub fn wrap_for_device(&self, wrap_key: &Key, context: &[u8]) -> Vec<u8> {
+        vp_crypto::wrap(
+            wrap_key,
+            &device_ad(&self.account_id, self.ak_generation, context),
+            &self.ak,
+        )
+    }
+
     /// The account's random ID, for the Emergency Kit. Not secret.
     pub fn account_id(&self) -> [u8; 16] {
         self.account_id
@@ -543,6 +556,17 @@ fn account_row_hash(wrapped_ak: &[u8], params: &KdfParams, salt: &[u8], keyset: 
             params.part(),
             Part::Bytes(salt),
             Part::Bytes(keyset),
+        ],
+    )
+}
+
+fn device_ad(account_id: &[u8; 16], generation: u64, context: &[u8]) -> Vec<u8> {
+    ad(
+        "VisiPass device key",
+        &[
+            Part::Bytes(account_id),
+            Part::Uint(generation),
+            Part::Bytes(context),
         ],
     )
 }
@@ -821,6 +845,29 @@ impl Store {
             ));
         }
         self.open_with(row, key.ak)
+    }
+
+    /// Opens the vault with an Account Key from [`Unlocked::wrap_for_device`],
+    /// with the same checks as [`Store::unlock`].
+    pub fn unlock_with_device_key(
+        &self,
+        wrap_key: &Key,
+        context: &[u8],
+        wrapped: &[u8],
+    ) -> Result<Unlocked> {
+        let row = self.account_row()?;
+        let ak = vp_crypto::unwrap(
+            wrap_key,
+            &device_ad(&row.account_id, row.ak_generation, context),
+            wrapped,
+        )
+        .map_err(|_| {
+            Error(
+                "This device's key no longer opens the vault; unlock it with the master password"
+                    .into(),
+            )
+        })?;
+        self.open_with(row, ak)
     }
 
     fn account_row(&self) -> Result<AccountRow> {

@@ -22,7 +22,7 @@ use vp_core::model::{
 use vp_core::passkey;
 use vp_core::refs::SecretRef;
 use vp_core::secret::Secret;
-use vp_crypto::{KdfParams, SecretKey};
+use vp_crypto::{KdfParams, Key, SecretKey};
 use vp_store::{AccountKey, Rev, Store, Unlocked, Write};
 use zeroize::Zeroizing;
 
@@ -92,6 +92,43 @@ impl Paths {
 
     pub fn exists(&self) -> bool {
         self.vault.is_file()
+    }
+}
+
+/// Where this device keeps its Secret Key (§4.4). [`SecretKeyFile`], a 0600
+/// file, unless the platform has a better place (its own keystore).
+pub trait SecretKeyStore: Send + Sync + 'static {
+    /// The Secret Key in its display form, or `None` if this device has none.
+    fn read(&self) -> Result<Option<Zeroizing<String>>, Failure>;
+    /// Saves a new one. Refused if one is already there: nothing replaces it.
+    fn create(&self, shown: &str) -> Result<(), Failure>;
+    fn remove(&self);
+    /// Where it is, for messages: "at /home/me/.local/share/visipass/secret-key".
+    fn location(&self) -> String;
+}
+
+/// The Secret Key in a 0600 file (§4.4).
+pub struct SecretKeyFile(pub PathBuf);
+
+impl SecretKeyStore for SecretKeyFile {
+    fn read(&self) -> Result<Option<Zeroizing<String>>, Failure> {
+        match std::fs::read_to_string(&self.0) {
+            Ok(text) => Ok(Some(Zeroizing::new(text))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err(Failure::new(format!("Could not read {}", self.0.display()))),
+        }
+    }
+
+    fn create(&self, shown: &str) -> Result<(), Failure> {
+        write_private(&self.0, format!("{shown}\n").as_bytes())
+    }
+
+    fn remove(&self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+
+    fn location(&self) -> String {
+        format!("at {}", self.0.display())
     }
 }
 
@@ -395,6 +432,7 @@ pub struct QuickUnlock {
 
 struct Inner<U> {
     paths: Paths,
+    secret_keys: Box<dyn SecretKeyStore>,
     params: KdfParams,
     unlock: U,
     state: Mutex<State>,
@@ -469,7 +507,36 @@ impl<U: Unlock> NativeBackend<U> {
         Self::build(paths, unlock, params, quiet)
     }
 
+    /// With the Secret Key kept somewhere other than `paths.secret_key`, and
+    /// how long a cancelled unlock keeps further prompts away.
+    pub fn with_secret_key_store(
+        paths: Paths,
+        unlock: U,
+        params: KdfParams,
+        quiet_after_cancel: Duration,
+        secret_keys: impl SecretKeyStore,
+    ) -> Self {
+        Self::build_with(
+            paths,
+            unlock,
+            params,
+            quiet_after_cancel,
+            Box::new(secret_keys),
+        )
+    }
+
     fn build(paths: Paths, unlock: U, params: KdfParams, quiet_after_cancel: Duration) -> Self {
+        let secret_keys = Box::new(SecretKeyFile(paths.secret_key.clone()));
+        Self::build_with(paths, unlock, params, quiet_after_cancel, secret_keys)
+    }
+
+    fn build_with(
+        paths: Paths,
+        unlock: U,
+        params: KdfParams,
+        quiet_after_cancel: Duration,
+        secret_keys: Box<dyn SecretKeyStore>,
+    ) -> Self {
         let settings = load_settings(&paths.settings);
         let quick_unlock = settings
             .quick_unlock_secs
@@ -477,6 +544,7 @@ impl<U: Unlock> NativeBackend<U> {
         let stored_auto_lock = settings.auto_lock.zip(settings.auto_lock_tag);
         let inner = Arc::new(Inner {
             paths,
+            secret_keys,
             params,
             unlock,
             state: Mutex::new(State {
@@ -692,7 +760,7 @@ impl<U: Unlock> NativeBackend<U> {
     pub async fn init(&self, password: Secret) -> Result<Zeroizing<String>, Failure> {
         let _gate = self.inner.gate.lock().await;
         let paths = &self.inner.paths;
-        if paths.exists() || paths.secret_key.exists() {
+        if paths.exists() || self.inner.secret_keys.read()?.is_some() {
             return Err(Failure::new(format!(
                 "A VisiPass vault already exists at {}",
                 paths.vault.display()
@@ -711,7 +779,7 @@ impl<U: Unlock> NativeBackend<U> {
         }
         let secret = SecretKey::generate();
         let shown = secret.display();
-        write_private(&paths.secret_key, format!("{}\n", *shown).as_bytes())?;
+        self.inner.secret_keys.create(&shown)?;
         let inner = self.inner.clone();
         tokio::task::spawn_blocking(move || {
             let paths = &inner.paths;
@@ -745,21 +813,8 @@ impl<U: Unlock> NativeBackend<U> {
     async fn open_for(&self, purpose: Option<&str>) -> Result<(), Failure> {
         let _gate = self.inner.gate.lock().await;
         self.inner.expire_if_idle();
-        {
-            let mut state = self.inner.state();
-            if state.opened.is_some() {
-                state.last_use = Instant::now();
-                return Ok(());
-            }
-            if state.store.is_none() {
-                if !self.inner.paths.exists() {
-                    return Err(Failure::new(
-                        "There is no VisiPass vault yet. Run `vp init` to create one",
-                    ));
-                }
-                let paths = &self.inner.paths;
-                state.store = Some(Store::open(&paths.vault, &paths.sequence).map_err(failure)?);
-            }
+        if self.open_store()? {
+            return Ok(());
         }
         if self
             .inner
@@ -772,16 +827,7 @@ impl<U: Unlock> NativeBackend<U> {
         if self.quick_unlock_with_kept_key().await? {
             return Ok(());
         }
-        let secret_text = Zeroizing::new(
-            std::fs::read_to_string(&self.inner.paths.secret_key).map_err(|_| {
-                Failure::new(format!(
-                    "This device has no Secret Key at {}. Restore it from your Emergency Kit",
-                    self.inner.paths.secret_key.display()
-                ))
-            })?,
-        );
-        let secret = SecretKey::parse(&secret_text).map_err(|e| Failure::new(e.0))?;
-        let secret = Arc::new(secret);
+        let secret = Arc::new(self.secret_key()?);
         for attempt in 0..UNLOCK_ATTEMPTS {
             let Some(password) = self.inner.unlock.password(attempt > 0, purpose).await? else {
                 self.quiet();
@@ -807,6 +853,67 @@ impl<U: Unlock> NativeBackend<U> {
         }
         self.quiet();
         Err(Failure::new("Wrong master password; VisiPass stays locked"))
+    }
+
+    /// Opens the database if it is not open yet. `true` if the vault is already
+    /// unlocked (and counts as used).
+    fn open_store(&self) -> Result<bool, Failure> {
+        let mut state = self.inner.state();
+        if state.opened.is_some() {
+            state.last_use = Instant::now();
+            return Ok(true);
+        }
+        if state.store.is_none() {
+            if !self.inner.paths.exists() {
+                return Err(Failure::new(
+                    "There is no VisiPass vault yet. Run `vp init` to create one",
+                ));
+            }
+            let paths = &self.inner.paths;
+            state.store = Some(Store::open(&paths.vault, &paths.sequence).map_err(failure)?);
+        }
+        Ok(false)
+    }
+
+    /// The open vault's Account Key wrapped under a key this device keeps in
+    /// hardware (see `vp_store::Unlocked::wrap_for_device`), for
+    /// [`NativeBackend::unlock_with_device_key`]. Never asks to unlock.
+    pub fn wrap_for_device(&self, wrap_key: &Key, context: &[u8]) -> Result<Vec<u8>, Failure> {
+        let state = self.inner.state();
+        let opened = state
+            .opened
+            .as_ref()
+            .ok_or_else(|| Failure::new("VisiPass is locked"))?;
+        Ok(opened.unlocked.wrap_for_device(wrap_key, context))
+    }
+
+    /// Unlocks with an Account Key from [`NativeBackend::wrap_for_device`], with
+    /// every check a password unlock makes. Fails, leaving the vault locked, if
+    /// `wrap_key` or `context` differ or the Account Key has been rotated since.
+    pub async fn unlock_with_device_key(
+        &self,
+        wrap_key: Key,
+        context: Vec<u8>,
+        wrapped: Vec<u8>,
+    ) -> Result<(), Failure> {
+        let _gate = self.inner.gate.lock().await;
+        if self.open_store()? {
+            return Ok(());
+        }
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut state = inner.state();
+            let store = state.store.as_ref().expect("opened above");
+            let unlocked = store
+                .unlock_with_device_key(&wrap_key, &context, &wrapped)
+                .map_err(failure)?;
+            let opened = load(store, unlocked)?;
+            state.opened = Some(opened);
+            state.last_use = Instant::now();
+            Ok(())
+        })
+        .await
+        .map_err(|_| Failure::new("Unlocking failed"))?
     }
 
     fn quiet(&self) {
@@ -845,14 +952,13 @@ impl<U: Unlock> NativeBackend<U> {
     }
 
     fn secret_key(&self) -> Result<SecretKey, Failure> {
-        let text = Zeroizing::new(
-            std::fs::read_to_string(&self.inner.paths.secret_key).map_err(|_| {
-                Failure::new(format!(
-                    "This device has no Secret Key at {}. Restore it from your Emergency Kit",
-                    self.inner.paths.secret_key.display()
-                ))
-            })?,
-        );
+        let keys = &self.inner.secret_keys;
+        let text = keys.read()?.ok_or_else(|| {
+            Failure::new(format!(
+                "This device has no Secret Key {}. Restore it from your Emergency Kit",
+                keys.location()
+            ))
+        })?;
         SecretKey::parse(&text).map_err(|e| Failure::new(e.0))
     }
 
@@ -2225,7 +2331,7 @@ impl<U: Unlock> NativeBackend<U> {
     ) -> Result<vp_sync::Report, Failure> {
         let _gate = self.inner.gate.lock().await;
         let paths = self.inner.paths.clone();
-        if paths.exists() || paths.secret_key.exists() {
+        if paths.exists() || self.inner.secret_keys.read()?.is_some() {
             return Err(Failure::new(format!(
                 "This device already has a VisiPass vault at {}. Joining makes a new one, so it was refused",
                 paths.vault.display()
@@ -2237,10 +2343,7 @@ impl<U: Unlock> NativeBackend<U> {
         {
             private_dir(dir)?;
         }
-        write_private(
-            &paths.secret_key,
-            format!("{}\n", *secret.display()).as_bytes(),
-        )?;
+        self.inner.secret_keys.create(&secret.display())?;
         let inner = self.inner.clone();
         let joined = tokio::task::spawn_blocking(move || {
             let paths = &inner.paths;
@@ -2268,7 +2371,7 @@ impl<U: Unlock> NativeBackend<U> {
                 Ok(report)
             }
             Err(e) => {
-                let _ = std::fs::remove_file(&paths.secret_key);
+                self.inner.secret_keys.remove();
                 Err(e)
             }
         }
