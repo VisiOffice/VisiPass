@@ -1524,7 +1524,8 @@ impl VisiPassApp {
 
     fn render_help(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme.clone();
-        let mut groups = div().flex().gap(px(28.));
+        // Groups wrap onto more rows when the window is narrow (half a screen).
+        let mut groups = div().flex().flex_wrap().gap_x(px(36.)).gap_y(px(18.));
         let mut current: Option<&str> = None;
         let mut column = div().flex().flex_col().gap(px(5.));
         for (shortcut, keys) in SHORTCUTS.iter().zip(&self.keymap.keys) {
@@ -1554,7 +1555,13 @@ impl VisiPassApp {
                 div()
                     .flex()
                     .gap(px(12.))
-                    .child(div().w(px(150.)).text_color(t.accent).child(shown))
+                    .child(
+                        div()
+                            .w(px(130.))
+                            .flex_none()
+                            .text_color(t.accent)
+                            .child(shown),
+                    )
                     .child(div().text_color(t.foreground).child(shortcut.description)),
             );
         }
@@ -1562,6 +1569,9 @@ impl VisiPassApp {
         let mut card = div()
             .id("help")
             .occlude()
+            .max_w(gpui::relative(0.94))
+            .max_h(gpui::relative(0.9))
+            .overflow_y_scroll()
             .p(px(20.))
             .flex()
             .flex_col()
