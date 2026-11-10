@@ -5,5 +5,7 @@
   "assets": {
     "directory": "./dist",
     "not_found_handling": "404-page"
-  }
+  },
+  // Pull requests deploy a preview with `wrangler preview`, which needs this block.
+  "previews": {}
 }
