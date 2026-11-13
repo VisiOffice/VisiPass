@@ -792,8 +792,11 @@ Implemented (2026-10-12), with tests that attack it (`crates/vp-store/tests`, `c
 - §4.3 device keys, the storage half (`Unlocked::wrap_for_device`, `Store::unlock_with_device_key`),
   and §4.4's Secret Key behind a `SecretKeyStore` (a 0600 file by default), 2026-11-10.
 
-Not yet: §5.2 Recovery Key; §6.1 `PR_SET_DUMPABLE`,
-`memfd_secret`/`mlock`; §6.3 password change and full
+- §6.1 `PR_SET_DUMPABLE 0` and `RLIMIT_CORE 0` at visipassd's start, and on macOS
+  `PT_DENY_ATTACH` alongside the hardened runtime, 2026-11-13. Test in
+  `crates/vp-daemon/tests/memory.rs` (Linux).
+
+Not yet: §5.2 Recovery Key; §6.1 `memfd_secret`/`mlock`; §6.3 password change and full
 rotation; §7.5 files; §9 fingerprints; §10 log signing; §11.2, §11.3.
 
 ## Changelog
@@ -816,3 +819,5 @@ rotation; §7.5 files; §9 fingerprints; §10 log signing; §11.2, §11.3.
   bound to the account, `ak_generation` and a caller's context. §4.4: where the Secret Key lives
   is a `SecretKeyStore`, a 0600 file unless a platform supplies another.
 - 2026-11-10: §11.1 sync through storage the embedding program supplies, run like a bucket.
+- 2026-11-13: §6.1 visipassd closes its memory to the user's other processes at start: not
+  dumpable, no core files, and on macOS no debugger attach.

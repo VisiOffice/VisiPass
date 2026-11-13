@@ -14,7 +14,31 @@ fn fail(message: &str) -> ! {
     std::process::exit(1)
 }
 
+/// crypto §6.1: no core dumps, and no other process of this user (an agent
+/// included) can read this one's memory through ptrace or /proc/<pid>/mem.
+/// First thing, before any key or secret exists; children reset it on exec.
+fn close_memory() {
+    let none = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if unsafe { libc::setrlimit(libc::RLIMIT_CORE, &none) } != 0 {
+        fail("could not turn off core dumps");
+    }
+    #[cfg(target_os = "linux")]
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+        fail("could not close its memory to other processes");
+    }
+    // The hardened runtime (packaging/macos) already refuses task_for_pid to
+    // the same user; this also refuses a debugger attaching by ptrace.
+    #[cfg(target_os = "macos")]
+    if unsafe { libc::ptrace(libc::PT_DENY_ATTACH, 0, std::ptr::null_mut(), 0) } != 0 {
+        fail("could not close its memory to debuggers");
+    }
+}
+
 fn main() {
+    close_memory();
     let args: Vec<String> = std::env::args().collect();
     // The helper `op run` executes to hand resolved references back to the daemon.
     if args.get(1).map(String::as_str) == Some(DUMP_SECRETS) {
