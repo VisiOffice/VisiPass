@@ -32,6 +32,9 @@ crates/vp-cli      vp: parse flags, call visipassd, print JSON; no logic
 crates/vp-gui   visipass-prompt: GPUI approval window (layer-shell overlay on Wayland), themed from Omarchy;
                    excluded from default-members, build with `cargo build -p vp-gui`
 skills/visipass    the agent skill; keep it in sync with the CLI
+.claude/skills     skills for agents working here: chrome-extensions and modern-web-guidance
+                   (Google's, copied and pinned; never run `npx modern-web-guidance`). Read them
+                   before changing extension/ or site/
 site               visipass.app (Astro, Cloudflare Workers); its demos copy the prompt, masker and extension
 ```
 
