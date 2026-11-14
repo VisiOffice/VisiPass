@@ -950,3 +950,52 @@ impl SignedAnswer {
         Answer::decode(&self.answer)
     }
 }
+
+// ---- Pairing records -----------------------------------------------------
+
+/// What visipassd keeps about a paired phone, sealed in the vault (the vault
+/// seals it; this is the plaintext).
+#[derive(Clone, Debug)]
+pub struct Pairing {
+    pub pairing_id: PairingId,
+    pub name: String,
+    pub sign_p: PublicKey,
+    pub kem_p: PublicKey,
+    pub kem_d: DaemonKey,
+    pub push_token: Vec<u8>,
+    /// Seconds since the Unix epoch.
+    pub created: u64,
+}
+
+const PAIRING: &str = "VisiPass phone pairing record";
+
+impl Pairing {
+    pub fn encode(&self) -> Zeroizing<Vec<u8>> {
+        let kem_d = self.kem_d.to_bytes();
+        Zeroizing::new(ad(
+            PAIRING,
+            &[
+                Part::Bytes(&self.pairing_id),
+                Part::Text(&self.name),
+                Part::Bytes(&self.sign_p),
+                Part::Bytes(&self.kem_p),
+                Part::Bytes(kem_d.as_ref()),
+                Part::Bytes(&self.push_token),
+                Part::Uint(self.created),
+            ],
+        ))
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        let [pairing_id, name, sign_p, kem_p, kem_d, push_token, created] = parts(PAIRING, bytes)?;
+        Ok(Self {
+            pairing_id: pairing_id.fixed()?,
+            name: name.text()?.into(),
+            sign_p: sign_p.fixed()?,
+            kem_p: kem_p.fixed()?,
+            kem_d: DaemonKey::from_bytes(kem_d.bytes()?)?,
+            push_token: push_token.bytes()?.to_vec(),
+            created: created.uint()?,
+        })
+    }
+}

@@ -406,6 +406,20 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hours: Option<u64>,
     },
+    /// Pairs a phone for approvals: refused to agents, confirmed with the master
+    /// password, a QR code shown to the human, and a code compared on both
+    /// screens. `endpoint` is the HTTPS address the phone reaches this computer
+    /// at; by default this computer's Tailscale name.
+    PhonePair {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        endpoint: Option<String>,
+    },
+    /// The phones paired for approvals.
+    Phones,
+    /// Unpairs a phone, by name or pairing ID. Refused to agents.
+    PhoneRemove {
+        phone: String,
+    },
     /// Shows (no fields) or changes when the native vault locks by itself.
     /// Only the human changes it; keeping the vault open longer asks for the
     /// master password in the VisiPass window.
@@ -657,6 +671,9 @@ impl Request {
             Request::QuickUnlock { .. } => "vault-quick-unlock",
             Request::AutoLock { .. } => "vault-auto-lock",
             Request::EmergencyKit => "vault-emergency-kit",
+            Request::PhonePair { .. } => "phone-pair",
+            Request::Phones => "phones",
+            Request::PhoneRemove { .. } => "phone-remove",
             Request::ImportOp { .. } => "vault-import",
             Request::ImportProton { .. } => "vault-import-proton",
         }

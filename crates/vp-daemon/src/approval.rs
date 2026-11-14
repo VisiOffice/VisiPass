@@ -36,6 +36,19 @@ pub trait Approver: Send + Sync + 'static {
         &self,
         prompt: &Prompt,
     ) -> impl Future<Output = Result<Option<Secret>, Failure>> + Send;
+    /// Asks only the person at the computer, never a paired phone: for what
+    /// only the computer may approve (pairing a phone).
+    fn ask_at_computer(
+        &self,
+        prompt: &Prompt,
+    ) -> impl Future<Output = Result<Decision, Failure>> + Send {
+        self.ask(prompt)
+    }
+    /// Who answered the last `ask`, when it was not the desktop (a phone's
+    /// name), for the access log. Read once.
+    fn answered_by(&self) -> Option<String> {
+        None
+    }
     /// Quick unlock: has the system confirm the human is present.
     fn confirm_presence(&self) -> impl Future<Output = vp_native::Presence> + Send {
         async { vp_native::Presence::Unavailable }
@@ -54,7 +67,7 @@ const ONCE: &str = "Allow once";
 const TASK: &str = "This task";
 const HOURS: &str = "This project, 8 hours";
 const ALWAYS: &str = "Always for this project";
-const STANDING_HOURS: u64 = 8;
+pub(crate) const STANDING_HOURS: u64 = 8;
 
 fn truncate(text: &str, max: usize) -> String {
     let clean: String = text

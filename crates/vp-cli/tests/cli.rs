@@ -224,22 +224,22 @@ impl World {
                         sequence: state.join("sequence"),
                         settings: state.join("vault-settings.json"),
                     };
-                    let backend = Routed {
-                        op,
-                        native: vp_native::NativeBackend::with_params(
-                            paths,
-                            WindowUnlock(daemon_approver.clone()),
-                            vp_crypto::KdfParams {
-                                m_kib: 65_536,
-                                t: 1,
-                                p: 1,
-                            },
-                        ),
-                    };
+                    let native = vp_native::NativeBackend::with_params(
+                        paths,
+                        WindowUnlock(daemon_approver.clone()),
+                        vp_crypto::KdfParams {
+                            m_kib: 65_536,
+                            t: 1,
+                            p: 1,
+                        },
+                    );
+                    let phones = vp_daemon::phones::Phones::new(native.clone(), 0);
+                    let backend = Routed { op, native };
                     let daemon = Arc::new(
                         Daemon::new(backend, daemon_approver, &state, socket)
                             .with_browser_host(if browser { |_| true } else { |_| false })
-                            .with_identify(if agent { as_agent } else { as_human }),
+                            .with_identify(if agent { as_agent } else { as_human })
+                            .with_phones(phones),
                     );
                     ready_tx.send(()).unwrap();
                     daemon.serve(listener).await;
@@ -2366,5 +2366,78 @@ fn browser_install_registers_the_host_where_chrome_keeps_its_profile() {
     assert_eq!(
         manifest["allowed_origins"][0],
         "chrome-extension://pmfmecknoobmojibgpbkpeckpdnmhnpm/"
+    );
+}
+
+#[test]
+fn an_agent_cannot_pair_or_remove_a_phone() {
+    // init: password, confirmation, Secret Key window
+    let world = World::native_agent(&[Decision::Once, Decision::Once, Decision::Deny]);
+    clean(&world.vp(&["init"], None));
+    let asked = world.approver.asked();
+    for args in [
+        &["phone", "pair"][..],
+        &[
+            "phone",
+            "pair",
+            "--endpoint",
+            "https://desk.tail1234.ts.net",
+        ],
+        &["phone", "remove", "anything"],
+    ] {
+        let refused = world.vp(args, None);
+        assert!(!refused.status.success());
+        assert!(
+            text(&refused.stderr).contains("Only the human"),
+            "{}",
+            text(&refused.stderr)
+        );
+    }
+    assert_eq!(world.approver.asked(), asked, "not even a password window");
+    // Listing is allowed: names and IDs only.
+    assert_eq!(
+        json(&world.vp(&["phone", "list"], None))["phones"],
+        serde_json::json!([])
+    );
+    world.assert_contained();
+}
+
+#[test]
+fn pairing_a_phone_needs_the_native_vault_and_an_https_endpoint() {
+    let world = World::new(&[]);
+    let refused = world.vp(
+        &[
+            "phone",
+            "pair",
+            "--endpoint",
+            "https://desk.tail1234.ts.net",
+        ],
+        None,
+    );
+    assert!(
+        text(&refused.stderr).contains("own vault"),
+        "{}",
+        text(&refused.stderr)
+    );
+
+    let world = World::native(&[Decision::Once, Decision::Once, Decision::Deny]);
+    clean(&world.vp(&["init"], None));
+    let asked = world.approver.asked();
+    let refused = world.vp(&["phone", "pair", "--endpoint", "http://desk.local"], None);
+    assert!(
+        text(&refused.stderr).contains("https://"),
+        "{}",
+        text(&refused.stderr)
+    );
+    assert_eq!(
+        world.approver.asked(),
+        asked,
+        "no password asked for a bad endpoint"
+    );
+    let refused = world.vp(&["phone", "remove", "nobody"], None);
+    assert!(
+        text(&refused.stderr).contains("No phone named"),
+        "{}",
+        text(&refused.stderr)
     );
 }

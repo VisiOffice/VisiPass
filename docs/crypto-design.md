@@ -701,6 +701,71 @@ password. The web app will be served from a separate static host with reproducib
 builds, and documented as less secure than the desktop app. Argon2 at 256 MiB in WASM must be
 measured, mobile Safari especially, before the web app is promised.
 
+### 11.4 Phone approvals
+
+A person who drives agents from a phone is away from the computer where the approval window
+opens. A phone they paired gets the same question and may answer it. The phone approves; it
+never holds the vault, a vault key or a stored value, and never sees the master password. Built
+on the computer's side (`crates/vp-phone`, `vp-daemon/src/phones.rs`); not yet reviewed (§13).
+
+**Keys.** Per pairing, the phone holds `sign_P` (ECDSA P-256, Secure Enclave, Face ID for every
+use) and `kem_P` (P-256 key agreement, Secure Enclave); visipassd holds `kem_D` (P-256) and a
+16-byte `pairing_id`. HPKE (RFC 9180) is DHKEM(P-256, HKDF-SHA256), HKDF-SHA256,
+ChaCha20-Poly1305. Every message is a labelled deterministic CBOR array (§2.1), at most 64 KiB.
+
+**The pairing record** `{pairing_id, name, sign_P, kem_P, kem_D, push_token, created}` is sealed
+with XChaCha20-Poly1305 under `phones_key = HKDF-Expand(AK, AD("VisiPass phones", 1, account_id,
+ak_generation), 32)`, with `AD("VisiPass phone pairing", 1, account_id, pairing_id)`, and kept in
+this device's state in the account row, which the account manifest covers (§7.4). It is not
+synced. A record written by anything but the unlocked daemon fails the manifest, so nothing an
+agent can write adds a phone; phones are asked only while the vault is unlocked.
+
+**Pairing** (`vp phone pair`, refused to agents, after the master password):
+
+1. visipassd makes `kem_D`, `pairing_id` and a 32-byte one-time `secret` (the reveal's HPKE PSK,
+   which RFC 9180 wants at 32 bytes), valid for five minutes, and shows `visipass-pair:` +
+   base64url(invite) as a QR code on a page held in memory, like the Emergency Kit.
+2. The phone sends `commitment = H(AD("VisiPass phone pair commit", 1, pairing_id, sign_P, kem_P,
+   n_P))` with an HMAC-SHA256 under `secret`, before it learns anything from the computer.
+3. visipassd answers with 32 random bytes `n_D`. A second commit with a valid MAC cancels the
+   pairing and says so to both sides.
+4. The phone reveals `{name, sign_P, kem_P, n_P, push_token}`, sealed to `kem_D` with HPKE PSK
+   mode (PSK `secret`, PSK id `pairing_id`) and signed by `sign_P` over
+   `AD("VisiPass phone pair reveal", 1, pairing_id, SHA-256(body))`; it must match the commitment.
+5. Both screens show six digits: the first 32 bits of `H(AD("VisiPass phone pair code", 1,
+   pairing_id, kem_D, sign_P, kem_P, n_P, n_D))` mod 10^6. visipassd asks the person at the
+   computer, never a phone, to confirm they match; only then is the record sealed.
+
+Whoever reads the QR code (an agent can take screenshots) either commits first and gets digits it
+could not choose, or commits second and cancels the pairing in the open.
+
+**Asking.** Whenever visipassd would ask the desktop approver, it also seals a request
+`{request_id, pairing_id, kind, prompt (cleaned, Invariant 12), choices, issued_at, expires_at =
+issued_at + 120 s}` to each paired phone with HPKE Auth mode (sender `kem_D`), so only that
+pairing's daemon can ask the phone anything. Choices are `deny`, `once`, `task` and `hours`;
+"always" is offered only at the computer, and every-time prompts offer `deny` and `once`.
+Phones are asked to approve requests and to paste a new secret an agent asked for (`vp
+request`); never to unlock, for the master password, keys, or to pair.
+
+**Answering.** The phone signs `AD("VisiPass phone answer", 1, pairing_id, SHA-256(answer))`
+where `answer = {request_id, request_hash = SHA-256(request), choice, value?}`; a pasted value is
+sealed to `kem_D` (HPKE Base, info bound to `pairing_id` and `request_hash`). visipassd checks, in
+order: the signature under that pairing's `sign_P`; that the request is waiting, was sent to
+that pairing, and `request_hash` names its exact bytes; that it has not expired or been answered;
+that the choice was offered (and a value comes with a paste, only then). The first valid answer
+from any phone or the desktop wins and withdraws the question everywhere; an invalid answer
+counts as none, so a forged one cannot deny. The access log names the phone that answered.
+
+**Transport.** `tailscale serve` forwards HTTPS on the computer's tailnet name to a loopback port
+(7473) where visipassd listens. Every process on the computer can reach that port, so it serves
+four routes (`POST /v1/pair/commit`, `POST /v1/pair/reveal`, `GET /v1/pending/<pairing_id>`,
+`POST /v1/answer`), refuses bodies over 64 KiB and chunked bodies, rate-limits each pairing, and
+trusts nothing above what is sealed or signed. Who can reach it learns how many requests are
+pending for a pairing, not what they are.
+
+Not yet: push notifications through a stateless relay, so the phone need not be open to be
+asked; quick unlock from the phone within an open window (§4.3).
+
 ## 12. Questions for reviewers
 
 1. **Unlock derivation (§4.1).** Secret Key as the HKDF-Extract key over the Argon2 output, AUK
@@ -821,3 +886,7 @@ rotation; §7.5 files; §9 fingerprints; §10 log signing; §11.2, §11.3.
 - 2026-11-10: §11.1 sync through storage the embedding program supplies, run like a bucket.
 - 2026-11-13: §6.1 visipassd closes its memory to the user's other processes at start: not
   dumpable, no core files, and on macOS no debugger attach.
+- 2026-11-14: §11.4 phone approvals, the computer's side: pairing records sealed under a key from
+  AK in the manifest-covered device state; commit-then-reveal pairing with a compared code;
+  requests sealed to each phone with HPKE Auth mode, answers signed by a Secure Enclave key, first
+  valid answer wins; a loopback listener behind `tailscale serve`.

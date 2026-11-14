@@ -571,3 +571,21 @@ fn rfc9180_vectors() {
         }
     }
 }
+
+#[test]
+fn a_pairing_record_round_trips() {
+    let p = paired();
+    let record = Pairing {
+        pairing_id: p.invite.pairing_id,
+        name: "Robert's iPhone".into(),
+        sign_p: p.phone.sign_p(),
+        kem_p: p.phone.kem_p(),
+        kem_d: p.daemon.clone(),
+        push_token: vec![1, 2, 3],
+        created: NOW,
+    };
+    let back = Pairing::decode(&record.encode()).unwrap();
+    assert_eq!(back.kem_d.public(), p.daemon.public());
+    assert_eq!((back.name, back.created), (record.name, NOW));
+    assert!(Pairing::decode(&p.phone.body().encode()).is_err());
+}

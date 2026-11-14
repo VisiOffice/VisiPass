@@ -362,3 +362,65 @@ fn a_schema_1_vault_is_checked_backed_up_and_migrated() {
         .unwrap();
     assert!(error.0.contains("integrity check"), "{}", error.0);
 }
+
+#[test]
+fn phones_are_sealed_kept_and_removed() {
+    let f = Fixture::new();
+    f.populated();
+    let mut store = f.store();
+    let mut unlocked = store.unlock("hunter2!", &f.secret()).unwrap();
+    assert!(unlocked.phones().unwrap().is_empty());
+    assert!(
+        !store
+            .set_phone(&mut unlocked, &[1; 16], Some(b"phone one SENTINEL"))
+            .unwrap()
+    );
+    store
+        .set_phone(&mut unlocked, &[2; 16], Some(b"phone two"))
+        .unwrap();
+    drop(store);
+
+    // Sealed: the record is not in the file.
+    let file = std::fs::read(&f.db).unwrap();
+    assert!(!file.windows(8).any(|w| w == b"SENTINEL"));
+
+    let mut store = f.store();
+    let mut unlocked = store.unlock("hunter2!", &f.secret()).unwrap();
+    let phones = unlocked.phones().unwrap();
+    assert_eq!(phones.len(), 2);
+    assert_eq!(
+        (phones[0].0, &phones[0].1[..]),
+        ([1; 16], &b"phone one SENTINEL"[..])
+    );
+    assert!(store.set_phone(&mut unlocked, &[1; 16], None).unwrap());
+    assert!(!store.set_phone(&mut unlocked, &[1; 16], None).unwrap());
+    store.set_phone(&mut unlocked, &[2; 16], None).unwrap();
+    drop(store);
+    let unlocked = f.store().unlock("hunter2!", &f.secret()).unwrap();
+    assert!(unlocked.phones().unwrap().is_empty());
+}
+
+/// Anything running as the user can write the file, but not add a phone: an
+/// older device state (before a phone was removed, or from before pairing)
+/// fails the manifest.
+#[test]
+fn putting_back_a_phone_is_detected() {
+    let f = Fixture::new();
+    f.populated();
+    let mut store = f.store();
+    let mut unlocked = store.unlock("hunter2!", &f.secret()).unwrap();
+    store
+        .set_phone(&mut unlocked, &[1; 16], Some(b"the agent's phone"))
+        .unwrap();
+    let paired: Vec<u8> = Connection::open(&f.db)
+        .unwrap()
+        .query_row("SELECT device FROM account", [], |r| r.get(0))
+        .unwrap();
+    store.set_phone(&mut unlocked, &[1; 16], None).unwrap();
+    drop(store);
+    Connection::open(&f.db)
+        .unwrap()
+        .execute("UPDATE account SET device = ?1", [paired])
+        .unwrap();
+    assert!(f.unlock_error().contains("integrity check"));
+}

@@ -712,6 +712,55 @@ impl<U: Unlock> NativeBackend<U> {
         Ok(())
     }
 
+    /// Checks the master password before something only the human may do
+    /// (pairing a phone). A locked vault opens with it, so the human types it once.
+    pub async fn confirm_password(&self, password: Secret) -> Result<(), Failure> {
+        let _gate = self.inner.gate.lock().await;
+        let secret = self.secret_key()?;
+        self.open_store()?;
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut state = inner.state();
+            let store = state
+                .store
+                .as_ref()
+                .ok_or_else(|| Failure::new("Could not open the vault"))?;
+            let unlocked = store.unlock(password.expose(), &secret).map_err(failure)?;
+            if state.opened.is_none() {
+                let opened = load(store, unlocked)?;
+                state.opened_with_password(opened);
+            }
+            state.last_use = Instant::now();
+            Ok(())
+        })
+        .await
+        .map_err(|_| Failure::new("Checking the password failed"))?
+    }
+
+    /// The phones paired with this device, as `(pairing_id, record)`; `None`
+    /// while the vault is locked. Never asks to unlock: phones are asked only
+    /// while the vault is open.
+    pub fn phones(&self) -> Result<Option<vp_store::PhoneRecords>, Failure> {
+        let state = self.inner.state();
+        match &state.opened {
+            Some(opened) => opened.unlocked.phones().map(Some).map_err(failure),
+            None => Ok(None),
+        }
+    }
+
+    /// Pairs a phone (sealing its record in the vault), or with `None` removes
+    /// it. Returns whether it was paired before. Needs the vault open.
+    pub fn set_phone(&self, pairing_id: &[u8; 16], record: Option<&[u8]>) -> Result<bool, Failure> {
+        let mut state = self.inner.state();
+        let state = &mut *state;
+        let (Some(store), Some(opened)) = (state.store.as_mut(), state.opened.as_mut()) else {
+            return Err(Failure::new("VisiPass is locked"));
+        };
+        store
+            .set_phone(&mut opened.unlocked, pairing_id, record)
+            .map_err(failure)
+    }
+
     /// Locks. Within a quick-unlock window the Account Key stays, so the next
     /// unlock needs only the system's presence check.
     pub fn lock(&self) {

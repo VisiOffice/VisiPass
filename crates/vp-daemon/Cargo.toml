@@ -21,6 +21,8 @@ sha2.workspace = true
 tokio.workspace = true
 vp-core.workspace = true
 vp-native.workspace = true
+vp-phone.workspace = true
+qrcode.workspace = true
 vp-crypto.workspace = true
 vp-sync.workspace = true
 vp-op.workspace = true
@@ -33,5 +35,6 @@ wayland-client.workspace = true
 wayland-protocols.workspace = true
 
 [dev-dependencies]
-qrcode = { version = "0.14", default-features = false }
+hpke = { version = "0.13", default-features = false, features = ["alloc", "p256"] }
+p256.workspace = true
 tempfile.workspace = true

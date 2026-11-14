@@ -192,6 +192,10 @@ pub(crate) struct Local {
     /// Own seq at the last snapshot written.
     pub snapshot: Option<u64>,
     pub peers: BTreeMap<[u8; 16], Peer>,
+    /// Phones paired with this device for approvals, each record sealed under
+    /// the phones key ([`Unlocked::phones`]). Never synced: another device
+    /// pairs on its own.
+    pub phones: BTreeMap<[u8; 16], Vec<u8>>,
 }
 
 impl Local {
@@ -204,6 +208,7 @@ impl Local {
             head: [0; 32],
             snapshot: None,
             peers: BTreeMap::new(),
+            phones: BTreeMap::new(),
         }
     }
 
@@ -225,26 +230,50 @@ impl Local {
                 ])
             })
             .collect();
-        ad(
-            "VisiPass device state",
-            &[
-                Part::List(self.mine.iter().map(|m| Part::Bytes(m)).collect()),
-                Part::Uint(self.next_rev),
-                Part::Uint(self.exported),
-                Part::Uint(self.seq),
-                Part::Bytes(&self.head),
-                Part::List(snapshot),
-                Part::List(peers),
-            ],
-        )
+        let mut parts = vec![
+            Part::List(self.mine.iter().map(|m| Part::Bytes(m)).collect()),
+            Part::Uint(self.next_rev),
+            Part::Uint(self.exported),
+            Part::Uint(self.seq),
+            Part::Bytes(&self.head),
+            Part::List(snapshot),
+            Part::List(peers),
+        ];
+        // Only when there are some, so a device with no phones keeps the
+        // encoding earlier versions read.
+        if !self.phones.is_empty() {
+            parts.push(Part::List(
+                self.phones
+                    .iter()
+                    .map(|(id, sealed)| Part::List(vec![Part::Bytes(id), Part::Bytes(sealed)]))
+                    .collect(),
+            ));
+        }
+        ad("VisiPass device state", &parts)
     }
 
     fn decode(bytes: &[u8]) -> Result<Self> {
         let bad = |_| tampered("device state");
         let parts = vp_crypto::decode("VisiPass device state", bytes).map_err(bad)?;
-        let [mine, next_rev, exported, seq, head, snapshot, peers] = parts.as_slice() else {
+        // Phones come eighth, and only when there are some.
+        let (parts, phones) = match parts.as_slice() {
+            [rest @ .., phones] if parts.len() == 8 => match phones.list()? {
+                [] => return Err(tampered("device state")),
+                phones => (rest, phones),
+            },
+            rest => (rest, &[][..]),
+        };
+        let [mine, next_rev, exported, seq, head, snapshot, peers] = parts else {
             return Err(tampered("device state"));
         };
+        let mut phone_map = BTreeMap::new();
+        for p in phones {
+            let [id, sealed] = p.list()? else {
+                return Err(tampered("device state"));
+            };
+            phone_map.insert(id.fixed()?, sealed.bytes()?.to_vec());
+        }
+
         let mine: Vec<[u8; 16]> = mine
             .list()?
             .iter()
@@ -279,6 +308,7 @@ impl Local {
                 _ => return Err(tampered("device state")),
             },
             peers: peer_map,
+            phones: phone_map,
         })
     }
 }
@@ -409,6 +439,22 @@ impl Unlocked {
         derive(&self.ak, label, &self.account_id, self.ak_generation)
     }
 
+    /// The phones paired with this device, as `(pairing_id, record)`: each
+    /// record opened with the phones key, `HKDF-Expand(AK, AD("VisiPass phones",
+    /// account_id, ak_generation))`, and bound to its pairing ID.
+    pub fn phones(&self) -> Result<PhoneRecords> {
+        let key = self.derived("VisiPass phones");
+        self.local
+            .phones
+            .iter()
+            .map(|(id, sealed)| {
+                vp_crypto::open(&key, &phone_ad(&self.account_id, id), sealed)
+                    .map(|record| (*id, record))
+                    .map_err(|_| tampered("phone pairing"))
+            })
+            .collect()
+    }
+
     /// A MAC over this device's local settings, so a file anyone running as
     /// the user can write cannot loosen them: HKDF-Expand is HMAC-SHA-256
     /// under a key only the unlocked account has.
@@ -418,6 +464,16 @@ impl Unlocked {
             .expand(&ad("VisiPass local settings tag", &[Part::Bytes(settings)]))
             .expose()
     }
+}
+
+/// Paired phones' records, opened: `(pairing_id, record)`.
+pub type PhoneRecords = Vec<([u8; 16], Zeroizing<Vec<u8>>)>;
+
+fn phone_ad(account_id: &[u8; 16], pairing_id: &[u8; 16]) -> Vec<u8> {
+    ad(
+        "VisiPass phone pairing",
+        &[Part::Bytes(account_id), Part::Bytes(pairing_id)],
+    )
 }
 
 fn derive(ak: &Key, label: &str, account_id: &[u8; 16], generation: u64) -> Key {
@@ -1082,6 +1138,38 @@ impl Store {
             unlocked.restore(checkpoint);
         }
         result
+    }
+
+    /// Pairs a phone with this device (`record` sealed under the phones key and
+    /// recorded in the account manifest), replaces its record, or with `None`
+    /// removes it. Returns whether it was paired before.
+    pub fn set_phone(
+        &mut self,
+        unlocked: &mut Unlocked,
+        pairing_id: &[u8; 16],
+        record: Option<&[u8]>,
+    ) -> Result<bool> {
+        let checkpoint = unlocked.checkpoint();
+        let was = match record {
+            Some(record) => {
+                let sealed = vp_crypto::seal(
+                    &unlocked.derived("VisiPass phones"),
+                    &phone_ad(&unlocked.account_id, pairing_id),
+                    record,
+                );
+                unlocked.local.phones.insert(*pairing_id, sealed).is_some()
+            }
+            None => unlocked.local.phones.remove(pairing_id).is_some(),
+        };
+        let result = self
+            .conn
+            .transaction()
+            .map_err(Error::from)
+            .and_then(|tx| commit(&self.sequence_file, unlocked, &[], tx));
+        if result.is_err() {
+            unlocked.restore(checkpoint);
+        }
+        result.map(|_| was)
     }
 
     /// Vault IDs and their decrypted attributes.

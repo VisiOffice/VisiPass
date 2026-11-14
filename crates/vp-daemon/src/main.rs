@@ -2,6 +2,7 @@ use std::io::IsTerminal;
 use std::sync::Arc;
 use tokio::net::UnixListener;
 use vp_daemon::approval::Desktop;
+use vp_daemon::phones::{Phones, WithPhones};
 use vp_daemon::routed::{Routed, WindowUnlock};
 use vp_daemon::{Daemon, paths};
 use vp_native::{NativeBackend, Paths};
@@ -77,6 +78,20 @@ fn main() {
     runtime.block_on(run(approver));
 }
 
+/// Listens for paired phones once the unlocked vault has any, so a phone can
+/// reach visipassd after a restart without waiting for the next question.
+async fn listen_for_phones(phones: Arc<Phones>) {
+    loop {
+        if matches!(phones.pairings(), Ok(Some(p)) if !p.is_empty()) {
+            if let Err(e) = phones.listen().await {
+                eprintln!("visipassd: {e}");
+            }
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+    }
+}
+
 async fn run(approver: Desktop) {
     let socket = paths::socket();
     let state = paths::state_dir();
@@ -101,6 +116,9 @@ async fn run(approver: Desktop) {
     // VisiPass's own vault once `vp init` has made one; 1Password until then.
     let native = NativeBackend::new(Paths::standard(), WindowUnlock(approver.clone()));
     tokio::spawn(vp_daemon::session::watch(native.clone()));
+    // Phones are asked alongside the desktop; unlocking stays at the computer.
+    let phones = Phones::new(native.clone(), vp_daemon::phones::PORT);
+    tokio::spawn(listen_for_phones(phones.clone()));
     let backend = Routed {
         op: OpBackend::new(vec![exe.into_os_string(), DUMP_SECRETS.into()]),
         native,
@@ -111,7 +129,12 @@ async fn run(approver: Desktop) {
         socket.display(),
         vp_daemon::approval::Approver::method(&approver)
     );
-    let daemon = Arc::new(Daemon::new(backend, approver, &state, socket.clone()));
+    let approver = WithPhones {
+        desktop: approver,
+        phones: phones.clone(),
+    };
+    let daemon =
+        Arc::new(Daemon::new(backend, approver, &state, socket.clone()).with_phones(phones));
 
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .unwrap_or_else(|_| fail("could not install signal handlers"));

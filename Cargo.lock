@@ -6708,8 +6708,10 @@ version = "0.14.2"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
+ "hpke",
  "image",
  "libc",
+ "p256",
  "qrcode",
  "rqrr",
  "serde",
@@ -6721,6 +6723,7 @@ dependencies = [
  "vp-crypto",
  "vp-native",
  "vp-op",
+ "vp-phone",
  "vp-sync",
  "wayland-client",
  "wayland-protocols",
