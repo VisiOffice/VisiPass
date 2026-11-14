@@ -72,6 +72,23 @@ struct SourceArgs {
 }
 
 #[derive(Subcommand)]
+enum PhoneCommands {
+    /// Pair your phone to approve requests from it. Asks for the master password,
+    /// shows a QR code to scan with the VisiPass app, then asks you to confirm the
+    /// code both screens show. Agents cannot pair a phone
+    Pair {
+        /// The https:// address your phone reaches this computer at (default: this
+        /// computer's Tailscale name)
+        #[arg(long)]
+        endpoint: Option<String>,
+    },
+    /// The phones paired with this computer
+    List,
+    /// Unpair a phone, by its name or ID from `vp phone list`
+    Remove { phone: String },
+}
+
+#[derive(Subcommand)]
 enum QuickUnlockCommands {
     /// Turn it on. Asks for the master password, which starts the first window
     On {
@@ -285,6 +302,9 @@ enum Commands {
     /// after each master-password unlock
     #[command(subcommand)]
     QuickUnlock(QuickUnlockCommands),
+    /// Approve agents' requests from your phone, alongside this computer
+    #[command(subcommand)]
+    Phone(PhoneCommands),
     /// Show or change when the vault locks by itself. With no options, shows it.
     /// Keeping it open longer asks for the master password; agents cannot change it
     AutoLock {
@@ -920,6 +940,11 @@ fn execute(command: Commands) -> Result<i32, Failure> {
         } => print(&client::call(Request::AutoLock {
             minutes,
             screen_lock: screen_lock.map(|s| s == "on"),
+        })?),
+        Commands::Phone(command) => print(&client::call(match command {
+            PhoneCommands::Pair { endpoint } => Request::PhonePair { endpoint },
+            PhoneCommands::List => Request::Phones,
+            PhoneCommands::Remove { phone } => Request::PhoneRemove { phone },
         })?),
         Commands::QuickUnlock(command) => {
             let hours = match command {

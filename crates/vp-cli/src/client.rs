@@ -10,8 +10,9 @@ use std::time::{Duration, Instant};
 use vp_core::Failure;
 use vp_core::ipc::{Envelope, PROTOCOL_VERSION, Request, Response};
 
-// An approval can wait two minutes, and the backend may prompt as well.
-const RESPONSE_TIMEOUT: Duration = Duration::from_secs(330);
+// An approval can wait two minutes, and the backend may prompt as well;
+// pairing a phone waits up to five minutes for the scan, then asks to confirm.
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(600);
 
 pub use vp_core::paths::{socket, state_dir};
 

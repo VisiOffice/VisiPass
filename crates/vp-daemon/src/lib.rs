@@ -11,6 +11,7 @@ pub mod grants;
 pub mod kit;
 pub mod log;
 pub mod paths;
+pub mod phones;
 pub mod presence;
 pub mod procinfo;
 pub mod qr;
@@ -212,6 +213,8 @@ pub struct Daemon<B, A> {
     /// were made on: the extension may finish them (username, the password the
     /// form took) without asking, but only from the same site.
     drafts: Mutex<std::collections::HashMap<String, String>>,
+    /// Phone approvals, with the native vault; the approver asks the same phones.
+    phones: Option<Arc<phones::Phones>>,
 }
 
 /// Where a request arrived. Only `App`, the private socket pair visipassd
@@ -603,7 +606,26 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
             browser_host: procinfo::started_by_browser,
             identify: procinfo::identify,
             drafts: Mutex::new(std::collections::HashMap::new()),
+            phones: None,
         }
+    }
+
+    /// Lets the human pair phones, list and remove them. `phones` must be the
+    /// service the approver asks (`phones::WithPhones`).
+    pub fn with_phones(mut self, phones: Arc<phones::Phones>) -> Self {
+        self.phones = Some(phones);
+        self
+    }
+
+    fn phones(&self) -> Result<&Arc<phones::Phones>, Failure> {
+        if !self.backend.native_status().is_some_and(|s| s.exists) {
+            return Err(Failure::new(
+                "Phone approvals need VisiPass's own vault, which keeps the pairing sealed: run `vp init`, or `vp import` from 1Password, first",
+            ));
+        }
+        self.phones
+            .as_ref()
+            .ok_or_else(|| Failure::new("This visipassd cannot ask phones"))
     }
 
     /// Replaces the check that browser requests come from a browser's
@@ -1001,6 +1023,102 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
         }))
     }
 
+    /// `vp phone pair`: the human's own act, confirmed with the master password,
+    /// a QR code only they see, and a code compared on both screens.
+    async fn pair_phone(
+        &self,
+        requester: &Requester,
+        endpoint: Option<String>,
+    ) -> Result<Value, Failure> {
+        if requester.agent.is_some() {
+            return Err(Failure::new(
+                "Only the human can pair a phone: ask them to run `vp phone pair` in their own terminal",
+            ));
+        }
+        let phones = self.phones()?.clone();
+        let endpoint = match endpoint {
+            Some(endpoint) => {
+                let endpoint = endpoint.trim().trim_end_matches('/').to_string();
+                if !endpoint.starts_with("https://") || endpoint.len() > 256 {
+                    return Err(Failure::new(
+                        "The endpoint must be an https:// address the phone can reach",
+                    ));
+                }
+                endpoint
+            }
+            None => phones::tailscale_endpoint().await.ok_or_else(|| {
+                Failure::new(
+                    "Could not find this computer's Tailscale name. Start Tailscale, or pass the address your phone reaches this computer at: `vp phone pair --endpoint https://...`",
+                )
+            })?,
+        };
+        {
+            let _turn = self.approvals.lock().await;
+            let purpose = "pair a phone to approve requests";
+            let prompt = Prompt {
+                who: "VisiPass".into(),
+                action: purpose.into(),
+                details: vec![],
+                secrets: vec![],
+                purpose: None,
+                timeout_secs: approval::TIMEOUT.as_secs(),
+                every_time: false,
+                paste: Some(vp_core::ipc::PasteSpec {
+                    mode: PasteMode::Unlock {
+                        retry: false,
+                        purpose: Some(purpose.into()),
+                    },
+                    ..Default::default()
+                }),
+            };
+            let password = self
+                .approver
+                .paste(&prompt)
+                .await?
+                .ok_or_else(|| Failure::new("Pairing was cancelled"))?;
+            phones.confirm_password(password).await?;
+        }
+        let port = phones.listen().await?;
+        let invite = phones.open_window(endpoint.clone());
+        let result = async {
+            let page = phones::pairing_page(&invite, port)?;
+            self.approver.show_page(&page).await?;
+            let (phone, code) = phones.revealed(&invite.pairing_id).await?;
+            let name = vp_core::ipc::clean_text(&phone.name, false, 64);
+            let prompt = Prompt {
+                who: "VisiPass".into(),
+                action: format!("pair the phone \"{name}\" to approve requests"),
+                details: vec![("Code on the phone".into(), code.clone())],
+                secrets: vec![],
+                purpose: None,
+                timeout_secs: approval::TIMEOUT.as_secs(),
+                every_time: true,
+                paste: None,
+            };
+            let decision = {
+                let _turn = self.approvals.lock().await;
+                // Never a phone: the phone being paired, or another, does not
+                // decide whether a phone is paired.
+                self.approver.ask_at_computer(&prompt).await?
+            };
+            if decision == Decision::Deny {
+                return Err(Failure::new("Pairing was cancelled"));
+            }
+            phones.keep(&invite.pairing_id, &phone)?;
+            Ok(json!({
+                "paired": name,
+                "endpoint": endpoint,
+                "serve": format!("tailscale serve --bg http://127.0.0.1:{port}"),
+                "next": "Your phone is asked alongside this computer from now on. Tailscale must be running on the phone, and `serve` on this computer",
+            }))
+        }
+        .await;
+        if result.is_err() {
+            phones.close_window();
+        }
+        result
+    }
+
     async fn authorize(
         &self,
         requester: &Requester,
@@ -1035,7 +1153,11 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
             .grants()
             .record(requester, need, decision)
             .map_err(|_| Failure::new("Approved, but the grant could not be saved"))?;
-        Ok(id.unwrap_or_else(|| "once".into()))
+        let id = id.unwrap_or_else(|| "once".into());
+        Ok(match self.approver.answered_by() {
+            Some(phone) => format!("{id} (on the phone \"{phone}\")"),
+            None => id,
+        })
     }
 
     async fn execute(
@@ -1175,6 +1297,38 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                     "where": "your browser, from a file in memory that is deleted in 10 minutes",
                     "next": "Print it or write the Secret Key down, and keep it apart from your master password",
                 }))
+            }
+            Request::PhonePair { endpoint } => self.pair_phone(requester, endpoint).await,
+            Request::Phones => {
+                let phones = self.phones()?;
+                let pairings = phones.pairings()?.ok_or_else(|| {
+                    Failure::new("VisiPass is locked; unlock it to see the paired phones")
+                })?;
+                let port = if pairings.is_empty() {
+                    None
+                } else {
+                    Some(phones.listen().await?)
+                };
+                Ok(json!({
+                    "phones": pairings
+                        .iter()
+                        .map(|p| json!({
+                            "name": p.name,
+                            "id": phones::hex(&p.pairing_id),
+                            "paired": vp_core::time::rfc3339(p.created),
+                        }))
+                        .collect::<Vec<_>>(),
+                    "listening": port.map(|port| format!("127.0.0.1:{port}")),
+                }))
+            }
+            Request::PhoneRemove { phone } => {
+                if requester.agent.is_some() {
+                    return Err(Failure::new(
+                        "Only the human can remove a phone: ask them to run `vp phone remove` in their own terminal",
+                    ));
+                }
+                let name = self.phones()?.remove(&phone)?;
+                Ok(json!({ "removed": name }))
             }
             Request::AutoLock {
                 minutes,
