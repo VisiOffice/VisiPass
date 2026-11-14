@@ -7,6 +7,7 @@ default-members = [
     "crates/vp-crypto",
     "crates/vp-store",
     "crates/vp-native",
+    "crates/vp-phone",
     "crates/vp-sync",
     "crates/vp-op",
     "crates/vp-daemon",
@@ -26,6 +27,7 @@ vp-op = { path = "crates/vp-op" }
 vp-crypto = { path = "crates/vp-crypto" }
 vp-store = { path = "crates/vp-store" }
 vp-native = { path = "crates/vp-native" }
+vp-phone = { path = "crates/vp-phone" }
 vp-sync = { path = "crates/vp-sync" }
 vp-daemon = { path = "crates/vp-daemon" }
 aho-corasick = "1.1"
