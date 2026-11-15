@@ -149,6 +149,28 @@ pub fn pairing_page(invite: &Invite, port: u16) -> Result<Zeroizing<String>, Fai
 /// `tailscale` program in the system directories (never PATH, which the caller
 /// sets). A wrong answer would only point the phone somewhere that cannot open
 /// its messages, but the person sees it on the pairing page all the same.
+/// What the phone calls this computer: its host name up to the first dot.
+pub fn computer_name() -> String {
+    let mut buf = [0u8; 256];
+    // SAFETY: gethostname writes at most `buf.len()` bytes into `buf`.
+    let ok = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0;
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    let host = String::from_utf8_lossy(&buf[..end]);
+    let name: String = host
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(64)
+        .collect();
+    if ok && !name.is_empty() {
+        name
+    } else {
+        "this computer".into()
+    }
+}
+
 pub async fn tailscale_endpoint() -> Option<String> {
     let program = crate::approval::trusted_program("tailscale").or_else(|| {
         let app = std::path::PathBuf::from("/Applications/Tailscale.app/Contents/MacOS/Tailscale");
@@ -420,11 +442,12 @@ impl Phones {
 
     // ---- Pairing ------------------------------------------------------------
 
-    /// Opens a pairing window for a phone that will reach this computer at
-    /// `endpoint`. Returns the QR code's contents. One window at a time.
-    pub fn open_window(&self, endpoint: String) -> Invite {
+    /// Opens a pairing window for a phone that will reach this computer,
+    /// called `name`, at `endpoint`. Returns the QR code's contents. One window
+    /// at a time.
+    pub fn open_window(&self, endpoint: String, name: String) -> Invite {
         let key = DaemonKey::generate();
-        let invite = Invite::new(endpoint, key.public());
+        let invite = Invite::new(endpoint, name, key.public());
         self.state().window = Some(Window {
             invite: invite.clone(),
             key,

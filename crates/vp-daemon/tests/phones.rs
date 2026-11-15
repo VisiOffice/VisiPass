@@ -300,7 +300,9 @@ async fn setup() -> Setup {
 
 /// A phone paired through the real flow.
 async fn paired(s: &Setup, name: &str) -> (SoftPhone, Invite) {
-    let invite = s.phones.open_window("https://desk.tail1234.ts.net".into());
+    let invite = s
+        .phones
+        .open_window("https://desk.tail1234.ts.net".into(), "desk".into());
     let phone = SoftPhone::new(name);
     let shown = phone.pair(s.port, &invite).await;
     let (revealed, code) = s.phones.revealed(&invite.pairing_id).await.unwrap();
@@ -371,7 +373,9 @@ async fn pairing_records_the_phone_sealed_in_the_vault() {
 #[tokio::test]
 async fn a_second_device_with_the_code_cancels_pairing_on_both_screens() {
     let s = setup().await;
-    let invite = s.phones.open_window("https://desk.tail1234.ts.net".into());
+    let invite = s
+        .phones
+        .open_window("https://desk.tail1234.ts.net".into(), "desk".into());
     let phone = SoftPhone::new("mine");
     let agent = SoftPhone::new("the agent's");
     let (status, _) = http(
@@ -408,7 +412,9 @@ async fn a_second_device_with_the_code_cancels_pairing_on_both_screens() {
 #[tokio::test]
 async fn a_commit_without_the_codes_secret_changes_nothing() {
     let s = setup().await;
-    let invite = s.phones.open_window("https://desk.tail1234.ts.net".into());
+    let invite = s
+        .phones
+        .open_window("https://desk.tail1234.ts.net".into(), "desk".into());
     let mut guess = invite.clone();
     guess.secret = Zeroizing::new([7; 32]);
     let stranger = SoftPhone::new("stranger");
@@ -430,7 +436,9 @@ async fn a_commit_without_the_codes_secret_changes_nothing() {
 #[tokio::test]
 async fn a_reveal_of_other_keys_than_committed_is_refused() {
     let s = setup().await;
-    let invite = s.phones.open_window("https://desk.tail1234.ts.net".into());
+    let invite = s
+        .phones
+        .open_window("https://desk.tail1234.ts.net".into(), "desk".into());
     let phone = SoftPhone::new("mine");
     let (status, _) = http(
         s.port,

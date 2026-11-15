@@ -186,8 +186,11 @@ impl std::fmt::Debug for DaemonKey {
 /// What the QR code in the VisiPass window carries, and nowhere else.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Invite {
-    /// `https://host.tailnet.ts.net`, where the phone reaches visipassd.
+    /// Where the phone reaches visipassd: the relay's tunnel,
+    /// `https://relay.visipass.app/t/<tunnel_id>`, or `https://host.tailnet.ts.net`.
     pub endpoint: String,
+    /// The computer's name, as the phone shows it (`rdo`).
+    pub name: String,
     pub pairing_id: PairingId,
     pub kem_d: PublicKey,
     /// One-time, valid for the pairing window; the HPKE PSK for the reveal
@@ -198,9 +201,10 @@ pub struct Invite {
 const INVITE: &str = "VisiPass phone pair invite";
 
 impl Invite {
-    pub fn new(endpoint: String, kem_d: PublicKey) -> Self {
+    pub fn new(endpoint: String, name: String, kem_d: PublicKey) -> Self {
         Self {
             endpoint,
+            name,
             pairing_id: vp_crypto::random(),
             kem_d,
             secret: Zeroizing::new(vp_crypto::random()),
@@ -213,6 +217,7 @@ impl Invite {
             INVITE,
             &[
                 Part::Text(&self.endpoint),
+                Part::Text(&self.name),
                 Part::Bytes(&self.pairing_id),
                 Part::Bytes(&self.kem_d),
                 Part::Bytes(self.secret.as_ref()),
@@ -225,15 +230,20 @@ impl Invite {
         const NOT: Error = Error("not a VisiPass pairing code");
         let encoded = uri.trim().strip_prefix(URI_SCHEME).ok_or(NOT)?;
         let bytes = Zeroizing::new(URL_SAFE_NO_PAD.decode(encoded).map_err(|_| NOT)?);
-        let [endpoint, pairing_id, kem_d, secret] = parts(INVITE, &bytes)?;
+        let [endpoint, name, pairing_id, kem_d, secret] = parts(INVITE, &bytes)?;
         let endpoint = endpoint.text()?;
         if !endpoint.starts_with("https://") || endpoint.len() > 256 {
             return Err(Error("the pairing endpoint is not an https address"));
+        }
+        let name = name.text()?;
+        if name.is_empty() || name.len() > 64 || name.chars().any(char::is_control) {
+            return Err(Error("the computer's name is not a name"));
         }
         let kem_d = kem_d.fixed()?;
         kem_public(&kem_d)?;
         Ok(Self {
             endpoint: endpoint.into(),
+            name: name.into(),
             pairing_id: pairing_id.fixed()?,
             kem_d,
             secret: Zeroizing::new(secret.fixed()?),
@@ -249,6 +259,7 @@ impl std::fmt::Debug for Invite {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Invite")
             .field("endpoint", &self.endpoint)
+            .field("name", &self.name)
             .field("pairing_id", &self.pairing_id)
             .finish_non_exhaustive()
     }
@@ -792,6 +803,77 @@ pub fn decode_pending(bytes: &[u8]) -> Result<Vec<SealedRequest>> {
         .iter()
         .map(SealedRequest::from_value)
         .collect()
+}
+
+// ---- Notifications --------------------------------------------------------
+
+/// The phone's APNs device token, sent to visipassd on pairing and whenever
+/// iOS changes it. HPKE Auth mode from `kem_P` to `kem_D`: only the paired
+/// phone can say where its notifications go, and the relay carrying it cannot
+/// read it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PushToken {
+    pub pairing_id: PairingId,
+    pub sealed: Sealed,
+}
+
+const PUSH_TOKEN: &str = "VisiPass phone push token message";
+
+/// APNs device tokens are 32 bytes today; Apple says not to rely on it.
+pub const MAX_PUSH_TOKEN: usize = 100;
+
+impl PushToken {
+    pub fn info(pairing_id: &PairingId) -> Vec<u8> {
+        ad("VisiPass phone push token", &[Part::Bytes(pairing_id)])
+    }
+
+    /// Seals as the phone. The app seals with `kem_P` in the Secure Enclave;
+    /// this is for tests and other clients.
+    pub fn seal(
+        kem_p: &DaemonKey,
+        kem_d: &PublicKey,
+        pairing_id: &PairingId,
+        token: &[u8],
+    ) -> Result<Self> {
+        Ok(Self {
+            pairing_id: *pairing_id,
+            sealed: Sealed::seal(
+                &OpModeS::Auth(kem_p.pair()),
+                kem_d,
+                &Self::info(pairing_id),
+                token,
+            )?,
+        })
+    }
+
+    /// Opens with this pairing's `kem_D`, refusing anything not sealed by its
+    /// `kem_P`.
+    pub fn open(&self, kem_d: &DaemonKey, kem_p: &PublicKey) -> Result<Vec<u8>> {
+        let token = self.sealed.open(
+            &OpModeR::Auth(kem_public(kem_p)?),
+            kem_d,
+            &Self::info(&self.pairing_id),
+        )?;
+        if token.is_empty() || token.len() > MAX_PUSH_TOKEN {
+            return Err(Error("not a push token"));
+        }
+        Ok(token.to_vec())
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        ad(
+            PUSH_TOKEN,
+            &[Part::Bytes(&self.pairing_id), self.sealed.part()],
+        )
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        let [pairing_id, sealed] = parts(PUSH_TOKEN, bytes)?;
+        Ok(Self {
+            pairing_id: pairing_id.fixed()?,
+            sealed: Sealed::from_value(&sealed)?,
+        })
+    }
 }
 
 // ---- Answers --------------------------------------------------------------

@@ -1079,7 +1079,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
             phones.confirm_password(password).await?;
         }
         let port = phones.listen().await?;
-        let invite = phones.open_window(endpoint.clone());
+        let invite = phones.open_window(endpoint.clone(), phones::computer_name());
         let result = async {
             let page = phones::pairing_page(&invite, port)?;
             self.approver.show_page(&page).await?;
