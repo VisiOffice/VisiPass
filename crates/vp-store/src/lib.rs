@@ -455,6 +455,24 @@ impl Unlocked {
             .collect()
     }
 
+    /// This device's secret for the phone relay's tunnel (crypto §11.4), so
+    /// only this device's unlocked visipassd can take the tunnel its paired
+    /// phones reach it through. Derived, never stored: `HKDF-Expand` of the
+    /// relay key, `HKDF-Expand(AK, AD("VisiPass relay tunnel", account_id,
+    /// ak_generation))`, with this device's ID. Like the phones' records, it
+    /// changes when AK does, and phones are paired again.
+    pub fn relay_secret(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(
+            *self
+                .derived("VisiPass relay tunnel")
+                .expand(&ad(
+                    "VisiPass relay tunnel secret",
+                    &[Part::Bytes(&self.local.device())],
+                ))
+                .expose(),
+        )
+    }
+
     /// A MAC over this device's local settings, so a file anyone running as
     /// the user can write cannot loosen them: HKDF-Expand is HMAC-SHA-256
     /// under a key only the unlocked account has.

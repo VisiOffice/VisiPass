@@ -233,7 +233,12 @@ impl World {
                             p: 1,
                         },
                     );
-                    let phones = vp_daemon::phones::Phones::new(native.clone(), 0);
+                    // Never the real relay.
+                    let phones = vp_daemon::phones::Phones::with_relay(
+                        native.clone(),
+                        0,
+                        "https://relay.invalid".into(),
+                    );
                     let backend = Routed { op, native };
                     let daemon = Arc::new(
                         Daemon::new(backend, daemon_approver, &state, socket)

@@ -119,6 +119,7 @@ async fn run(approver: Desktop) {
     // Phones are asked alongside the desktop; unlocking stays at the computer.
     let phones = Phones::new(native.clone(), vp_daemon::phones::PORT);
     tokio::spawn(listen_for_phones(phones.clone()));
+    tokio::spawn(phones.clone().keep_tunnel());
     let backend = Routed {
         op: OpBackend::new(vec![exe.into_os_string(), DUMP_SECRETS.into()]),
         native,

@@ -10,10 +10,15 @@
 //! about unlocking it, the master password or anything else typed only at the
 //! computer.
 //!
-//! The phone reaches visipassd through `tailscale serve`, which forwards HTTPS
-//! to a loopback port. Every process on this computer can reach that port too,
-//! so everything on it is untrusted input: four routes, bounded bodies, rate
-//! limits, and every message sealed or signed above HTTP.
+//! The phone reaches visipassd through the VisiPass relay (`relay`), which
+//! passes its requests down a WebSocket visipassd holds open, or through
+//! `tailscale serve`, which forwards HTTPS to a loopback port. Anyone who knows
+//! the tunnel's address, and every process on this computer, can send these
+//! requests, so everything is untrusted input: five routes, bounded bodies,
+//! rate limits, and every message sealed or signed above the transport.
+
+mod relay;
+pub use relay::{RELAY, tunnel_id};
 
 use crate::approval::{Approver, Prompt, STANDING_HOURS};
 use crate::grants::Decision;
@@ -29,8 +34,8 @@ use vp_core::Failure;
 use vp_core::ipc::PasteMode;
 use vp_core::secret::Secret;
 use vp_phone::{
-    Choice, Commit, DaemonKey, Invite, Kind, Nonce, PairingId, Phone, Request, RequestId, Reveal,
-    SealedRequest, SignedAnswer,
+    Choice, Commit, DaemonKey, Invite, Kind, Nonce, PairingId, Phone, PushToken, Request,
+    RequestId, Reveal, SealedRequest, SignedAnswer,
 };
 use zeroize::Zeroizing;
 
@@ -59,6 +64,8 @@ pub trait PairingStore: Send + Sync + 'static {
     fn phones(&self) -> Result<Option<PhoneRecords>, Failure>;
     /// Seals `record` in the vault, or with `None` removes the pairing.
     fn set_phone(&self, pairing_id: &PairingId, record: Option<&[u8]>) -> Result<bool, Failure>;
+    /// This computer's relay tunnel secret; `None` while the vault is locked.
+    fn relay_secret(&self) -> Option<Zeroizing<[u8; 32]>>;
     /// Checks the master password, opening the vault if it is locked.
     fn confirm_password(&self, password: Secret) -> BoxFuture<'_, Result<(), Failure>>;
 }
@@ -70,6 +77,9 @@ impl<U: vp_native::Unlock> PairingStore for vp_native::NativeBackend<U> {
 
     fn set_phone(&self, pairing_id: &PairingId, record: Option<&[u8]>) -> Result<bool, Failure> {
         vp_native::NativeBackend::set_phone(self, pairing_id, record)
+    }
+    fn relay_secret(&self) -> Option<Zeroizing<[u8; 32]>> {
+        vp_native::NativeBackend::relay_secret(self)
     }
 
     fn confirm_password(&self, password: Secret) -> BoxFuture<'_, Result<(), Failure>> {
@@ -109,6 +119,14 @@ fn escape(text: &str) -> String {
 /// The page with the pairing QR code: self-contained, shown from memory like
 /// the Emergency Kit, never printed or written to a file.
 pub fn pairing_page(invite: &Invite, port: u16) -> Result<Zeroizing<String>, Failure> {
+    let endpoint = escape(&invite.endpoint);
+    let route = if invite.endpoint.starts_with(RELAY) {
+        "Your phone reaches this computer through the VisiPass relay, which carries only messages sealed for this pairing.".to_string()
+    } else {
+        format!(
+            "Your phone reaches this computer at <code>{endpoint}</code>, through Tailscale. Tailscale must be running on the phone, and this computer must forward HTTPS to VisiPass:<br>\n<code>tailscale serve --bg http://127.0.0.1:{port}</code>"
+        )
+    };
     let uri = invite.uri();
     let svg = Zeroizing::new(
         qrcode::QrCode::with_error_correction_level(uri.as_bytes(), qrcode::EcLevel::M)
@@ -119,7 +137,6 @@ pub fn pairing_page(invite: &Invite, port: u16) -> Result<Zeroizing<String>, Fai
             .build(),
     );
     let svg = svg.as_str();
-    let endpoint = escape(&invite.endpoint);
     Ok(Zeroizing::new(format!(
         r#"<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -138,17 +155,12 @@ pub fn pairing_page(invite: &Invite, port: u16) -> Result<Zeroizing<String>, Fai
 <p>In the VisiPass app on your phone, choose <b>Pair with a computer</b> and scan this code. It works once, for five minutes.</p>
 <div class="code">{svg}</div>
 <p>Then check that the six digits on your phone match the ones VisiPass shows on this computer.</p>
-<p><small>Your phone reaches this computer at <code>{endpoint}</code>, through Tailscale. Tailscale must be running on the phone, and this computer must forward HTTPS to VisiPass:<br>
-<code>tailscale serve --bg http://127.0.0.1:{port}</code></small></p>
+<p><small>{route}</small></p>
 <p><small>Close this page when you are done; it is deleted from memory in ten minutes.</small></p>
 </body></html>"#
     )))
 }
 
-/// This computer's Tailscale name, as `https://name.tailnet.ts.net`, from the
-/// `tailscale` program in the system directories (never PATH, which the caller
-/// sets). A wrong answer would only point the phone somewhere that cannot open
-/// its messages, but the person sees it on the pairing page all the same.
 /// What the phone calls this computer: its host name up to the first dot.
 pub fn computer_name() -> String {
     let mut buf = [0u8; 256];
@@ -171,6 +183,10 @@ pub fn computer_name() -> String {
     }
 }
 
+/// This computer's Tailscale name, as `https://name.tailnet.ts.net`, from the
+/// `tailscale` program in the system directories (never PATH, which the caller
+/// sets). A wrong answer would only point the phone somewhere that cannot open
+/// its messages, but the person sees it on the pairing page all the same.
 pub async fn tailscale_endpoint() -> Option<String> {
     let program = crate::approval::trusted_program("tailscale").or_else(|| {
         let app = std::path::PathBuf::from("/Applications/Tailscale.app/Contents/MacOS/Tailscale");
@@ -261,6 +277,12 @@ struct State {
 pub struct Phones {
     store: Box<dyn PairingStore>,
     port: u16,
+    /// The relay's address, `RELAY` but in tests.
+    relay: String,
+    /// The open tunnel's outgoing frames.
+    tunnel: Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>,
+    /// Woken when the tunnel may be wanted: a pairing window opened.
+    tunnel_wanted: Notify,
     state: Mutex<State>,
     /// Woken when a pairing window changes stage.
     changed: Notify,
@@ -278,9 +300,17 @@ fn refuse(status: u16, message: &str) -> Reply {
 impl Phones {
     /// `port` 0 picks a free one (tests).
     pub fn new(store: impl PairingStore, port: u16) -> Arc<Self> {
+        Self::with_relay(store, port, RELAY.into())
+    }
+
+    /// With another relay (tests).
+    pub fn with_relay(store: impl PairingStore, port: u16, relay: String) -> Arc<Self> {
         Arc::new(Self {
             store: Box::new(store),
             port,
+            relay,
+            tunnel: Mutex::default(),
+            tunnel_wanted: Notify::new(),
             state: Mutex::default(),
             changed: Notify::new(),
             listening: tokio::sync::Mutex::new(None),
@@ -411,6 +441,7 @@ impl Phones {
             ("POST", "/v1/pair/commit") => self.commit(body),
             ("POST", "/v1/pair/reveal") => self.reveal(body),
             ("POST", "/v1/answer") => self.answer(body),
+            ("POST", "/v1/push") => self.push_token(body),
             ("GET", path) => match path.strip_prefix("/v1/pending/").and_then(unhex::<16>) {
                 Some(pairing_id) => self.pending(&pairing_id),
                 None => refuse(404, "Not found"),
@@ -458,6 +489,7 @@ impl Phones {
             phone: None,
             attempts: 0,
         });
+        self.tunnel_wanted.notify_one();
         invite
     }
 
@@ -644,6 +676,7 @@ impl Phones {
         });
         let issued = now();
         let mut ids = Vec::new();
+        let mut notified = Vec::new();
         let mut state = self.state();
         for pairing in pairings {
             let request = Request::new(
@@ -660,6 +693,9 @@ impl Phones {
                 continue;
             };
             ids.push(request.request_id);
+            if !pairing.push_token.is_empty() {
+                notified.push(pairing.push_token.clone());
+            }
             state.pending.insert(
                 request.request_id,
                 Pending {
@@ -672,6 +708,9 @@ impl Phones {
             );
         }
         drop(state);
+        if !ids.is_empty() {
+            self.notify(&notified);
+        }
         (!ids.is_empty()).then(|| Posted {
             phones: self.clone(),
             ids,
@@ -774,6 +813,44 @@ impl Phones {
             value,
             phone: pairing.name.clone(),
         });
+        (200, Vec::new())
+    }
+}
+
+impl Phones {
+    /// The phone's APNs device token, kept in its sealed pairing record so
+    /// only this computer's unlocked visipassd can have it notified.
+    fn push_token(&self, body: &[u8]) -> Reply {
+        let Ok(sent) = PushToken::decode(body) else {
+            return refuse(400, "Not a push token");
+        };
+        if !self.within_rate(&sent.pairing_id) {
+            return refuse(429, "Too many requests");
+        }
+        let mut pairing = match self.pairings() {
+            Ok(Some(pairings)) => match pairings
+                .into_iter()
+                .find(|p| p.pairing_id == sent.pairing_id)
+            {
+                Some(pairing) => pairing,
+                None => return refuse(404, "This phone is not paired"),
+            },
+            Ok(None) => return refuse(423, "VisiPass is locked; unlock at the computer"),
+            Err(_) => return refuse(500, "VisiPass could not read its phones"),
+        };
+        let Ok(token) = sent.open(&pairing.kem_d, &pairing.kem_p) else {
+            return refuse(403, "The push token is not from this phone");
+        };
+        if pairing.push_token != token {
+            pairing.push_token = token;
+            if self
+                .store
+                .set_phone(&pairing.pairing_id, Some(&pairing.encode()))
+                .is_err()
+            {
+                return refuse(500, "VisiPass could not keep the push token");
+            }
+        }
         (200, Vec::new())
     }
 }

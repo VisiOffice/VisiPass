@@ -52,6 +52,10 @@ impl PairingStore for Vault {
         })
     }
 
+    fn relay_secret(&self) -> Option<Zeroizing<[u8; 32]>> {
+        (!*self.locked.lock().unwrap()).then(|| Zeroizing::new([0x11; 32]))
+    }
+
     fn confirm_password(&self, password: Secret) -> BoxFuture<'_, Result<(), Failure>> {
         Box::pin(async move {
             if password.expose() == "hunter2!" {
@@ -760,4 +764,261 @@ async fn a_phone_polling_too_fast_is_slowed() {
     assert!(statuses[..120].iter().all(|s| *s == 200));
     assert_eq!(statuses[124], 429);
     drop(phone);
+}
+
+// ---- The relay ------------------------------------------------------------------
+
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
+use futures_util::{SinkExt, StreamExt};
+use tokio_tungstenite::tungstenite::Message;
+
+type Socket = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
+
+/// visipassd's connection as the relay sees it: the path and bearer it
+/// connected with, and the socket.
+struct Connected {
+    path: String,
+    bearer: String,
+    socket: Socket,
+    pushes: Vec<String>,
+    next: u64,
+}
+
+impl Connected {
+    /// A phone's request passed down; visipassd's reply. Pushes that arrive
+    /// meanwhile are kept.
+    async fn ask(&mut self, method: &str, path: &str, body: &[u8]) -> (u16, Vec<u8>) {
+        self.next += 1;
+        let down = serde_json::json!({
+            "id": self.next, "method": method, "path": path, "body": STANDARD.encode(body),
+        });
+        self.socket
+            .send(Message::Text(down.to_string().into()))
+            .await
+            .unwrap();
+        loop {
+            let up = self.frame().await;
+            if let Some(push) = up["push"].as_str() {
+                self.pushes.push(push.into());
+                continue;
+            }
+            assert_eq!(up["id"], self.next);
+            return (
+                up["status"].as_u64().unwrap() as u16,
+                STANDARD.decode(up["body"].as_str().unwrap()).unwrap(),
+            );
+        }
+    }
+
+    async fn frame(&mut self) -> serde_json::Value {
+        loop {
+            let message = tokio::time::timeout(Duration::from_secs(5), self.socket.next())
+                .await
+                .expect("visipassd said nothing")
+                .unwrap()
+                .unwrap();
+            if let Message::Text(text) = message
+                && text.as_str() != "ping"
+            {
+                return serde_json::from_str(text.as_str()).unwrap();
+            }
+        }
+    }
+}
+
+/// A relay on loopback; each connection visipassd makes arrives on the channel.
+#[allow(clippy::result_large_err)] // tungstenite's handshake callback type
+async fn fake_relay() -> (String, tokio::sync::mpsc::UnboundedReceiver<Connected>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let seen = Arc::new(Mutex::new((String::new(), String::new())));
+            let record = seen.clone();
+            let socket = tokio_tungstenite::accept_hdr_async(
+                stream,
+                move |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                      response| {
+                    *record.lock().unwrap() = (
+                        request.uri().path().to_string(),
+                        request
+                            .headers()
+                            .get("authorization")
+                            .map(|v| v.to_str().unwrap().to_string())
+                            .unwrap_or_default(),
+                    );
+                    Ok(response)
+                },
+            )
+            .await
+            .unwrap();
+            let (path, bearer) = seen.lock().unwrap().clone();
+            let _ = sender.send(Connected {
+                path,
+                bearer,
+                socket,
+                pushes: vec![],
+                next: 0,
+            });
+        }
+    });
+    (url, receiver)
+}
+
+impl SoftPhone {
+    fn push_token(&self, invite: &Invite, token: &[u8]) -> Vec<u8> {
+        let kem_p = DaemonKey::from_bytes(&self.kem.to_bytes()).unwrap();
+        PushToken::seal(&kem_p, &invite.kem_d, &invite.pairing_id, token)
+            .unwrap()
+            .encode()
+    }
+}
+
+#[tokio::test]
+async fn a_phone_pairs_and_answers_through_the_relay() {
+    let (relay, mut connections) = fake_relay().await;
+    let vault = Vault::default();
+    let phones = Phones::with_relay(vault.clone(), 0, relay.clone());
+    tokio::spawn(phones.clone().keep_tunnel());
+
+    // No phone and no pairing: no tunnel.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), connections.recv())
+            .await
+            .is_err()
+    );
+
+    let endpoint = phones.relay_endpoint().unwrap();
+    let tunnel = vp_daemon::phones::tunnel_id(&[0x11; 32]);
+    assert_eq!(endpoint, format!("{relay}/t/{tunnel}"));
+    let invite = phones.open_window(endpoint, "desk".into());
+    let mut relay = connections.recv().await.unwrap();
+    // It proves the secret the tunnel's id is the hash of.
+    assert_eq!(relay.path, format!("/t/{tunnel}/connect"));
+    assert_eq!(relay.bearer, format!("Bearer {}", "11".repeat(32)));
+    assert!(phones.wait_for_tunnel(Duration::from_secs(1)).await);
+
+    // Pairing, through the tunnel.
+    let phone = SoftPhone::new("iPhone");
+    let (status, nonce) = relay
+        .ask("POST", "/v1/pair/commit", &phone.commit(&invite).encode())
+        .await;
+    assert_eq!(status, 200);
+    let nonce = Nonce::decode(&nonce).unwrap();
+    let (status, _) = relay
+        .ask("POST", "/v1/pair/reveal", &phone.reveal(&invite).encode())
+        .await;
+    assert_eq!(status, 200);
+    let (revealed, code) = phones.revealed(&invite.pairing_id).await.unwrap();
+    assert_eq!(
+        code,
+        pairing_code(&invite.pairing_id, &invite.kem_d, &phone.body(), &nonce.n_d)
+    );
+    phones.keep(&invite.pairing_id, &revealed).unwrap();
+
+    // The phone's device token, kept in the sealed record.
+    let token = [0x5a; 32];
+    let (status, _) = relay
+        .ask("POST", "/v1/push", &phone.push_token(&invite, &token))
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        phones.pairings().unwrap().unwrap()[0].push_token,
+        token.to_vec()
+    );
+
+    // A request: the relay is asked to notify that token, and nothing else.
+    let desktop = Desktop::new(Desk::Never);
+    let approver = WithPhones {
+        desktop,
+        phones: phones.clone(),
+    };
+    let asking = tokio::spawn(async move {
+        let decision = approver.ask(&prompt()).await;
+        (decision, approver.answered_by())
+    });
+    let push = relay.frame().await;
+    assert_eq!(push, serde_json::json!({ "push": "5a".repeat(32) }));
+
+    let path = format!("/v1/pending/{}", vp_daemon::phones::hex(&invite.pairing_id));
+    let (status, body) = relay.ask("GET", &path, &[]).await;
+    assert_eq!(status, 200);
+    let sealed = decode_pending(&body).unwrap().pop().unwrap();
+    let enc = <Kem as hpke::Kem>::EncappedKey::from_bytes(&sealed.sealed.enc).unwrap();
+    let sender = <Kem as hpke::Kem>::PublicKey::from_bytes(&invite.kem_d).unwrap();
+    let body = hpke::single_shot_open::<Aead, Kdf, Kem>(
+        &OpModeR::Auth(sender),
+        &phone.kem,
+        &enc,
+        &Request::info(&sealed.pairing_id),
+        &sealed.sealed.ciphertext,
+        &[],
+    )
+    .unwrap();
+    let request = Request::decode(&body).unwrap();
+    let answer = phone.answer(&invite, &request, &body, Choice::Once, None);
+    assert_eq!(relay.ask("POST", "/v1/answer", &answer).await.0, 200);
+    let (decision, by) = asking.await.unwrap();
+    assert_eq!(decision.unwrap(), Decision::Once);
+    assert_eq!(by.as_deref(), Some("iPhone"));
+
+    // The relay is held to the same routes as the loopback port.
+    assert_eq!(relay.ask("GET", "/", &[]).await.0, 404);
+    assert_eq!(relay.ask("DELETE", "/v1/answer", &[]).await.0, 404);
+}
+
+#[tokio::test]
+async fn only_the_paired_phone_sets_its_push_token() {
+    let s = setup().await;
+    let (phone, invite) = paired(&s, "phone").await;
+    let stranger = SoftPhone::new("stranger");
+    let (status, _) = http(
+        s.port,
+        "POST",
+        "/v1/push",
+        &stranger.push_token(&invite, &[1; 32]),
+    )
+    .await;
+    assert_eq!(status, 403);
+    assert!(
+        s.phones.pairings().unwrap().unwrap()[0]
+            .push_token
+            .is_empty()
+    );
+
+    assert_eq!(
+        http(
+            s.port,
+            "POST",
+            "/v1/push",
+            &phone.push_token(&invite, &[2; 32])
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        s.phones.pairings().unwrap().unwrap()[0].push_token,
+        vec![2; 32]
+    );
+    // Not paired here.
+    let other = Invite::new(
+        "https://desk.tail1234.ts.net".into(),
+        "desk".into(),
+        invite.kem_d,
+    );
+    assert_eq!(
+        http(
+            s.port,
+            "POST",
+            "/v1/push",
+            &phone.push_token(&other, &[3; 32])
+        )
+        .await
+        .0,
+        404
+    );
+    assert_eq!(http(s.port, "POST", "/v1/push", b"junk").await.0, 400);
 }

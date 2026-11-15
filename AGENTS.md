@@ -34,6 +34,8 @@ crates/vp-gui   visipass-prompt: GPUI approval window (layer-shell overlay on Wa
                    excluded from default-members, build with `cargo build -p vp-gui`
 skills/visipass    the agent skill; keep it in sync with the CLI
 site               visipass.app (Astro, Cloudflare Workers); its demos copy the prompt, masker and extension
+relay              relay.visipass.app (Cloudflare Worker, Durable Objects): carries phone approvals' sealed
+                   messages to visipassd's tunnel and sends the fixed push; stores nothing. `npm test` there
 ```
 
 ## Invariants
