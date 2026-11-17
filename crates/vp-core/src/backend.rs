@@ -118,6 +118,23 @@ pub trait Backend: Send + Sync + 'static {
         async { Err(Failure::new(NO_NATIVE)) }
     }
 
+    /// Turns phone unlock on for `days` after each master-password unlock
+    /// (`password` is the master password) or off.
+    fn native_phone_unlock(
+        &self,
+        _days: Option<u32>,
+        _password: Option<Secret>,
+    ) -> impl Future<Output = Result<(), Failure>> + Send {
+        async { Err(Failure::new(NO_NATIVE)) }
+    }
+
+    /// Unlocks with the master password typed in the person's own terminal
+    /// (`vp unlock`); an unlocked vault just checks it. Either way phone
+    /// unlock's days start again.
+    fn native_unlock(&self, _password: Secret) -> impl Future<Output = Result<(), Failure>> + Send {
+        async { Err(Failure::new(NO_NATIVE)) }
+    }
+
     /// Copies 1Password vaults (all, or the one named) into the native vault.
     fn native_import(
         &self,
@@ -225,6 +242,10 @@ pub struct NativeStatus {
     pub quick_unlock: Option<std::time::Duration>,
     /// Time left in the open quick-unlock window.
     pub quick_unlock_remaining: Option<std::time::Duration>,
+    /// Phone unlock's days after each master-password unlock, when it is on.
+    pub phone_unlock_days: Option<u32>,
+    /// Until when a paired phone may unlock (seconds since the Unix epoch).
+    pub phone_unlock_until: Option<u64>,
 }
 
 /// When the native vault locks by itself, besides sleep and `vp lock`.

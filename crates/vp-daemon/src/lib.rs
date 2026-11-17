@@ -1221,6 +1221,12 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                             "minutesLeft": status.quick_unlock_remaining.map(|r| r.as_secs() / 60),
                         });
                     }
+                    if let Some(days) = status.phone_unlock_days {
+                        vault["phoneUnlock"] = json!({
+                            "days": days,
+                            "until": status.phone_unlock_until.map(vp_core::time::rfc3339),
+                        });
+                    }
                     vault
                 }),
             })),
@@ -1324,6 +1330,96 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 }))
             }
             Request::PhonePair { endpoint } => self.pair_phone(requester, endpoint).await,
+            Request::PhoneUnlock { days, off } => {
+                let Some(status) = self.backend.native_status().filter(|s| s.exists) else {
+                    return Err(Failure::new(
+                        "There is no VisiPass vault yet. Run `vp init` to create one",
+                    ));
+                };
+                let shown = |days: Option<u32>, until: Option<u64>| {
+                    json!({
+                        "phoneUnlock": days.is_some(),
+                        "days": days,
+                        "until": until.map(vp_core::time::rfc3339),
+                    })
+                };
+                if days.is_none() && !off {
+                    return Ok(shown(status.phone_unlock_days, status.phone_unlock_until));
+                }
+                // What unlocks the vault is the human's choice, never an agent's.
+                if requester.agent.is_some() {
+                    return Err(Failure::new(
+                        "Only the human can change phone unlock: ask them to run `vp phone unlock` in their own terminal",
+                    ));
+                }
+                if off {
+                    self.backend.native_phone_unlock(None, None).await?;
+                    return Ok(shown(None, None));
+                }
+                let days = days.unwrap_or(7);
+                if !(1..=vp_native::PHONE_UNLOCK_MAX_DAYS).contains(&days) {
+                    return Err(Failure::new(format!(
+                        "Choose 1 to {} days",
+                        vp_native::PHONE_UNLOCK_MAX_DAYS
+                    )));
+                }
+                let _turn = self.approvals.lock().await;
+                let purpose = format!(
+                    "let your paired phones unlock VisiPass with Face ID, for {days} day{} after each time you type the master password",
+                    if days == 1 { "" } else { "s" }
+                );
+                let prompt = Prompt {
+                    who: "VisiPass".into(),
+                    action: purpose.clone(),
+                    details: vec![],
+                    secrets: vec![],
+                    purpose: None,
+                    timeout_secs: approval::TIMEOUT.as_secs(),
+                    every_time: false,
+                    paste: Some(vp_core::ipc::PasteSpec {
+                        mode: PasteMode::Unlock {
+                            retry: false,
+                            purpose: Some(purpose),
+                        },
+                        ..Default::default()
+                    }),
+                };
+                let password = self
+                    .approver
+                    .paste(&prompt)
+                    .await?
+                    .ok_or_else(|| Failure::new("Turning on phone unlock was cancelled"))?;
+                self.backend
+                    .native_phone_unlock(Some(days), Some(password))
+                    .await?;
+                let until = self
+                    .backend
+                    .native_status()
+                    .and_then(|s| s.phone_unlock_until);
+                let mut result = shown(Some(days), until);
+                result["note"] = json!(
+                    "When VisiPass locks, your paired phones get the way back in. Unlock with Face ID on the phone or the master password here, whichever comes first. A restart, sleep or `vp lock --full` needs the master password: here, or `vp unlock` over SSH"
+                );
+                Ok(result)
+            }
+            Request::Unlock { password } => {
+                // Typed in a terminal a person is at, never one an agent drives:
+                // a password typed where an agent reads the screen is the agent's.
+                if requester.agent.is_some() || !requester.seated {
+                    return Err(Failure::new(
+                        "Run `vp unlock` yourself, in your own terminal (SSH is fine); agents cannot unlock VisiPass",
+                    ));
+                }
+                self.backend.native_unlock(password).await?;
+                let until = self
+                    .backend
+                    .native_status()
+                    .and_then(|s| s.phone_unlock_until);
+                Ok(json!({
+                    "unlocked": true,
+                    "phoneUnlockUntil": until.map(vp_core::time::rfc3339),
+                }))
+            }
             Request::Phones => {
                 let phones = self.phones()?;
                 let pairings = phones.pairings()?.ok_or_else(|| {

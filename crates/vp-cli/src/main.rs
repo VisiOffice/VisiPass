@@ -88,6 +88,25 @@ enum PhoneCommands {
     List,
     /// Unpair a phone, by its name or ID from `vp phone list`
     Remove { phone: String },
+    /// Let your paired phones unlock this computer's vault with Face ID, alongside
+    /// the master password, for some days after each time you type it. With no
+    /// subcommand, shows it. Agents cannot change it
+    Unlock {
+        #[command(subcommand)]
+        command: Option<PhoneUnlockCommands>,
+    },
+}
+
+#[derive(Subcommand)]
+enum PhoneUnlockCommands {
+    /// Turn it on. Asks for the master password, which starts the first stretch of days
+    On {
+        /// Days a phone may unlock after each master-password unlock, from 1 to 30
+        #[arg(long, default_value_t = 7, value_parser = clap::value_parser!(u32).range(1..=30))]
+        days: u32,
+    },
+    /// Turn it off: the next unlock needs the master password
+    Off,
 }
 
 #[derive(Subcommand)]
@@ -274,6 +293,9 @@ enum Commands {
     Status,
     /// Create your VisiPass vault. The master password is typed in the VisiPass window, never here
     Init,
+    /// Unlock with the master password, typed here in your own terminal (SSH is
+    /// fine): after a restart, or when phone unlock's days are over. Agents cannot
+    Unlock,
     /// Lock the VisiPass vault now: its keys are erased from memory
     Lock {
         /// Also end quick unlock's window, so the next unlock needs the master password
@@ -490,6 +512,43 @@ enum GrantCommands {
 // mistyped --env may hold a pasted secret.
 fn assignments(inputs: &[String]) -> Result<Vec<Assignment>, Failure> {
     inputs.iter().map(|i| env::parse_assignment(i)).collect()
+}
+
+/// Reads a password from the terminal with echo off; never from argv or a pipe.
+fn read_password(prompt: &str) -> Result<Secret, Failure> {
+    use std::io::BufRead;
+    use std::os::fd::AsRawFd;
+    let no_terminal =
+        || Failure::new("`vp unlock` asks in a terminal; run it yourself in one (SSH is fine)");
+    let tty = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .map_err(|_| no_terminal())?;
+    let fd = tty.as_raw_fd();
+    let mut original: libc::termios = unsafe { std::mem::zeroed() };
+    if unsafe { libc::tcgetattr(fd, &mut original) } != 0 {
+        return Err(no_terminal());
+    }
+    let mut silent = original;
+    silent.c_lflag &= !libc::ECHO;
+    let mut out = &tty;
+    let _ = out.write_all(prompt.as_bytes()).and_then(|_| out.flush());
+    unsafe { libc::tcsetattr(fd, libc::TCSANOW, &silent) };
+    let mut line = String::new();
+    let read = std::io::BufReader::new(&tty).read_line(&mut line);
+    unsafe { libc::tcsetattr(fd, libc::TCSANOW, &original) };
+    let _ = out.write_all(b"\n");
+    while line.ends_with(['\r', '\n']) {
+        line.pop();
+    }
+    // Moved, not copied, so the only copy is the one Secret erases.
+    let password = Secret::new(line);
+    read.map_err(|_| no_terminal())?;
+    if password.is_blank() {
+        return Err(Failure::new("No password typed; VisiPass stays locked"));
+    }
+    Ok(password)
 }
 
 fn print(value: &Value) -> Result<i32, Failure> {
@@ -904,6 +963,10 @@ fn execute(command: Commands) -> Result<i32, Failure> {
             Err(_) => print(&serde_json::json!({ "running": false })),
         },
         Commands::Init => print(&client::call(Request::InitVault)?),
+        Commands::Unlock => {
+            let password = read_password("VisiPass master password: ")?;
+            print(&client::call(Request::Unlock { password })?)
+        }
         Commands::Lock { full } => match client::connect(false) {
             Ok(stream) => print(&client::call_with(stream, Request::LockVault { full })?),
             Err(_) => print(&serde_json::json!({ "locked": true, "full": true })),
@@ -947,6 +1010,20 @@ fn execute(command: Commands) -> Result<i32, Failure> {
             PhoneCommands::Pair { endpoint } => Request::PhonePair { endpoint },
             PhoneCommands::List => Request::Phones,
             PhoneCommands::Remove { phone } => Request::PhoneRemove { phone },
+            PhoneCommands::Unlock { command } => match command {
+                None => Request::PhoneUnlock {
+                    days: None,
+                    off: false,
+                },
+                Some(PhoneUnlockCommands::On { days }) => Request::PhoneUnlock {
+                    days: Some(days),
+                    off: false,
+                },
+                Some(PhoneUnlockCommands::Off) => Request::PhoneUnlock {
+                    days: None,
+                    off: true,
+                },
+            },
         })?),
         Commands::QuickUnlock(command) => {
             let hours = match command {

@@ -704,8 +704,9 @@ measured, mobile Safari especially, before the web app is promised.
 ### 11.4 Phone approvals
 
 A person who drives agents from a phone is away from the computer where the approval window
-opens. A phone they paired gets the same question and may answer it. The phone approves; it
-never holds the vault, a vault key or a stored value, and never sees the master password. Built
+opens. A phone they paired gets the same question and may answer it. The phone approves, and
+with phone unlock on it unlocks (below); it never holds the vault or a stored value, and never
+sees the master password. Built
 on the computer's side (`crates/vp-phone`, `vp-daemon/src/phones.rs`); not yet reviewed (§13).
 
 **Keys.** Per pairing, the phone holds `sign_P` (ECDSA P-256, Secure Enclave, Face ID for every
@@ -718,7 +719,8 @@ with XChaCha20-Poly1305 under `phones_key = HKDF-Expand(AK, AD("VisiPass phones"
 ak_generation), 32)`, with `AD("VisiPass phone pairing", 1, account_id, pairing_id)`, and kept in
 this device's state in the account row, which the account manifest covers (§7.4). It is not
 synced. A record written by anything but the unlocked daemon fails the manifest, so nothing an
-agent can write adds a phone; phones are asked only while the vault is unlocked.
+agent can write adds a phone. Phones are asked while the vault is unlocked, or after a lock that
+handed them a way back in (Unlocking).
 
 **Pairing** (`vp phone pair`, refused to agents, after the master password):
 
@@ -745,8 +747,8 @@ could not choose, or commits second and cancels the pairing in the open.
 issued_at + 120 s}` to each paired phone with HPKE Auth mode (sender `kem_D`), so only that
 pairing's daemon can ask the phone anything. Choices are `deny`, `once`, `task` and `hours`;
 "always" is offered only at the computer, and every-time prompts offer `deny` and `once`.
-Phones are asked to approve requests and to paste a new secret an agent asked for (`vp
-request`); never to unlock, for the master password, keys, or to pair.
+Phones are asked to approve requests, to paste a new secret an agent asked for (`vp request`),
+and with phone unlock on to unlock; never for the master password, keys, or to pair.
 
 **Answering.** The phone signs `AD("VisiPass phone answer", 1, pairing_id, SHA-256(answer))`
 where `answer = {request_id, request_hash = SHA-256(request), choice, value?}`; a pasted value is
@@ -765,7 +767,8 @@ not what they are. They are reached in one of two ways:
 
 - *The relay* (the default; `relay/`, `vp-daemon/src/phones/relay.rs`). visipassd holds a
   WebSocket to `relay.visipass.app/t/<tunnel_id>`, a Cloudflare Worker with one Durable Object
-  per tunnel, while the unlocked vault has a phone or a pairing window is open. `tunnel_secret =
+  per tunnel, while the unlocked vault has a phone, a pairing window is open, or a lock the
+  phones can open is held (Unlocking). `tunnel_secret =
   HKDF-Expand(HKDF-Expand(AK, AD("VisiPass relay tunnel", 1, account_id, ak_generation)),
   AD("VisiPass relay tunnel secret", 1, device_id))` and `tunnel_id = SHA-256(tunnel_secret)[..16]`;
   visipassd connects with the secret, and the relay accepts it only if it hashes to the id, so
@@ -787,7 +790,36 @@ notification ("An agent is waiting for you": no request, agent or computer in it
 that token, at most six a minute. The app fetches and opens requests only once the phone is
 unlocked. The relay holds the APNs key and never stores a token.
 
-Not yet: quick unlock from the phone within an open window (§4.3).
+**Unlocking** (`vp phone unlock on [--days N]`, refused to agents, after the master password; 1
+to 30 days, 7 by default; the setting is tagged under the account's keys like auto-lock, so one
+written by anything else is ignored). A person driving agents from elsewhere leaves the computer
+idle, so it locks, and every request then waits on a master-password window nobody sees.
+
+- *As the vault locks* (idle, screen lock, `vp lock`), while AK is still in memory and if the
+  last master-password unlock was under N days ago, visipassd makes a random `K`, a 16-byte
+  `lock_id` and a one-use HPKE key `kem_L`. It keeps `wrapped = wrap_for_device(K, AD("VisiPass
+  phone unlock wrap", lock_id))` (AK under `K`, bound to the account and AK generation, as the
+  iOS device key is) and, per phone, `held = HPKE Auth(sender kem_D, recipient kem_P, info
+  AD("VisiPass phone unlock key", pairing_id), {lock_id, K, kem_L, until})`, where `until` is the
+  last master-password unlock plus N days. Then it erases `K`, AK and every key derived from it,
+  `kem_D` included. All of it is memory only (§6.1: not dumpable, no core files). After the lock
+  the computer holds nothing that unlocks without a phone's Secure Enclave and its owner's face.
+- *When a request needs the vault*, visipassd shows the master-password window (or quick
+  unlock's check) and, at once, seals an `unlock` request with HPKE Auth from `kem_L` to each
+  phone, beside its `held`. The phone opens `held` with `kem_P` first: that proves it came from
+  this pairing's daemon and names `kem_L`, the only sender it then accepts. If an approval is
+  what is waiting, the request carries its prompt and choices, and one answer covers the unlock
+  and the approval. The phone checks `until` and shows the request with Deny first.
+- *The answer* is signed by `sign_P` (Face ID) as any other, with `K` sealed to `kem_L` (HPKE
+  Base, info `AD("VisiPass phone unlock answer", pairing_id, request_hash)`). visipassd makes
+  the usual checks, opens `K`, unwraps AK and opens the vault with every check a device-key
+  unlock makes. A wrong `K` is no answer; Deny cancels. The first answer, phone or window, wins.
+- *Limits.* It is never a master-password unlock: the days count from the last one, typed at
+  the computer or with `vp unlock` (the person's own terminal, SSH included; refused unless a
+  person's terminal and no agent is above it). A restart, sleep or `vp lock --full` leaves
+  nothing to unlock with. `sign_P` is `.biometryCurrentSet`, so the phone's passcode never
+  unlocks a computer. Within an open quick-unlock window (§4.3) AK is still in memory, and the
+  phone stands in for the presence check.
 
 ## 12. Questions for reviewers
 

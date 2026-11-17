@@ -2446,3 +2446,106 @@ fn pairing_a_phone_needs_the_native_vault_and_an_https_endpoint() {
         text(&refused.stderr)
     );
 }
+
+/// One request straight to the socket, as `vp` would send it; the reply line.
+fn raw(world: &World, request: serde_json::Value) -> String {
+    use std::io::{BufRead, BufReader};
+    let stream = std::os::unix::net::UnixStream::connect(world.path("vp.sock")).unwrap();
+    let line = serde_json::json!({"version": 1, "request": request}).to_string() + "\n";
+    (&stream).write_all(line.as_bytes()).unwrap();
+    let mut reply = String::new();
+    BufReader::new(&stream).read_line(&mut reply).unwrap();
+    reply
+}
+
+#[test]
+fn phone_unlock_is_the_humans_and_vp_unlock_takes_the_password_from_their_terminal() {
+    let world = World::native(&[
+        // init: password, confirmation, Secret Key window
+        Decision::Once,
+        Decision::Once,
+        Decision::Deny,
+        // phone unlock on: the master password
+        Decision::Once,
+    ]);
+    clean(&world.vp(&["init"], None));
+    assert_eq!(
+        json(&world.vp(&["phone", "unlock"], None))["phoneUnlock"],
+        false
+    );
+
+    let on = world.vp(&["phone", "unlock", "on", "--days", "3"], None);
+    clean(&on);
+    let on = json(&on);
+    assert_eq!(on["phoneUnlock"], true);
+    assert_eq!(on["days"], 3);
+    assert!(on["until"].is_string(), "{on}");
+    assert_eq!(world.approver.asked(), 4);
+    let status = json(&world.vp(&["status"], None));
+    assert_eq!(status["vault"]["phoneUnlock"]["days"], 3);
+    let too_many = world.vp(&["phone", "unlock", "on", "--days", "31"], None);
+    assert!(!too_many.status.success());
+
+    // `vp unlock`, as the human typed it in their own terminal.
+    clean(&world.vp(&["lock"], None));
+    assert_eq!(
+        json(&world.vp(&["status"], None))["vault"]["unlocked"],
+        false
+    );
+    let wrong = raw(
+        &world,
+        serde_json::json!({"type": "unlock", "password": "not it"}),
+    );
+    assert!(wrong.contains("Wrong master password"), "{wrong}");
+    let unlocked = raw(
+        &world,
+        serde_json::json!({"type": "unlock", "password": NEW_KEY}),
+    );
+    assert!(unlocked.contains("\"unlocked\":true"), "{unlocked}");
+    clean_text(&unlocked);
+    assert_eq!(
+        json(&world.vp(&["status"], None))["vault"]["unlocked"],
+        true
+    );
+    assert_eq!(
+        world.approver.asked(),
+        4,
+        "no window: typed in the terminal"
+    );
+
+    assert_eq!(
+        json(&world.vp(&["phone", "unlock", "off"], None))["phoneUnlock"],
+        false
+    );
+    let log = std::fs::read_to_string(world.path("state/access.log")).unwrap();
+    assert!(log.contains("vault-unlock"));
+    assert!(!log.contains(NEW_KEY), "the password is never logged");
+    world.assert_contained();
+}
+
+#[test]
+fn an_agent_cannot_turn_on_phone_unlock_or_unlock_the_vault() {
+    let world = World::native_agent(&[Decision::Once, Decision::Once, Decision::Deny]);
+    clean(&world.vp(&["init"], None));
+    let asked = world.approver.asked();
+    let on = world.vp(&["phone", "unlock", "on"], None);
+    assert!(!on.status.success());
+    assert!(
+        text(&on.stderr).contains("Only the human"),
+        "{}",
+        text(&on.stderr)
+    );
+    assert_eq!(world.approver.asked(), asked, "not even a password window");
+
+    clean(&world.vp(&["lock"], None));
+    let refused = raw(
+        &world,
+        serde_json::json!({"type": "unlock", "password": NEW_KEY}),
+    );
+    assert!(refused.contains("Run `vp unlock` yourself"), "{refused}");
+    clean_text(&refused);
+    assert_eq!(
+        json(&world.vp(&["status"], None))["vault"]["unlocked"],
+        false
+    );
+}

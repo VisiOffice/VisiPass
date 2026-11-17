@@ -420,6 +420,21 @@ pub enum Request {
     PhoneRemove {
         phone: String,
     },
+    /// Shows (no fields) or changes whether paired phones may unlock this
+    /// computer's vault with Face ID, for `days` after each master-password
+    /// unlock. Refused to agents; turning it on asks for the master password.
+    PhoneUnlock {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        days: Option<u32>,
+        #[serde(default)]
+        off: bool,
+    },
+    /// Unlocks with the master password the person typed in their own
+    /// terminal (SSH included). Refused unless a person's terminal, and no
+    /// agent, is above the command.
+    Unlock {
+        password: Secret,
+    },
     /// Shows (no fields) or changes when the native vault locks by itself.
     /// Only the human changes it; keeping the vault open longer asks for the
     /// master password in the VisiPass window.
@@ -672,6 +687,8 @@ impl Request {
             Request::AutoLock { .. } => "vault-auto-lock",
             Request::EmergencyKit => "vault-emergency-kit",
             Request::PhonePair { .. } => "phone-pair",
+            Request::PhoneUnlock { .. } => "phone-unlock",
+            Request::Unlock { .. } => "vault-unlock",
             Request::Phones => "phones",
             Request::PhoneRemove { .. } => "phone-remove",
             Request::ImportOp { .. } => "vault-import",

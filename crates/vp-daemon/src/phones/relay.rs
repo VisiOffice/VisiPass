@@ -9,7 +9,7 @@
 //! notification to a phone's device token, which it keeps in the sealed
 //! pairing record; the relay stores none.
 
-use super::{Phones, hex, refuse};
+use super::{Phones, hex, now, refuse};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use futures_util::{SinkExt, StreamExt};
@@ -88,7 +88,23 @@ impl Phones {
     }
 
     fn wants_tunnel(&self) -> bool {
-        self.state().window.is_some() || matches!(self.pairings(), Ok(Some(p)) if !p.is_empty())
+        let locked = {
+            let state = self.state();
+            state.window.is_some() || state.locked.as_ref().is_some_and(|l| now() < l.until)
+        };
+        locked || matches!(self.pairings(), Ok(Some(p)) if !p.is_empty())
+    }
+
+    /// The tunnel's secret: from the open vault, or kept with a lock the
+    /// phones can open.
+    fn tunnel_secret(&self) -> Option<Zeroizing<[u8; 32]>> {
+        self.store.relay_secret().or_else(|| {
+            self.state()
+                .locked
+                .as_ref()
+                .filter(|l| now() < l.until)
+                .map(|l| l.relay_secret.clone())
+        })
     }
 
     /// Keeps the tunnel open while it is wanted, reconnecting with backoff.
@@ -97,7 +113,7 @@ impl Phones {
         let mut failures = 0u32;
         loop {
             let secret = if self.wants_tunnel() {
-                self.store.relay_secret()
+                self.tunnel_secret()
             } else {
                 None
             };

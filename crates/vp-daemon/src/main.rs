@@ -2,7 +2,7 @@ use std::io::IsTerminal;
 use std::sync::Arc;
 use tokio::net::UnixListener;
 use vp_daemon::approval::Desktop;
-use vp_daemon::phones::{Phones, WithPhones};
+use vp_daemon::phones::{Phones, WithPhoneUnlock, WithPhones};
 use vp_daemon::routed::{Routed, WindowUnlock};
 use vp_daemon::{Daemon, paths};
 use vp_native::{NativeBackend, Paths};
@@ -114,10 +114,20 @@ async fn run(approver: Desktop) {
     let exe =
         std::env::current_exe().unwrap_or_else(|_| fail("could not locate its own executable"));
     // VisiPass's own vault once `vp init` has made one; 1Password until then.
-    let native = NativeBackend::new(Paths::standard(), WindowUnlock(approver.clone()));
+    // The phones read their records from the vault, and with phone unlock on
+    // the vault hands them a way back in as it locks: each needs the other.
+    let phone_slot = Arc::new(std::sync::OnceLock::new());
+    let native = NativeBackend::new(
+        Paths::standard(),
+        WithPhoneUnlock {
+            unlock: WindowUnlock(approver.clone()),
+            phones: phone_slot.clone(),
+        },
+    );
     tokio::spawn(vp_daemon::session::watch(native.clone()));
-    // Phones are asked alongside the desktop; unlocking stays at the computer.
+    // Phones are asked alongside the desktop, and may unlock once allowed to.
     let phones = Phones::new(native.clone(), vp_daemon::phones::PORT);
+    let _ = phone_slot.set(phones.clone());
     tokio::spawn(listen_for_phones(phones.clone()));
     tokio::spawn(phones.clone().keep_tunnel());
     let backend = Routed {
