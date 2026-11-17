@@ -38,6 +38,7 @@ fn main() {
         .with_assets(vp_gui::assets::Assets)
         .run(move |cx: &mut App| {
             vp_gui::text_input::bind_keys(cx);
+            keymap::macos_menu(cx);
             let keymap = std::rc::Rc::new(keymap::load(cx));
             if quick_mode {
                 open_quick(theme.clone(), client.clone(), cx);
