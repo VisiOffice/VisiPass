@@ -1289,6 +1289,41 @@ fn creating_a_vault_asks_once_and_never_makes_two() {
 }
 
 #[test]
+fn an_agent_creates_a_vault_over_mcp_after_asking() {
+    let world = World::new(&[Decision::Once]);
+    let call = |id: u32, name: &str| serde_json::json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": "create_vault", "arguments": {"name": name, "purpose": "VisiCasts production"}}});
+    let input: String = [call(1, "VisiCasts"), call(2, "visicasts")]
+        .iter()
+        .map(|m| m.to_string() + "\n")
+        .collect();
+    let out = world.vp(&["mcp"], Some(&input));
+    clean(&out);
+    let replies: Vec<serde_json::Value> = text(&out.stdout)
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(replies[0]["result"]["isError"], false, "{}", replies[0]);
+    assert!(
+        replies[0]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("\"name\": \"VisiCasts\"")
+    );
+    assert_eq!(replies[1]["result"]["isError"], true);
+    assert!(
+        replies[1]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("already exists")
+    );
+    assert_eq!(
+        world.approver.asked(),
+        1,
+        "the human approved the one vault"
+    );
+}
+
+#[test]
 fn a_vault_created_in_visipass_takes_new_items() {
     let world = World::native(&[
         // init: password, confirmation, Secret Key window
