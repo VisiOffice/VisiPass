@@ -3,7 +3,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 import Nav from '../components/Nav.astro';
 import Footer from '../components/Footer.astro';
 
-const updated = 'November 2, 2026';
+const updated = 'November 17, 2026';
 const repo = 'https://github.com/VisiOffice/VisiPass';
 ---
 
@@ -77,6 +77,32 @@ const repo = 'https://github.com/VisiOffice/VisiPass';
           <strong>The access log</strong> of what was requested and approved stays on your computer.
         </li>
       </ul>
+
+      <h2>The iPhone app</h2>
+      <ul>
+        <li>
+          <strong>Your vault</strong> comes to the phone from the sync folder your computers already use. Signing in to
+          Dropbox gives VisiPass its own app folder there, and nothing else in your Dropbox. The files stay encrypted;
+          the keys that open them stay in the phone's Keychain.
+        </li>
+        <li>
+          <strong>Face ID</strong> is handled by iOS. VisiPass learns only whether it succeeded, never anything about
+          your face.
+        </li>
+        <li>
+          <strong>The camera</strong> is used only to scan the code <code>vp phone pair</code> shows. The image is
+          read on the phone and not kept or sent.
+        </li>
+        <li>
+          <strong>AutoFill</strong> fills passwords and codes from the vault on the phone, for the app or site you are
+          in.
+        </li>
+        <li>
+          <strong>Approvals</strong> pass directly between the phone and the computers you paired it with. Each
+          request and answer is encrypted for that pairing, so nothing in between can read it.
+        </li>
+      </ul>
+      <p>The app has no analytics or tracking, and VisiOffice receives nothing from it.</p>
 
       <h2>Coding agents</h2>
       <p>
