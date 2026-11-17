@@ -646,18 +646,45 @@ end run"#;
     }
 }
 
+/// Where a page waits to be opened. Linux: `$XDG_RUNTIME_DIR`, in memory.
+#[cfg(not(target_os = "macos"))]
+fn page_dir() -> Result<PathBuf, Failure> {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            Failure::new("No XDG_RUNTIME_DIR, so there is nowhere in memory to put the page")
+        })
+}
+
+/// macOS has no memory-backed folder: the user's private temporary folder,
+/// asked of the system (not `$TMPDIR`, which a caller could set).
+#[cfg(target_os = "macos")]
+fn page_dir() -> Result<PathBuf, Failure> {
+    use std::os::unix::ffi::OsStringExt;
+    let mut buf = vec![0u8; 1024];
+    let n = unsafe {
+        libc::confstr(
+            libc::_CS_DARWIN_USER_TEMP_DIR,
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+        )
+    };
+    if n == 0 || n > buf.len() {
+        return Err(Failure::new("Could not find a private place for the page"));
+    }
+    buf.truncate(n - 1);
+    Ok(PathBuf::from(std::ffi::OsString::from_vec(buf)))
+}
+
 impl Approver for Desktop {
-    /// Writes the page under `$XDG_RUNTIME_DIR` (memory, never disk), opens it
-    /// with `xdg-open` and deletes it after [`PAGE_LIFETIME`].
+    /// Writes the page under `$XDG_RUNTIME_DIR` (memory, never disk; on macOS,
+    /// which has none, the user's private temporary folder), opens it in the
+    /// browser and deletes it after [`PAGE_LIFETIME`].
     async fn show_page(&self, html: &str) -> Result<(), Failure> {
         use std::io::Write as _;
         use std::os::unix::fs::OpenOptionsExt;
-        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
-            .filter(|v| !v.is_empty())
-            .ok_or_else(|| {
-                Failure::new("No XDG_RUNTIME_DIR, so there is nowhere in memory to put the page")
-            })?;
-        let dir = PathBuf::from(runtime).join("visipass");
+        let dir = page_dir()?.join("visipass");
         crate::paths::private_dir(&dir)
             .map_err(|_| Failure::new("Could not prepare a place for the page"))?;
         let path = dir.join(format!("emergency-kit-{}.html", vp_native::new_id()));
@@ -671,7 +698,13 @@ impl Approver for Desktop {
             let _ = std::fs::remove_file(&path);
             return Err(Failure::new("Could not write the page"));
         }
-        let opened = trusted_program("xdg-open").and_then(|program| {
+        // macOS: `open`, part of the system under System Integrity Protection.
+        let opener = if cfg!(target_os = "macos") {
+            Some(PathBuf::from("/usr/bin/open"))
+        } else {
+            trusted_program("xdg-open")
+        };
+        let opened = opener.and_then(|program| {
             let mut child = tokio::process::Command::new(program)
                 .arg(&path)
                 .stdin(Stdio::null())
@@ -691,9 +724,11 @@ impl Approver for Desktop {
             Some(_) => Ok(()),
             None => {
                 let _ = std::fs::remove_file(&path);
-                Err(Failure::new(
-                    "Could not open a browser (xdg-open is missing)",
-                ))
+                Err(Failure::new(if cfg!(target_os = "macos") {
+                    "Could not open a browser"
+                } else {
+                    "Could not open a browser (xdg-open is missing)"
+                }))
             }
         }
     }
