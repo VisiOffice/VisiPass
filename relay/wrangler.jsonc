@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // The phone-approvals relay (crypto §11.4): carries sealed messages between
+  // a paired phone and visipassd, and sends the fixed notification.
+  "name": "visipass-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "routes": [{ "pattern": "relay.visipass.app", "custom_domain": true }],
+  "durable_objects": {
+    "bindings": [{ "name": "TUNNEL", "class_name": "Tunnel" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Tunnel"] }],
+  "vars": { "APNS_TOPIC": "app.visipass.ios" }
+  // Secrets, set with `wrangler secret put`: APNS_KEY (the .p8 file),
+  // APNS_KEY_ID, APNS_TEAM_ID.
+}

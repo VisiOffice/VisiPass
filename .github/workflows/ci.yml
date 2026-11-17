@@ -32,6 +32,25 @@ jobs:
         # Never touches real 1Password, the clipboard or a display.
         run: cargo test
 
+  relay:
+    # The phone-approvals relay, in the Workers runtime (Miniflare).
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: relay
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: relay/package-lock.json
+      - run: npm ci
+      - name: Type-check
+        run: npx tsc --noEmit
+      - name: Test
+        run: npm test
+
   prompt:
     # The GPUI approval window; slow, so it only has to compile.
     runs-on: ubuntu-latest

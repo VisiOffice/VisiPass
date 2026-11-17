@@ -1270,21 +1270,26 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
             ));
         }
         let phones = self.phones()?.clone();
+        // With no endpoint, the phone reaches this computer through the relay,
+        // whose address needs the unlocked vault: it is found below.
         let endpoint = match endpoint {
+            Some(endpoint) if endpoint.trim() == "tailscale" => {
+                Some(phones::tailscale_endpoint().await.ok_or_else(|| {
+                    Failure::new(
+                        "Could not find this computer's Tailscale name. Start Tailscale, or pass the address your phone reaches this computer at: `vp phone pair --endpoint https://...`",
+                    )
+                })?)
+            }
             Some(endpoint) => {
                 let endpoint = endpoint.trim().trim_end_matches('/').to_string();
                 if !endpoint.starts_with("https://") || endpoint.len() > 256 {
                     return Err(Failure::new(
-                        "The endpoint must be an https:// address the phone can reach",
+                        "The endpoint must be an https:// address the phone can reach, or `tailscale`",
                     ));
                 }
-                endpoint
+                Some(endpoint)
             }
-            None => phones::tailscale_endpoint().await.ok_or_else(|| {
-                Failure::new(
-                    "Could not find this computer's Tailscale name. Start Tailscale, or pass the address your phone reaches this computer at: `vp phone pair --endpoint https://...`",
-                )
-            })?,
+            None => None,
         };
         {
             let _turn = self.approvals.lock().await;
@@ -1314,8 +1319,20 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
             phones.confirm_password(password).await?;
         }
         let port = phones.listen().await?;
-        let invite = phones.open_window(endpoint.clone());
+        let via_relay = endpoint.is_none();
+        let endpoint = match endpoint {
+            Some(endpoint) => endpoint,
+            None => phones
+                .relay_endpoint()
+                .ok_or_else(|| Failure::new("VisiPass is locked"))?,
+        };
+        let invite = phones.open_window(endpoint.clone(), phones::computer_name());
         let result = async {
+            if via_relay && !phones.wait_for_tunnel(std::time::Duration::from_secs(15)).await {
+                return Err(Failure::new(
+                    "Could not reach the VisiPass relay. Check this computer is online, or pair through Tailscale: `vp phone pair --endpoint tailscale`",
+                ));
+            }
             let page = phones::pairing_page(&invite, port)?;
             self.approver.show_page(&page).await?;
             let (phone, code) = phones.revealed(&invite.pairing_id).await?;
@@ -1340,12 +1357,20 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 return Err(Failure::new("Pairing was cancelled"));
             }
             phones.keep(&invite.pairing_id, &phone)?;
-            Ok(json!({
-                "paired": name,
-                "endpoint": endpoint,
-                "serve": format!("tailscale serve --bg http://127.0.0.1:{port}"),
-                "next": "Your phone is asked alongside this computer from now on. Tailscale must be running on the phone, and `serve` on this computer",
-            }))
+            Ok(if via_relay {
+                json!({
+                    "paired": name,
+                    "endpoint": endpoint,
+                    "next": "Your phone is asked alongside this computer from now on, through the VisiPass relay",
+                })
+            } else {
+                json!({
+                    "paired": name,
+                    "endpoint": endpoint,
+                    "serve": format!("tailscale serve --bg http://127.0.0.1:{port}"),
+                    "next": "Your phone is asked alongside this computer from now on. Tailscale must be running on the phone, and `serve` on this computer",
+                })
+            })
         }
         .await;
         if result.is_err() {
@@ -1556,6 +1581,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                         }))
                         .collect::<Vec<_>>(),
                     "listening": port.map(|port| format!("127.0.0.1:{port}")),
+                    "relay": phones.tunnel_open(),
                 }))
             }
             Request::PhoneRemove { phone } => {

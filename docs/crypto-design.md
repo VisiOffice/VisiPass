@@ -724,7 +724,8 @@ agent can write adds a phone; phones are asked only while the vault is unlocked.
 
 1. visipassd makes `kem_D`, `pairing_id` and a 32-byte one-time `secret` (the reveal's HPKE PSK,
    which RFC 9180 wants at 32 bytes), valid for five minutes, and shows `visipass-pair:` +
-   base64url(invite) as a QR code on a page held in memory, like the Emergency Kit.
+   base64url(invite) as a QR code on a page held in memory, like the Emergency Kit. The invite is
+   `{endpoint, computer name, pairing_id, kem_D, secret}`.
 2. The phone sends `commitment = H(AD("VisiPass phone pair commit", 1, pairing_id, sign_P, kem_P,
    n_P))` with an HMAC-SHA256 under `secret`, before it learns anything from the computer.
 3. visipassd answers with 32 random bytes `n_D`. A second commit with a valid MAC cancels the
@@ -756,15 +757,37 @@ that the choice was offered (and a value comes with a paste, only then). The fir
 from any phone or the desktop wins and withdraws the question everywhere; an invalid answer
 counts as none, so a forged one cannot deny. The access log names the phone that answered.
 
-**Transport.** `tailscale serve` forwards HTTPS on the computer's tailnet name to a loopback port
-(7473) where visipassd listens. Every process on the computer can reach that port, so it serves
-four routes (`POST /v1/pair/commit`, `POST /v1/pair/reveal`, `GET /v1/pending/<pairing_id>`,
-`POST /v1/answer`), refuses bodies over 64 KiB and chunked bodies, rate-limits each pairing, and
-trusts nothing above what is sealed or signed. Who can reach it learns how many requests are
-pending for a pairing, not what they are.
+**Transport.** The protocol does not trust its transport. visipassd serves five routes (`POST
+/v1/pair/commit`, `POST /v1/pair/reveal`, `GET /v1/pending/<pairing_id>`, `POST /v1/answer`,
+`POST /v1/push`), refuses bodies over 64 KiB, rate-limits each pairing, and trusts nothing above
+what is sealed or signed. Who can reach them learns how many requests are pending for a pairing,
+not what they are. They are reached in one of two ways:
 
-Not yet: push notifications through a stateless relay, so the phone need not be open to be
-asked; quick unlock from the phone within an open window (§4.3).
+- *The relay* (the default; `relay/`, `vp-daemon/src/phones/relay.rs`). visipassd holds a
+  WebSocket to `relay.visipass.app/t/<tunnel_id>`, a Cloudflare Worker with one Durable Object
+  per tunnel, while the unlocked vault has a phone or a pairing window is open. `tunnel_secret =
+  HKDF-Expand(HKDF-Expand(AK, AD("VisiPass relay tunnel", 1, account_id, ak_generation)),
+  AD("VisiPass relay tunnel secret", 1, device_id))` and `tunnel_id = SHA-256(tunnel_secret)[..16]`;
+  visipassd connects with the secret, and the relay accepts it only if it hashes to the id, so
+  only this device's unlocked visipassd can take its tunnel, and nothing is stored. The relay
+  passes a phone's requests down the socket and the replies back unchanged, only for the five
+  routes, and rate-limits each tunnel and address. It stores nothing. It sees the tunnel id,
+  addresses, sizes and timing; withholding or delaying ends in a Deny, and a replay fails on
+  `request_id` and expiry. The id is in the QR code, so anyone who saw it can send requests, as
+  every process on the computer can to the loopback port.
+- *Tailscale* (`vp phone pair --endpoint tailscale`): `tailscale serve` forwards HTTPS on the
+  computer's tailnet name to a loopback port (7473) where visipassd listens. Every process on the
+  computer can reach that port, and chunked bodies are refused.
+
+**Notifications.** The phone sends its APNs device token to `POST /v1/push` sealed to `kem_D`
+with HPKE Auth mode from `kem_P` (info `AD("VisiPass phone push token", 1, pairing_id)`), so
+only the paired phone says where its notifications go; visipassd keeps it in the sealed pairing
+record. With each request visipassd asks the relay, over the tunnel, to send the one fixed
+notification ("An agent is waiting for you": no request, agent or computer in it, no actions) to
+that token, at most six a minute. The app fetches and opens requests only once the phone is
+unlocked. The relay holds the APNs key and never stores a token.
+
+Not yet: quick unlock from the phone within an open window (§4.3).
 
 ## 12. Questions for reviewers
 
@@ -890,3 +913,6 @@ rotation; §7.5 files; §9 fingerprints; §10 log signing; §11.2, §11.3.
   AK in the manifest-covered device state; commit-then-reveal pairing with a compared code;
   requests sealed to each phone with HPKE Auth mode, answers signed by a Secure Enclave key, first
   valid answer wins; a loopback listener behind `tailscale serve`.
+- 2026-11-14: §11.4 the relay: a tunnel visipassd holds open to `relay.visipass.app`, taken with a
+  per-device secret from AK, carrying the same five routes; push notifications with the device
+  token sealed from `kem_P`; the invite names the computer.

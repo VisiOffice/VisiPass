@@ -748,6 +748,12 @@ impl<U: Unlock> NativeBackend<U> {
         }
     }
 
+    /// This device's phone-relay tunnel secret; `None` while locked.
+    pub fn relay_secret(&self) -> Option<Zeroizing<[u8; 32]>> {
+        let state = self.inner.state();
+        state.opened.as_ref().map(|o| o.unlocked.relay_secret())
+    }
+
     /// Pairs a phone (sealing its record in the vault), or with `None` removes
     /// it. Returns whether it was paired before. Needs the vault open.
     pub fn set_phone(&self, pairing_id: &[u8; 16], record: Option<&[u8]>) -> Result<bool, Failure> {

@@ -106,7 +106,11 @@ struct Paired {
 
 fn paired() -> Paired {
     let daemon = DaemonKey::generate();
-    let invite = Invite::new("https://desk.tail1234.ts.net".into(), daemon.public());
+    let invite = Invite::new(
+        "https://desk.tail1234.ts.net".into(),
+        "desk".into(),
+        daemon.public(),
+    );
     let phone = SoftPhone::new();
     let commit = phone.commit(&invite);
     phone
@@ -148,7 +152,11 @@ fn approve(p: &Paired) -> (Request, Vec<u8>, SealedRequest) {
 #[test]
 fn pairing_end_to_end() {
     let daemon = DaemonKey::generate();
-    let invite = Invite::new("https://desk.tail1234.ts.net".into(), daemon.public());
+    let invite = Invite::new(
+        "https://desk.tail1234.ts.net".into(),
+        "desk".into(),
+        daemon.public(),
+    );
 
     // The QR code, as the phone reads it.
     let scanned = Invite::parse(&invite.uri()).unwrap();
@@ -180,18 +188,26 @@ fn pairing_end_to_end() {
 #[test]
 fn the_invite_is_only_an_https_endpoint_and_never_printed() {
     let daemon = DaemonKey::generate();
-    let invite = Invite::new("http://desk.local".into(), daemon.public());
+    let invite = Invite::new("http://desk.local".into(), "desk".into(), daemon.public());
     assert!(Invite::parse(&invite.uri()).is_err());
     assert!(Invite::parse("https://visipass.app").is_err());
     assert!(Invite::parse("visipass-pair:!!").is_err());
-    let invite = Invite::new("https://desk.tail1234.ts.net".into(), daemon.public());
+    let invite = Invite::new(
+        "https://desk.tail1234.ts.net".into(),
+        "desk".into(),
+        daemon.public(),
+    );
     assert!(!format!("{invite:?}").contains("secret"));
 }
 
 #[test]
 fn a_commit_needs_the_qr_codes_secret() {
     let daemon = DaemonKey::generate();
-    let invite = Invite::new("https://desk.tail1234.ts.net".into(), daemon.public());
+    let invite = Invite::new(
+        "https://desk.tail1234.ts.net".into(),
+        "desk".into(),
+        daemon.public(),
+    );
     let mut guess = invite.clone();
     guess.secret = zeroize::Zeroizing::new([7; 32]);
     let phone = SoftPhone::new();
@@ -205,7 +221,11 @@ fn a_commit_needs_the_qr_codes_secret() {
 #[test]
 fn a_reveal_must_match_the_commit_and_be_signed_by_its_key() {
     let daemon = DaemonKey::generate();
-    let invite = Invite::new("https://desk.tail1234.ts.net".into(), daemon.public());
+    let invite = Invite::new(
+        "https://desk.tail1234.ts.net".into(),
+        "desk".into(),
+        daemon.public(),
+    );
     let phone = SoftPhone::new();
     let commit = phone.commit(&invite);
 
@@ -588,4 +608,73 @@ fn a_pairing_record_round_trips() {
     assert_eq!(back.kem_d.public(), p.daemon.public());
     assert_eq!((back.name, back.created), (record.name, NOW));
     assert!(Pairing::decode(&p.phone.body().encode()).is_err());
+}
+
+#[test]
+fn the_invite_names_the_computer_plainly() {
+    let daemon = DaemonKey::generate();
+    let endpoint = "https://relay.visipass.app/t/00112233445566778899aabbccddeeff";
+    let invite = Invite::new(endpoint.into(), "rdo".into(), daemon.public());
+    let read = Invite::parse(&invite.uri()).unwrap();
+    assert_eq!(
+        (read.endpoint.as_str(), read.name.as_str()),
+        (endpoint, "rdo")
+    );
+
+    for name in ["", "desk\u{1b}[2J", &"x".repeat(65)] {
+        let invite = Invite::new(endpoint.into(), name.into(), daemon.public());
+        assert!(Invite::parse(&invite.uri()).is_err(), "{name:?}");
+    }
+}
+
+#[test]
+fn an_invite_from_before_the_relay_is_named_by_its_address() {
+    use base64::Engine;
+    let daemon = DaemonKey::generate();
+    let (pairing_id, secret): ([u8; 16], [u8; 32]) = (vp_crypto::random(), vp_crypto::random());
+    let old = vp_crypto::ad(
+        "VisiPass phone pair invite",
+        &[
+            vp_crypto::Part::Text("https://rdo.tail118899.ts.net"),
+            vp_crypto::Part::Bytes(&pairing_id),
+            vp_crypto::Part::Bytes(&daemon.public()),
+            vp_crypto::Part::Bytes(&secret),
+        ],
+    );
+    let uri = format!(
+        "visipass-pair:{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(old)
+    );
+    let read = Invite::parse(&uri).unwrap();
+    assert_eq!(read.name, "rdo");
+    assert_eq!(read.endpoint, "https://rdo.tail118899.ts.net");
+    assert_eq!((read.pairing_id, *read.secret), (pairing_id, secret));
+}
+
+#[test]
+fn only_the_paired_phone_can_set_its_push_token() {
+    let kem_d = DaemonKey::generate();
+    let kem_p = DaemonKey::generate();
+    let pairing_id = vp_crypto::random();
+    let token = [0xab; 32];
+
+    let sent = PushToken::seal(&kem_p, &kem_d.public(), &pairing_id, &token).unwrap();
+    let read = PushToken::decode(&sent.encode()).unwrap();
+    assert_eq!(read, sent);
+    assert_eq!(read.open(&kem_d, &kem_p.public()).unwrap(), token);
+
+    // Anyone who saw the QR code knows kem_D, but is not kem_P.
+    let stranger = DaemonKey::generate();
+    let forged = PushToken::seal(&stranger, &kem_d.public(), &pairing_id, &token).unwrap();
+    assert!(forged.open(&kem_d, &kem_p.public()).is_err());
+
+    // Sealed for another pairing.
+    let mut moved = sent.clone();
+    moved.pairing_id = vp_crypto::random();
+    assert!(moved.open(&kem_d, &kem_p.public()).is_err());
+
+    for bad in [&[][..], &[1; MAX_PUSH_TOKEN + 1]] {
+        let sealed = PushToken::seal(&kem_p, &kem_d.public(), &pairing_id, bad).unwrap();
+        assert!(sealed.open(&kem_d, &kem_p.public()).is_err());
+    }
 }

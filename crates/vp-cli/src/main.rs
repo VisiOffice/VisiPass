@@ -77,8 +77,10 @@ enum PhoneCommands {
     /// shows a QR code to scan with the VisiPass app, then asks you to confirm the
     /// code both screens show. Agents cannot pair a phone
     Pair {
-        /// The https:// address your phone reaches this computer at (default: this
-        /// computer's Tailscale name)
+        /// How your phone reaches this computer: by default through the VisiPass
+        /// relay, which carries only sealed messages; `tailscale` for this computer's
+        /// Tailscale name (run `tailscale serve --bg http://127.0.0.1:7473`), or
+        /// another https:// address that forwards to that port
         #[arg(long)]
         endpoint: Option<String>,
     },
