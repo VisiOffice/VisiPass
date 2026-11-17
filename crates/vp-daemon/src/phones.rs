@@ -158,6 +158,10 @@ pub async fn tailscale_endpoint() -> Option<String> {
         Duration::from_secs(5),
         tokio::process::Command::new(program)
             .args(["status", "--json"])
+            // The Mac app's binary acts as the CLI only when it sees a
+            // terminal's environment; visipassd, started in the background,
+            // has none, and the binary tries to open its GUI instead.
+            .env("TERM", "dumb")
             .stdin(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true)
