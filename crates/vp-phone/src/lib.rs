@@ -230,12 +230,29 @@ impl Invite {
         const NOT: Error = Error("not a VisiPass pairing code");
         let encoded = uri.trim().strip_prefix(URI_SCHEME).ok_or(NOT)?;
         let bytes = Zeroizing::new(URL_SAFE_NO_PAD.decode(encoded).map_err(|_| NOT)?);
-        let [endpoint, name, pairing_id, kem_d, secret] = parts(INVITE, &bytes)?;
+        if bytes.len() > MAX_MESSAGE {
+            return Err(Error("message too large"));
+        }
+        // Before the relay (0.16 and earlier) the invite had no name: the
+        // endpoint was the computer's Tailscale address, which names it.
+        let (endpoint, name, pairing_id, kem_d, secret) = match decode(INVITE, &bytes)?.as_slice() {
+            [e, n, p, k, s] => (e.clone(), Some(n.clone()), p.clone(), k.clone(), s.clone()),
+            [e, p, k, s] => (e.clone(), None, p.clone(), k.clone(), s.clone()),
+            _ => return Err(Error("wrong number of fields")),
+        };
         let endpoint = endpoint.text()?;
         if !endpoint.starts_with("https://") || endpoint.len() > 256 {
             return Err(Error("the pairing endpoint is not an https address"));
         }
-        let name = name.text()?;
+        let host = endpoint["https://".len()..]
+            .split(['.', ':', '/'])
+            .next()
+            .unwrap_or_default();
+        let name = match &name {
+            Some(name) => name.text()?,
+            None if host.is_empty() => "this computer",
+            None => host,
+        };
         if name.is_empty() || name.len() > 64 || name.chars().any(char::is_control) {
             return Err(Error("the computer's name is not a name"));
         }

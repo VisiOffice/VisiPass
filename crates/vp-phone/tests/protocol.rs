@@ -628,6 +628,30 @@ fn the_invite_names_the_computer_plainly() {
 }
 
 #[test]
+fn an_invite_from_before_the_relay_is_named_by_its_address() {
+    use base64::Engine;
+    let daemon = DaemonKey::generate();
+    let (pairing_id, secret): ([u8; 16], [u8; 32]) = (vp_crypto::random(), vp_crypto::random());
+    let old = vp_crypto::ad(
+        "VisiPass phone pair invite",
+        &[
+            vp_crypto::Part::Text("https://rdo.tail118899.ts.net"),
+            vp_crypto::Part::Bytes(&pairing_id),
+            vp_crypto::Part::Bytes(&daemon.public()),
+            vp_crypto::Part::Bytes(&secret),
+        ],
+    );
+    let uri = format!(
+        "visipass-pair:{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(old)
+    );
+    let read = Invite::parse(&uri).unwrap();
+    assert_eq!(read.name, "rdo");
+    assert_eq!(read.endpoint, "https://rdo.tail118899.ts.net");
+    assert_eq!((read.pairing_id, *read.secret), (pairing_id, secret));
+}
+
+#[test]
 fn only_the_paired_phone_can_set_its_push_token() {
     let kem_d = DaemonKey::generate();
     let kem_p = DaemonKey::generate();
