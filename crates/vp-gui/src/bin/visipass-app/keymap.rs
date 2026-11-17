@@ -38,10 +38,36 @@ pub mod actions {
             GeneratePassword,
             NextField,
             PreviousField,
+            Quit,
+            Hide,
+            HideOthers,
         ]
     );
 }
 use actions::*;
+
+/// macOS: the app menu, without which Cmd+Q, Cmd+H and Cmd+Alt+H do nothing.
+/// The main window handles Quit itself first, to clear the clipboard.
+pub fn macos_menu(cx: &mut App) {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    use gpui::{Menu, MenuItem};
+    cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.on_action(|_: &Hide, cx| cx.hide());
+    cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
+    cx.bind_keys([
+        KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("cmd-h", Hide, None),
+        KeyBinding::new("cmd-alt-h", HideOthers, None),
+    ]);
+    cx.set_menus([Menu::new("VisiPass").items([
+        MenuItem::action("Hide VisiPass", Hide),
+        MenuItem::action("Hide Others", HideOthers),
+        MenuItem::separator(),
+        MenuItem::action("Quit VisiPass", Quit),
+    ])]);
+}
 
 pub const APP: &str = "VisiPassApp";
 pub const EDITOR: &str = "ItemEditor";

@@ -2678,6 +2678,13 @@ impl Render for VisiPassApp {
                 let focus = this.search.read(cx).focus_handle(cx);
                 window.focus(&focus, cx);
             }))
+            .on_action(cx.listener(|this, _: &Quit, _, cx| {
+                // A secret copied less than 90 seconds ago goes with the app.
+                if let Some((value, _)) = this.copied.take() {
+                    vp_gui::clipboard::clear_if_still(value.expose(), cx);
+                }
+                cx.quit();
+            }))
             .on_action(cx.listener(|this, _: &NextItem, _, cx| this.move_cursor(1, cx)))
             .on_action(cx.listener(|this, _: &PreviousItem, _, cx| this.move_cursor(-1, cx)))
             .on_action(cx.listener(|this, _: &OpenItem, _, cx| this.open_cursor(cx)))
