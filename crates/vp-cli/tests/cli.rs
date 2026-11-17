@@ -1324,6 +1324,128 @@ fn an_agent_creates_a_vault_over_mcp_after_asking() {
 }
 
 #[test]
+fn named_fields_are_pasted_into_one_item_and_replaced_only_when_asked() {
+    let world = World::native(&[
+        // init: password, confirmation, Secret Key window
+        Decision::Once,
+        Decision::Once,
+        Decision::Deny,
+        // the vault
+        Decision::Once,
+        // two pastes for the new item
+        Decision::Once,
+        Decision::Once,
+        // reading one back
+        Decision::Once,
+        // a cancelled paste
+        Decision::Deny,
+        // replacing one field and adding another
+        Decision::Once,
+        Decision::Once,
+        // reading the replaced one
+        Decision::Once,
+    ]);
+    clean(&world.vp(&["init"], None));
+    json(&world.vp(&["vault", "create", "Visi"], None));
+    let paste = |values: &[&str]| {
+        let mut pastes = world.approver.2.lock().unwrap();
+        pastes.extend(values.iter().map(|v| v.to_string()));
+    };
+    let request = |extra: &[&str]| {
+        let mut args = vec![
+            "request",
+            "--title",
+            "VisiCasts production",
+            "--vault",
+            "Visi",
+        ];
+        args.extend_from_slice(extra);
+        world.vp(&args, None)
+    };
+
+    paste(&["ses-id-value-1", "ses-secret-value-1"]);
+    let out = request(&[
+        "--field",
+        "SES_ACCESS_KEY_ID",
+        "--field",
+        "SES_SECRET_ACCESS_KEY",
+    ]);
+    let created = json(&out);
+    assert!(
+        !text(&out.stdout).contains("value-1"),
+        "no value comes back"
+    );
+    assert_eq!(created["created"], true, "{created}");
+    assert_eq!(created["verified"], true);
+    let secret_ref = created["refs"]["SES_SECRET_ACCESS_KEY"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(secret_ref.starts_with("op://"), "{created}");
+    let read = world.vp(&["read", &secret_ref], None);
+    assert_eq!(text(&read.stdout).trim(), "ses-secret-value-1");
+
+    // A field the item has is refused before asking, unless replace is given.
+    let asked = world.approver.asked();
+    let refused = request(&["--field", "SES_ACCESS_KEY_ID"]);
+    assert!(
+        text(&refused.stderr).contains("already has a field"),
+        "{}",
+        text(&refused.stderr)
+    );
+    assert_eq!(world.approver.asked(), asked);
+
+    // Cancelling saves nothing.
+    let cancelled = request(&["--field", "SES_REGION"]);
+    assert!(text(&cancelled.stderr).contains("nothing was saved"));
+
+    paste(&["ses-secret-value-2", "us-east-1"]);
+    let out = request(&[
+        "--field",
+        "ses_secret_access_key",
+        "--field",
+        "SES_REGION",
+        "--replace",
+    ]);
+    let changed = json(&out);
+    assert_eq!(changed["created"], false, "{changed}");
+    assert_eq!(
+        changed["replaced"],
+        serde_json::json!(["ses_secret_access_key"])
+    );
+    assert_eq!(
+        changed["refs"]["ses_secret_access_key"], secret_ref,
+        "the same field keeps its reference"
+    );
+    let read = world.vp(&["read", &secret_ref], None);
+    assert_eq!(text(&read.stdout).trim(), "ses-secret-value-2");
+    let inventory = text(&world.vp(&["inventory", "--vault", "Visi"], None).stdout);
+    assert_eq!(
+        inventory.matches("VisiCasts production").count(),
+        1,
+        "{inventory}"
+    );
+    assert!(inventory.contains("SES_ACCESS_KEY_ID") && inventory.contains("SES_REGION"));
+}
+
+#[test]
+fn an_agent_requests_fields_over_mcp() {
+    let world = World::new(&[]);
+    let call = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "request_secret", "arguments": {"title": "X", "vault": "Nowhere", "purpose": "p", "fields": ["A", "a"]}}});
+    let out = world.vp(&["mcp"], Some(&(call.to_string() + "\n")));
+    let reply: serde_json::Value = serde_json::from_str(text(&out.stdout).trim()).unwrap();
+    assert_eq!(reply["result"]["isError"], true);
+    assert!(
+        reply["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("named twice"),
+        "{reply}"
+    );
+    assert_eq!(world.approver.asked(), 0);
+}
+
+#[test]
 fn a_vault_created_in_visipass_takes_new_items() {
     let world = World::native(&[
         // init: password, confirmation, Secret Key window

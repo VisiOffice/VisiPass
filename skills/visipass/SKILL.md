@@ -50,6 +50,14 @@ vp request --title "Stripe Live Key" --vault Work --purpose "configure billing"
 
 The human gets a VisiPass window and pastes the value; you get back only `{ ref, verified }`. Never ask the human to paste a secret into the chat or a file. If they cancel, do not ask again; ask how to proceed.
 
+Several values that belong together (one service's keys, a deployment's settings) go in one item, new or existing, as named fields:
+
+```bash
+vp request --title "VisiCasts production" --vault Visi --field SES_ACCESS_KEY_ID --field SES_SECRET_ACCESS_KEY --purpose "SES for production"
+```
+
+The human pastes each value in its own window; you get back `refs` (one per field name) and `verified`. The item is found by title in the vault, or created. A field the item already has is refused before asking; add `--replace` only when the human wants that value changed (they are told). Cancelling any window saves nothing.
+
 ## Kamal deploys
 
 In `.kamal/secrets`, use one `vp kamal-fetch` and `kamal secrets extract` per secret, never a

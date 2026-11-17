@@ -131,6 +131,9 @@ impl ApprovalPrompt {
         if let Some(paste) = &mut prompt.paste {
             paste.title = clean_text(&paste.title, false, 200);
             paste.vault = clean_text(&paste.vault, false, 200);
+            if let Some(field) = &mut paste.field {
+                field.name = clean_text(&field.name, false, 64);
+            }
         }
         prompt
     }
@@ -143,6 +146,20 @@ pub struct PasteSpec {
     pub vault: String,
     #[serde(default)]
     pub mode: PasteMode,
+    /// For one of several named fields an agent asked for (`vp request --field`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<PasteField>,
+}
+
+/// Which field a paste fills, and where it comes in the request.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PasteField {
+    pub name: String,
+    /// From 1.
+    pub number: usize,
+    pub count: usize,
+    /// The item already has this field; the paste replaces its value.
+    pub replaces: bool,
 }
 
 /// What the paste window is for. Every mode returns its answer on the pipe
@@ -175,6 +192,26 @@ impl PasteSpec {
     /// way of asking: the VisiPass window, zenity and the terminal.
     pub fn instruction(&self) -> (String, &'static str) {
         match &self.mode {
+            PasteMode::Secret if self.field.is_some() => {
+                let field = self.field.as_ref().expect("checked");
+                let step = if field.count > 1 {
+                    format!(" ({} of {})", field.number, field.count)
+                } else {
+                    String::new()
+                };
+                let replaces = if field.replaces {
+                    " It replaces the value saved there now."
+                } else {
+                    ""
+                };
+                (
+                    format!(
+                        "Paste the value for {}{step}, to save in \"{}\" in the vault \"{}\".{replaces}",
+                        field.name, self.title, self.vault
+                    ),
+                    if field.number < field.count { "Next" } else { "Save" },
+                )
+            }
             PasteMode::Secret => (
                 format!(
                     "Paste the secret to save as \"{}\" in the vault \"{}\".",
@@ -464,6 +501,19 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         purpose: Option<String>,
     },
+    /// Ask the human to paste values for named fields of one item, new or
+    /// existing. Each value is pasted in its own window; cancelling any saves
+    /// nothing. A field the item already has is changed only with `replace`.
+    /// The agent gets back only the references.
+    RequestFields {
+        item: String,
+        vault: String,
+        fields: Vec<String>,
+        #[serde(default)]
+        replace: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        purpose: Option<String>,
+    },
     /// Move plaintext env values into the vault: one approval for the batch.
     ImportEnv {
         vault: String,
@@ -646,6 +696,7 @@ impl Request {
             Request::Sync { .. } => "sync",
             Request::SyncOff => "sync-off",
             Request::RequestSecret { .. } => "request",
+            Request::RequestFields { .. } => "request-fields",
             Request::ImportEnv { .. } => "env-import",
             Request::CheckRefs { .. } => "env-check",
             Request::CreateToken { .. } => "token-create",

@@ -213,9 +213,11 @@ enum Commands {
     /// Create a new credential from private input
     #[command(subcommand)]
     Create(CreateCommands),
-    /// Ask the human to paste a secret that does not exist yet; returns only its reference
+    /// Ask the human to paste a secret that does not exist yet, or values for
+    /// named fields of one item (--field); returns only references
     Request {
-        /// Non-secret item title, e.g. "Stripe Live Key"
+        /// Non-secret item title, e.g. "Stripe Live Key"; with --field, the item
+        /// to add the fields to (created if the vault has none by that title)
         #[arg(long)]
         title: String,
         /// Destination vault name or ID; required, no implicit default
@@ -229,6 +231,14 @@ enum Commands {
         /// Optional non-secret notes
         #[arg(long)]
         notes: Option<String>,
+        /// A field to fill, by name; repeat for each (at most 20). The human
+        /// pastes each value in its own window
+        #[arg(long = "field", value_name = "NAME")]
+        fields: Vec<String>,
+        /// With --field: allow replacing the value of a field the item already
+        /// has (the human is told)
+        #[arg(long, requires = "fields")]
+        replace: bool,
         #[command(flatten)]
         purpose: Purpose,
     },
@@ -799,8 +809,24 @@ fn execute(command: Commands) -> Result<i32, Failure> {
             account,
             url,
             notes,
+            fields,
+            replace,
             purpose,
         } => {
+            if !fields.is_empty() {
+                if url.is_some() || notes.is_some() || account.is_some() {
+                    return Err(Failure::new(
+                        "--url, --notes and --account go with a single secret, not --field",
+                    ));
+                }
+                return print(&client::call(Request::RequestFields {
+                    item: title.trim().into(),
+                    vault: vault.trim().into(),
+                    fields,
+                    replace,
+                    purpose: purpose.purpose,
+                })?);
+            }
             let destination = Destination {
                 title: title.trim().into(),
                 vault: vault.trim().into(),

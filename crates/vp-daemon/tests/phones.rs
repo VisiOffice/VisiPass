@@ -325,6 +325,7 @@ fn prompt() -> Prompt {
 fn paste_prompt(mode: PasteMode) -> Prompt {
     Prompt {
         paste: Some(PasteSpec {
+            field: None,
             title: "Stripe".into(),
             vault: "Dev".into(),
             mode,

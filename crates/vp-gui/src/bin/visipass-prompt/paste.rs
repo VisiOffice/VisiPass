@@ -258,7 +258,10 @@ impl Render for PasteView {
         let (instruction, ok_label) = spec.instruction();
         let mode = spec.mode.clone();
         let heading = match &mode {
-            PasteMode::Secret => format!("{} asks you to add a secret.", self.prompt.who),
+            PasteMode::Secret => match &spec.field {
+                Some(field) => format!("{} asks you to fill in {}.", self.prompt.who, field.name),
+                None => format!("{} asks you to add a secret.", self.prompt.who),
+            },
             PasteMode::Unlock {
                 purpose: Some(_), ..
             } => "Confirm it's you".to_string(),

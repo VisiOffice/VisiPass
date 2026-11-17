@@ -36,6 +36,7 @@ impl<A: Approver> Unlock for WindowUnlock<A> {
             timeout_secs: approval::TIMEOUT.as_secs(),
             every_time: false,
             paste: Some(PasteSpec {
+                field: None,
                 mode: PasteMode::Unlock {
                     retry,
                     purpose: purpose.map(String::from),
