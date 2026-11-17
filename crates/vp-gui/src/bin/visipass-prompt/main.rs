@@ -122,6 +122,7 @@ fn main() {
             secrets: vec![],
             purpose: Some("deploy the billing service".into()),
             paste: Some(vp_core::ipc::PasteSpec {
+                field: None,
                 mode: Default::default(),
                 title: "Stripe Live Key".into(),
                 vault: "Dev".into(),
@@ -145,6 +146,7 @@ fn main() {
             secrets: vec![],
             purpose: None,
             paste: Some(vp_core::ipc::PasteSpec {
+                field: None,
                 mode,
                 ..Default::default()
             }),

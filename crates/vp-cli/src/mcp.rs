@@ -52,7 +52,7 @@ fn tools() -> Value {
         },
         {
             "name": "request_secret",
-            "description": "Ask the human to paste a secret that does not exist yet (e.g. a new API key). They see a VisiPass window; you get back only the reference.",
+            "description": "Ask the human to paste a secret that does not exist yet (e.g. a new API key). They see a VisiPass window; you get back only the reference. With fields: one item holding several named values, new or existing (found by title in the vault); the human pastes each in its own window and you get a reference per field. A field the item already has is refused unless replace is true.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -60,7 +60,9 @@ fn tools() -> Value {
                     "vault": { "type": "string", "description": "Destination vault; ask the human if unsure" },
                     "purpose": { "type": "string", "description": "Why you need it; shown to the human" },
                     "url": { "type": "string" },
-                    "notes": { "type": "string" }
+                    "notes": { "type": "string" },
+                    "fields": { "type": "array", "items": { "type": "string" }, "description": "Field names, e.g. [\"SES_ACCESS_KEY_ID\", \"SES_SECRET_ACCESS_KEY\"]; at most 20" },
+                    "replace": { "type": "boolean", "description": "With fields: allow replacing a field the item already has (the human is told)" }
                 },
                 "required": ["title", "vault", "purpose"]
             }
@@ -157,6 +159,25 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, Failure> {
         }
         "inventory" => client::call(Request::Inventory { scope: scope() }),
         "audit" => client::call(Request::Audit { scope: scope() }),
+        "request_secret" if args.get("fields").is_some_and(|f| f.is_array()) => {
+            let fields: Vec<String> = args["fields"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(String::from)
+                .collect();
+            client::call(Request::RequestFields {
+                item: required(args, "title")?,
+                vault: required(args, "vault")?,
+                fields,
+                replace: args
+                    .get("replace")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                purpose: text(args, "purpose"),
+            })
+        }
         "request_secret" => client::call(Request::RequestSecret {
             destination: Destination {
                 title: required(args, "title")?,

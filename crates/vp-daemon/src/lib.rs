@@ -533,6 +533,15 @@ fn assess(request: &Request, requester: &Requester) -> Assessment {
             "request \"{}\" in {}",
             destination.title, destination.vault
         ))),
+        Request::RequestFields {
+            item,
+            vault,
+            fields,
+            ..
+        } => none(Some(format!(
+            "request {} for \"{item}\" in {vault}",
+            plural(fields.len(), "field")
+        ))),
         Request::SaveItem { item } => none(Some(if item.id.is_empty() {
             format!("create \"{}\"", item.title)
         } else {
@@ -569,6 +578,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
             timeout_secs: approval::TIMEOUT.as_secs(),
             every_time: false,
             paste: Some(vp_core::ipc::PasteSpec {
+                field: None,
                 mode: PasteMode::BucketKey { secret },
                 ..Default::default()
             }),
@@ -880,6 +890,230 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
         }))
     }
 
+    /// Values for named fields of one item, pasted by the human one window at
+    /// a time, then saved in one write that is read back and compared. The
+    /// item is found by title in the vault, or created. A field it already has
+    /// is changed only when the agent said `replace`, and the window says so.
+    async fn request_fields(
+        &self,
+        requester: &Requester,
+        title: &str,
+        vault: &str,
+        names: Vec<String>,
+        replace: bool,
+        purpose: Option<String>,
+    ) -> Result<Value, Failure> {
+        let (title, vault) = (title.trim(), vault.trim());
+        if title.is_empty() || vault.is_empty() {
+            return Err(Failure::new(
+                "An item title and an explicit vault are required",
+            ));
+        }
+        let names: Vec<String> = names.iter().map(|n| n.trim().to_string()).collect();
+        if names.is_empty() || names.len() > 20 {
+            return Err(Failure::new("Name 1 to 20 fields"));
+        }
+        for (i, name) in names.iter().enumerate() {
+            if name.is_empty()
+                || name.chars().count() > 64
+                || name.chars().any(|c| c.is_control() || c == '/')
+            {
+                return Err(Failure::new(format!(
+                    "\"{name}\" is not a field name: use 1 to 64 characters, no slashes"
+                )));
+            }
+            if names[..i].iter().any(|n| n.eq_ignore_ascii_case(name)) {
+                return Err(Failure::new(format!("The field \"{name}\" is named twice")));
+            }
+        }
+        let vault_ref = self
+            .backend
+            .vaults(None)
+            .await?
+            .into_iter()
+            .find(|v| v.id == vault || v.name.eq_ignore_ascii_case(vault))
+            .ok_or_else(|| {
+                Failure::new(format!(
+                    "No vault named \"{vault}\". Ask the human which vault to use, or create it with vp vault create"
+                ))
+            })?;
+        let scope = vp_core::model::Scope {
+            account: None,
+            vault: Some(vault_ref.id.clone()),
+        };
+        let matches: Vec<_> = self
+            .backend
+            .list(&scope)
+            .await?
+            .into_iter()
+            .filter(|l| l.summary.title.trim().eq_ignore_ascii_case(title))
+            .collect();
+        let mut item = match matches.as_slice() {
+            [] => vp_core::model::Item {
+                id: String::new(),
+                title: title.to_string(),
+                category: "API_CREDENTIAL".into(),
+                vault: vault_ref.clone(),
+                tags: Vec::new(),
+                urls: Vec::new(),
+                favorite: false,
+                created_at: None,
+                updated_at: None,
+                sections: Vec::new(),
+                fields: Vec::new(),
+                passkeys: Vec::new(),
+                imported_passkeys: Vec::new(),
+            },
+            [one] => self.backend.item(&one.summary.id, &vault_ref.id).await?,
+            _ => {
+                return Err(Failure::new(format!(
+                    "Several items in \"{}\" are titled \"{title}\". Ask the human which one, and to rename the others",
+                    vault_ref.name
+                )));
+            }
+        };
+        let existing = !item.id.is_empty();
+        // Where each name goes: an existing field (by label), or a new one.
+        let mut targets = Vec::new();
+        for name in &names {
+            let found: Vec<usize> = item
+                .fields
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| f.display_label().eq_ignore_ascii_case(name))
+                .map(|(i, _)| i)
+                .collect();
+            match found.as_slice() {
+                [] => targets.push(None),
+                [i] if replace => targets.push(Some(*i)),
+                [_] => {
+                    return Err(Failure::new(format!(
+                        "\"{title}\" already has a field \"{name}\". Nothing was asked or changed. To replace its value, ask again with replace (the human is told)"
+                    )));
+                }
+                _ => {
+                    return Err(Failure::new(format!(
+                        "\"{title}\" has several fields named \"{name}\". Ask the human to rename them first"
+                    )));
+                }
+            }
+        }
+
+        let replaced: Vec<&str> = names
+            .iter()
+            .zip(&targets)
+            .filter(|(_, t)| t.is_some())
+            .map(|(n, _)| n.as_str())
+            .collect();
+        let mut details = vec![
+            project_line(requester),
+            (
+                "Item".into(),
+                if existing {
+                    title.to_string()
+                } else {
+                    format!("{title} (new)")
+                },
+            ),
+            ("Fields".into(), names.join(", ")),
+        ];
+        if !replaced.is_empty() {
+            details.push(("Replaces".into(), replaced.join(", ")));
+        }
+        let mut values = Vec::new();
+        {
+            // One window per value, in a row, before anything is written.
+            let _turn = self.approvals.lock().await;
+            for (i, name) in names.iter().enumerate() {
+                let prompt = Prompt {
+                    who: who(requester),
+                    action: if existing {
+                        format!("add to \"{title}\" in the vault \"{}\"", vault_ref.name)
+                    } else {
+                        format!("add a new item to the vault \"{}\"", vault_ref.name)
+                    },
+                    details: details.clone(),
+                    secrets: vec![],
+                    purpose: purpose.clone(),
+                    timeout_secs: approval::TIMEOUT.as_secs(),
+                    every_time: true,
+                    paste: Some(vp_core::ipc::PasteSpec {
+                        title: title.to_string(),
+                        vault: vault_ref.name.clone(),
+                        mode: Default::default(),
+                        field: Some(vp_core::ipc::PasteField {
+                            name: name.clone(),
+                            number: i + 1,
+                            count: names.len(),
+                            replaces: targets[i].is_some(),
+                        }),
+                    }),
+                };
+                let value = self.approver.paste(&prompt).await?.ok_or_else(|| {
+                    Failure::new(
+                        "The human cancelled, so nothing was saved. Do not ask again; ask them how to proceed",
+                    )
+                })?;
+                values.push(value);
+            }
+        }
+
+        let mut next = item.fields.len();
+        for ((name, target), value) in names.iter().zip(&targets).zip(values) {
+            match target {
+                Some(i) => item.fields[*i].value = Some(value),
+                None => {
+                    // An ID no field has; the label is the name the agent uses.
+                    let id = loop {
+                        next += 1;
+                        let id = format!("custom{next}");
+                        if !item.fields.iter().any(|f| f.id == id) {
+                            break id;
+                        }
+                    };
+                    item.fields.push(vp_core::model::Field {
+                        id,
+                        label: Some(name.clone()),
+                        kind: "CONCEALED".into(),
+                        purpose: None,
+                        section: None,
+                        value: Some(value),
+                        reference: None,
+                    });
+                }
+            }
+        }
+        let saved = self.backend.save_item(&item).await?;
+        let mut refs = serde_json::Map::new();
+        for name in &names {
+            let field = saved
+                .fields
+                .iter()
+                .find(|f| f.display_label().eq_ignore_ascii_case(name))
+                .ok_or_else(|| {
+                    Failure::new(format!(
+                        "Saved, but \"{name}\" was not found when read back. Do not retry; check the item"
+                    ))
+                })?;
+            let reference = match field.section.as_ref().and_then(|s| s.id.as_deref()) {
+                Some(section) if !section.is_empty() => format!(
+                    "op://{}/{}/{section}/{}",
+                    saved.vault.id, saved.id, field.id
+                ),
+                _ => format!("op://{}/{}/{}", saved.vault.id, saved.id, field.id),
+            };
+            refs.insert(name.clone(), Value::String(reference));
+        }
+        Ok(json!({
+            "item": saved.title,
+            "vault": saved.vault.name,
+            "created": !existing,
+            "replaced": replaced,
+            "refs": refs,
+            "verified": true,
+        }))
+    }
+
     /// Keeps one item of each merge, with what only the others had copied onto
     /// it (saved and read back), then archives the others. Stops at the first
     /// failure; what was done before it stays done.
@@ -1064,6 +1298,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 timeout_secs: approval::TIMEOUT.as_secs(),
                 every_time: false,
                 paste: Some(vp_core::ipc::PasteSpec {
+                    field: None,
                     mode: PasteMode::Unlock {
                         retry: false,
                         purpose: Some(purpose.into()),
@@ -1216,6 +1451,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                     timeout_secs: approval::TIMEOUT.as_secs(),
                     every_time: false,
                     paste: Some(vp_core::ipc::PasteSpec {
+                        field: None,
                         mode,
                         ..Default::default()
                     }),
@@ -1276,6 +1512,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                     timeout_secs: approval::TIMEOUT.as_secs(),
                     every_time: false,
                     paste: Some(vp_core::ipc::PasteSpec {
+                        field: None,
                         mode: PasteMode::Unlock {
                             retry: false,
                             purpose: Some("show your Emergency Kit".into()),
@@ -1381,6 +1618,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                         timeout_secs: approval::TIMEOUT.as_secs(),
                         every_time: false,
                         paste: Some(vp_core::ipc::PasteSpec {
+                            field: None,
                             mode: PasteMode::Unlock {
                                 retry: false,
                                 purpose: Some(purpose),
@@ -1457,6 +1695,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                     timeout_secs: approval::TIMEOUT.as_secs(),
                     every_time: false,
                     paste: Some(vp_core::ipc::PasteSpec {
+                        field: None,
                         mode,
                         ..Default::default()
                     }),
@@ -1623,6 +1862,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                     timeout_secs: approval::TIMEOUT.as_secs(),
                     every_time: false,
                     paste: Some(vp_core::ipc::PasteSpec {
+                        field: None,
                         title: destination.title.clone(),
                         vault: destination.vault.clone(),
                         mode: Default::default(),
@@ -1642,6 +1882,16 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                         .create_api_credential(&destination, value)
                         .await?,
                 ))
+            }
+            Request::RequestFields {
+                item,
+                vault,
+                fields,
+                replace,
+                purpose,
+            } => {
+                self.request_fields(requester, &item, &vault, fields, replace, purpose)
+                    .await
             }
             Request::ImportEnv {
                 vault,
@@ -2293,6 +2543,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 | Request::ResolveConflict { .. }
                 | Request::SyncJoin { .. }
                 | Request::RequestSecret { .. }
+                | Request::RequestFields { .. }
                 | Request::BrowserSave { check: false, .. }
                 | Request::CreateVault { .. }
                 | Request::BrowserAddTotp { .. }
