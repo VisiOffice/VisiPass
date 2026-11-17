@@ -41,7 +41,48 @@ pub trait Unlock: Send + Sync + 'static {
     fn confirm_presence(&self) -> impl Future<Output = Presence> + Send {
         async { Presence::Unavailable }
     }
+
+    /// Phone unlock: the vault is locking, and the person allowed their paired
+    /// phones to unlock it. Seal `handoff.key` to each phone and keep what
+    /// asking them later needs, in memory only. `false` if no phone can be
+    /// asked; the vault then needs the master password, as without phone unlock.
+    /// Called with the vault's state held: it must not call back into the vault.
+    fn hand_off(&self, _handoff: Handoff<'_>) -> bool {
+        false
+    }
+
+    /// Asks the phones holding the current lock's key to unlock, alongside the
+    /// master-password window. `purpose` as for [`Unlock::password`].
+    fn phone_unlock(&self, _purpose: Option<&str>) -> impl Future<Output = PhoneUnlock> + Send {
+        async { PhoneUnlock::NoAnswer }
+    }
 }
+
+/// What [`Unlock::hand_off`] seals to the phones as the vault locks.
+pub struct Handoff<'a> {
+    /// `K`: the Account Key is wrapped under it, and only the phones keep it.
+    pub key: &'a [u8; 32],
+    pub lock_id: [u8; 16],
+    /// Seconds since the Unix epoch after which a phone no longer unlocks.
+    pub until: u64,
+    /// The paired phones' records, opened.
+    pub phones: &'a vp_store::PhoneRecords,
+    /// This device's relay tunnel secret, so the phones can still reach it.
+    pub relay_secret: Zeroizing<[u8; 32]>,
+}
+
+/// A phone's answer to [`Unlock::phone_unlock`].
+pub enum PhoneUnlock {
+    /// A phone gave `K` back.
+    Key(Zeroizing<[u8; 32]>),
+    /// A phone said no: the unlock is cancelled.
+    Denied,
+    /// No phone answered in time, or none could be asked.
+    NoAnswer,
+}
+
+/// The longest phone unlock may last after a master-password unlock.
+pub const PHONE_UNLOCK_MAX_DAYS: u32 = 30;
 
 /// The answer to [`Unlock::confirm_presence`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -349,6 +390,29 @@ struct State {
     /// Since when the computer has had no keyboard or mouse input, while that
     /// is watched.
     idle_since: Option<Instant>,
+    /// For how many days after a master-password unlock the paired phones may
+    /// unlock, once an unlock has checked the stored setting's tag.
+    phone_unlock_days: Option<u32>,
+    /// The stored setting and its tag, not yet checked.
+    stored_phone_unlock: Option<(u32, String)>,
+    /// The last master-password unlock (seconds since the Unix epoch).
+    password_at: Option<u64>,
+    /// The Account Key wrapped under the `K` only the phones hold, from the
+    /// last lock with phone unlock on. Memory only.
+    handoff: Option<HandoffState>,
+}
+
+#[derive(Clone)]
+struct HandoffState {
+    context: Vec<u8>,
+    wrapped: Vec<u8>,
+    until: u64,
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 impl State {
@@ -391,10 +455,29 @@ impl State {
         }
     }
 
+    /// Takes the stored phone-unlock setting once an unlock can check its tag;
+    /// one that fails its check (written by anything running as the user) is
+    /// ignored, and phone unlock stays off.
+    fn adopt_phone_unlock(&mut self) {
+        let (Some(opened), Some((days, tag))) = (&self.opened, self.stored_phone_unlock.take())
+        else {
+            return;
+        };
+        if vp_store::hex(&opened.unlocked.settings_tag(&phone_unlock_bytes(days))) == tag
+            && (1..=PHONE_UNLOCK_MAX_DAYS).contains(&days)
+        {
+            self.phone_unlock_days = Some(days);
+        } else {
+            eprintln!("visipassd: the stored phone-unlock setting failed its check; it stays off");
+        }
+    }
+
     /// After a master-password unlock.
     fn opened_with_password(&mut self, opened: Opened) {
         self.opened = Some(opened);
+        self.password_at = Some(unix_now());
         self.adopt_auto_lock();
+        self.adopt_phone_unlock();
         self.kept = None;
         self.last_use = Instant::now();
         self.window_end = self.quick_unlock.map(|window| Instant::now() + window);
@@ -411,6 +494,11 @@ struct Settings {
     auto_lock: Option<AutoLock>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     auto_lock_tag: Option<String>,
+    /// Phone unlock's days, and their tag under the account's keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    phone_unlock_days: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    phone_unlock_tag: Option<String>,
     /// The folder sync writes to (§11.1), if it is on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sync_folder: Option<PathBuf>,
@@ -459,6 +547,49 @@ impl<U> Inner<U> {
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
+}
+
+impl<U: Unlock> Inner<U> {
+    /// Locks, first handing the phones a way back in when phone unlock is on
+    /// and still within its days. A full lock (sleep, `vp lock --full`) leaves
+    /// nothing for a phone to open.
+    fn lock(&self, state: &mut State, fully: bool) {
+        state.handoff = None;
+        if !fully && let Some(handoff) = self.hand_off(state) {
+            state.handoff = Some(handoff);
+        }
+        state.lock(fully);
+    }
+
+    fn hand_off(&self, state: &State) -> Option<HandoffState> {
+        let opened = state.opened.as_ref()?;
+        let until = state
+            .password_at?
+            .saturating_add(u64::from(state.phone_unlock_days?) * 86_400);
+        if unix_now() >= until {
+            return None;
+        }
+        let phones = opened.unlocked.phones().ok().filter(|p| !p.is_empty())?;
+        let key = Key::random();
+        let lock_id = vp_crypto::random::<16>();
+        let context = vp_crypto::ad(
+            "VisiPass phone unlock wrap",
+            &[vp_crypto::Part::Bytes(&lock_id)],
+        );
+        let wrapped = opened.unlocked.wrap_for_device(&key, &context);
+        let handed = self.unlock.hand_off(Handoff {
+            key: key.expose(),
+            lock_id,
+            until,
+            phones: &phones,
+            relay_secret: opened.unlocked.relay_secret(),
+        });
+        handed.then_some(HandoffState {
+            context,
+            wrapped,
+            until,
+        })
+    }
 
     fn expire_if_idle(&self) {
         let mut state = self.state();
@@ -472,7 +603,7 @@ impl<U> Inner<U> {
             state.last_use.elapsed() >= after
         };
         if state.opened.is_some() && idle {
-            state.lock(false);
+            self.lock(&mut state, false);
         }
         if state.opened.is_none() && state.kept.is_some() && !state.window_open() {
             state.lock(true);
@@ -567,6 +698,10 @@ impl<U: Unlock> NativeBackend<U> {
                 auto_lock: AutoLock::DEFAULT,
                 stored_auto_lock,
                 idle_since: None,
+                phone_unlock_days: None,
+                stored_phone_unlock: settings.phone_unlock_days.zip(settings.phone_unlock_tag),
+                password_at: None,
+                handoff: None,
             }),
             gate: tokio::sync::Mutex::new(()),
             quiet_after_cancel,
@@ -712,6 +847,79 @@ impl<U: Unlock> NativeBackend<U> {
         Ok(())
     }
 
+    /// Phone unlock's days, and until when a phone may unlock now (seconds
+    /// since the Unix epoch), if it is on.
+    pub fn phone_unlock(&self) -> Option<(u32, Option<u64>)> {
+        let state = self.inner.state();
+        let days = state
+            .phone_unlock_days
+            .or(state.stored_phone_unlock.as_ref().map(|s| s.0))?;
+        let until = state
+            .password_at
+            .map(|at| at.saturating_add(u64::from(days) * 86_400))
+            .filter(|until| unix_now() < *until);
+        Some((days, until))
+    }
+
+    /// Turns phone unlock on for `days` after each master-password unlock, or
+    /// off. Turning it on takes the master password, which the caller asks
+    /// the human for; it also starts the first stretch of days.
+    pub async fn set_phone_unlock(
+        &self,
+        days: Option<u32>,
+        password: Option<Secret>,
+    ) -> Result<(), Failure> {
+        let Some(days) = days else {
+            self.update_settings(|s| {
+                s.phone_unlock_days = None;
+                s.phone_unlock_tag = None;
+            })?;
+            let mut state = self.inner.state();
+            state.phone_unlock_days = None;
+            state.stored_phone_unlock = None;
+            state.handoff = None;
+            return Ok(());
+        };
+        if !(1..=PHONE_UNLOCK_MAX_DAYS).contains(&days) {
+            return Err(Failure::new(format!(
+                "Choose 1 to {PHONE_UNLOCK_MAX_DAYS} days"
+            )));
+        }
+        let password = password
+            .ok_or_else(|| Failure::new("Turning on phone unlock needs the master password"))?;
+        let bytes = phone_unlock_bytes(days);
+        let _gate = self.inner.gate.lock().await;
+        let secret = self.secret_key()?;
+        self.open_store()?;
+        let inner = self.inner.clone();
+        let tag = tokio::task::spawn_blocking(move || {
+            let mut state = inner.state();
+            let store = state
+                .store
+                .as_ref()
+                .ok_or_else(|| Failure::new("Could not open the vault"))?;
+            let unlocked = store.unlock(password.expose(), &secret).map_err(failure)?;
+            let tag = unlocked.settings_tag(&bytes);
+            if state.opened.is_none() {
+                let opened = load(store, unlocked)?;
+                state.opened_with_password(opened);
+            }
+            state.password_at = Some(unix_now());
+            Ok::<_, Failure>(tag)
+        })
+        .await
+        .map_err(|_| Failure::new("Checking the password failed"))??;
+        self.update_settings(|s| {
+            s.phone_unlock_days = Some(days);
+            s.phone_unlock_tag = Some(vp_store::hex(&tag));
+        })?;
+        let mut state = self.inner.state();
+        state.phone_unlock_days = Some(days);
+        state.stored_phone_unlock = None;
+        state.last_use = Instant::now();
+        Ok(())
+    }
+
     /// Checks the master password before something only the human may do
     /// (pairing a phone). A locked vault opens with it, so the human types it once.
     pub async fn confirm_password(&self, password: Secret) -> Result<(), Failure> {
@@ -730,6 +938,7 @@ impl<U: Unlock> NativeBackend<U> {
                 let opened = load(store, unlocked)?;
                 state.opened_with_password(opened);
             }
+            state.password_at = Some(unix_now());
             state.last_use = Instant::now();
             Ok(())
         })
@@ -770,13 +979,15 @@ impl<U: Unlock> NativeBackend<U> {
     /// Locks. Within a quick-unlock window the Account Key stays, so the next
     /// unlock needs only the system's presence check.
     pub fn lock(&self) {
-        self.inner.state().lock(false);
+        let mut state = self.inner.state();
+        self.inner.lock(&mut state, false);
     }
 
     /// Erases every key, the Account Key included, and closes any quick-unlock
     /// window: for sleep and `vp lock --full`.
     pub fn lock_fully(&self) {
-        self.inner.state().lock(true);
+        let mut state = self.inner.state();
+        self.inner.lock(&mut state, true);
     }
 
     pub fn quick_unlock(&self) -> Option<QuickUnlock> {
@@ -801,6 +1012,7 @@ impl<U: Unlock> NativeBackend<U> {
         let previous = {
             let mut state = self.inner.state();
             let previous = state.quick_unlock;
+            state.handoff = None;
             state.lock(true);
             state.quick_unlock = window;
             previous
@@ -881,6 +1093,12 @@ impl<U: Unlock> NativeBackend<U> {
         Ok(shown)
     }
 
+    /// Unlocks if needed, as any request needing the vault would: the master
+    /// password, quick unlock, or a phone.
+    pub async fn unlock(&self) -> Result<(), Failure> {
+        self.open().await
+    }
+
     /// Unlocks if needed, asking the human for the master password.
     async fn open(&self) -> Result<(), Failure> {
         self.open_for(None).await
@@ -900,6 +1118,84 @@ impl<U: Unlock> NativeBackend<U> {
         {
             return Err(Failure::new(QUIET));
         }
+        let handoff = {
+            let state = self.inner.state();
+            state.handoff.clone().filter(|h| unix_now() < h.until)
+        };
+        let Some(handoff) = handoff else {
+            return self.unlock_at_computer(purpose).await;
+        };
+        // Both at once: the master password (or quick unlock) here, and the
+        // phones. The first to answer wins; the other is withdrawn as its
+        // future is dropped.
+        let computer = self.unlock_at_computer(purpose);
+        let phone = self.inner.unlock.phone_unlock(purpose);
+        tokio::pin!(computer, phone);
+        let mut failed = None;
+        let mut phone_done = false;
+        loop {
+            tokio::select! {
+                result = &mut computer, if failed.is_none() => match result {
+                    Ok(()) => return Ok(()),
+                    // No window here (an SSH-only machine), or it was
+                    // dismissed: a phone may still answer.
+                    Err(e) if phone_done => return Err(e),
+                    Err(e) => failed = Some(e),
+                },
+                answer = &mut phone, if !phone_done => {
+                    phone_done = true;
+                    match answer {
+                        PhoneUnlock::Key(key) => {
+                            if self.unlock_with_handoff(&handoff, key).await.is_ok() {
+                                return Ok(());
+                            }
+                        }
+                        PhoneUnlock::Denied => {
+                            self.quiet();
+                            return Err(Failure::new("Unlocking VisiPass was denied on the phone"));
+                        }
+                        PhoneUnlock::NoAnswer => {}
+                    }
+                    if let Some(e) = failed.take() {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Opens the vault with the `K` a phone gave back, with every check an
+    /// unlock with a device key makes. Not a master-password unlock: phone
+    /// unlock's days still count from the last one.
+    async fn unlock_with_handoff(
+        &self,
+        handoff: &HandoffState,
+        key: Zeroizing<[u8; 32]>,
+    ) -> Result<(), Failure> {
+        let key = Key::from_slice(key.as_ref()).map_err(|e| Failure::new(e.0))?;
+        let handoff = handoff.clone();
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut state = inner.state();
+            let store = state.store.as_ref().expect("opened above");
+            let unlocked = store
+                .unlock_with_device_key(&key, &handoff.context, &handoff.wrapped)
+                .map_err(failure)?;
+            let opened = load(store, unlocked)?;
+            state.opened = Some(opened);
+            state.adopt_auto_lock();
+            state.adopt_phone_unlock();
+            state.handoff = None;
+            state.last_use = Instant::now();
+            Ok(())
+        })
+        .await
+        .map_err(|_| Failure::new("Unlocking failed"))?
+    }
+
+    /// Unlocks at the computer: quick unlock within its window, else the
+    /// master password.
+    async fn unlock_at_computer(&self, purpose: Option<&str>) -> Result<(), Failure> {
         if self.quick_unlock_with_kept_key().await? {
             return Ok(());
         }
@@ -986,6 +1282,7 @@ impl<U: Unlock> NativeBackend<U> {
             let opened = load(store, unlocked)?;
             state.opened = Some(opened);
             state.adopt_auto_lock();
+            state.adopt_phone_unlock();
             state.last_use = Instant::now();
             Ok(())
         })
@@ -1084,6 +1381,7 @@ impl<U: Unlock> NativeBackend<U> {
             };
             state.opened = Some(opened);
             state.adopt_auto_lock();
+            state.adopt_phone_unlock();
             state.last_use = Instant::now();
             true
         })
@@ -1436,6 +1734,14 @@ fn auto_lock_bytes(auto_lock: &AutoLock) -> Vec<u8> {
             vp_crypto::Part::Uint(auto_lock.minutes),
             vp_crypto::Part::Uint(u64::from(auto_lock.screen_lock)),
         ],
+    )
+}
+
+/// What the phone-unlock tag covers.
+fn phone_unlock_bytes(days: u32) -> Vec<u8> {
+    vp_crypto::ad(
+        "VisiPass phone unlock setting",
+        &[vp_crypto::Part::Uint(u64::from(days))],
     )
 }
 

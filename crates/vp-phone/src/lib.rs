@@ -545,6 +545,9 @@ pub enum Kind {
     Approve,
     /// Paste a new secret an agent asked for.
     Paste,
+    /// Unlock the locked vault (with phone unlock on), and answer what was
+    /// waiting for it in the same tap. Sealed from `kem_L`, with [`Held`].
+    Unlock,
 }
 
 impl Kind {
@@ -552,6 +555,7 @@ impl Kind {
         match self {
             Kind::Approve => "approve",
             Kind::Paste => "paste",
+            Kind::Unlock => "unlock",
         }
     }
 
@@ -559,6 +563,7 @@ impl Kind {
         match text {
             "approve" => Ok(Kind::Approve),
             "paste" => Ok(Kind::Paste),
+            "unlock" => Ok(Kind::Unlock),
             _ => Err(Error("unknown kind of request")),
         }
     }
@@ -764,6 +769,9 @@ impl Request {
 pub struct SealedRequest {
     pub pairing_id: PairingId,
     pub sealed: Sealed,
+    /// An unlock request's [`Held`], sealed from `kem_D` as the vault locked.
+    /// The phone opens it first: it names `kem_L`, the request's sender.
+    pub held: Option<Sealed>,
 }
 
 impl SealedRequest {
@@ -783,21 +791,130 @@ impl SealedRequest {
                 &Request::info(pairing_id),
                 body,
             )?,
+            held: None,
+        })
+    }
+
+    /// An unlock request: HPKE Auth mode from the lock's `kem_L`, which only
+    /// the [`Held`] beside it, sealed by this pairing's `kem_D`, vouches for.
+    pub fn seal_unlock(
+        kem_l: &DaemonKey,
+        kem_p: &PublicKey,
+        pairing_id: &PairingId,
+        body: &[u8],
+        held: Sealed,
+    ) -> Result<Self> {
+        Ok(Self {
+            held: Some(held),
+            ..Self::seal(kem_l, kem_p, pairing_id, body)?
         })
     }
 
     fn part(&self) -> Part<'_> {
-        Part::List(vec![Part::Bytes(&self.pairing_id), self.sealed.part()])
+        let mut parts = vec![Part::Bytes(&self.pairing_id), self.sealed.part()];
+        parts.extend(self.held.as_ref().map(Sealed::part));
+        Part::List(parts)
     }
 
     fn from_value(value: &Value) -> Result<Self> {
-        let [pairing_id, sealed] = value.list()? else {
-            return Err(Error("wrong number of fields"));
+        let (pairing_id, sealed, held) = match value.list()? {
+            [pairing_id, sealed] => (pairing_id, sealed, None),
+            [pairing_id, sealed, held] => (pairing_id, sealed, Some(Sealed::from_value(held)?)),
+            _ => return Err(Error("wrong number of fields")),
         };
         Ok(Self {
             pairing_id: pairing_id.fixed()?,
             sealed: Sealed::from_value(sealed)?,
+            held,
         })
+    }
+}
+
+// ---- Unlocking ------------------------------------------------------------
+
+/// What a phone holds for one lock, with phone unlock on: `K`, the key the
+/// Account Key was wrapped under as the vault locked, and `kem_L`, the key
+/// that lock's requests come from and its answer goes to. visipassd seals it
+/// to each phone with this pairing's `kem_D` and then forgets `K` and `kem_D`,
+/// so only a phone with its Secure Enclave can give `K` back.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Held {
+    pub lock_id: [u8; 16],
+    pub key: Zeroizing<[u8; 32]>,
+    pub kem_l: PublicKey,
+    /// Seconds since the Unix epoch after which neither side unlocks with it:
+    /// the master password's last use at the computer, plus the days chosen.
+    pub until: u64,
+}
+
+impl std::fmt::Debug for Held {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Held")
+            .field("lock_id", &self.lock_id)
+            .field("until", &self.until)
+            .finish_non_exhaustive()
+    }
+}
+
+const HELD: &str = "VisiPass phone unlock key body";
+
+impl Held {
+    pub fn info(pairing_id: &PairingId) -> Vec<u8> {
+        ad("VisiPass phone unlock key", &[Part::Bytes(pairing_id)])
+    }
+
+    pub fn encode(&self) -> Zeroizing<Vec<u8>> {
+        Zeroizing::new(ad(
+            HELD,
+            &[
+                Part::Bytes(&self.lock_id),
+                Part::Bytes(self.key.as_ref()),
+                Part::Bytes(&self.kem_l),
+                Part::Uint(self.until),
+            ],
+        ))
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        let [lock_id, key, kem_l, until] = parts(HELD, bytes)?;
+        Ok(Self {
+            lock_id: lock_id.fixed()?,
+            key: Zeroizing::new(key.fixed()?),
+            kem_l: kem_l.fixed()?,
+            until: until.uint()?,
+        })
+    }
+
+    /// HPKE Auth mode from `kem_D` to `kem_P`, made while the vault is still
+    /// unlocked.
+    pub fn seal(
+        &self,
+        kem_d: &DaemonKey,
+        kem_p: &PublicKey,
+        pairing_id: &PairingId,
+    ) -> Result<Sealed> {
+        Sealed::seal(
+            &OpModeS::Auth(kem_d.pair()),
+            kem_p,
+            &Self::info(pairing_id),
+            &self.encode(),
+        )
+    }
+
+    /// Opens as the phone. The app opens with `kem_P` in the Secure Enclave;
+    /// this is for tests and other clients.
+    pub fn open(
+        sealed: &Sealed,
+        kem_p: &DaemonKey,
+        kem_d: &PublicKey,
+        pairing_id: &PairingId,
+    ) -> Result<Self> {
+        let bytes = sealed.open(
+            &OpModeR::Auth(kem_public(kem_d)?),
+            kem_p,
+            &Self::info(pairing_id),
+        )?;
+        Self::decode(&bytes)
     }
 }
 
@@ -914,6 +1031,13 @@ fn paste_info(pairing_id: &PairingId, request_hash: &[u8; 32]) -> Vec<u8> {
     )
 }
 
+fn unlock_info(pairing_id: &PairingId, request_hash: &[u8; 32]) -> Vec<u8> {
+    ad(
+        "VisiPass phone unlock answer",
+        &[Part::Bytes(pairing_id), Part::Bytes(request_hash)],
+    )
+}
+
 impl Answer {
     pub fn encode(&self) -> Vec<u8> {
         ad(
@@ -958,6 +1082,43 @@ impl Answer {
         )
     }
 
+    /// The phone gives `K` back for an unlock request, sealed to that lock's
+    /// `kem_L` (HPKE Base) and bound to the request it answers.
+    pub fn seal_key(
+        kem_l: &PublicKey,
+        pairing_id: &PairingId,
+        request_hash: &[u8; 32],
+        key: &[u8; 32],
+    ) -> Result<Sealed> {
+        Sealed::seal(
+            &OpModeS::Base,
+            kem_l,
+            &unlock_info(pairing_id, request_hash),
+            key,
+        )
+    }
+
+    /// visipassd opens `K` with the lock's `kem_L`, after [`Answer::check`].
+    pub fn open_key(
+        &self,
+        kem_l: &DaemonKey,
+        pairing_id: &PairingId,
+    ) -> Result<Option<Zeroizing<[u8; 32]>>> {
+        self.value
+            .as_ref()
+            .map(|sealed| {
+                let key = sealed.open(
+                    &OpModeR::Base,
+                    kem_l,
+                    &unlock_info(pairing_id, &self.request_hash),
+                )?;
+                <[u8; 32]>::try_from(key.as_slice())
+                    .map(Zeroizing::new)
+                    .map_err(|_| Error("not an unlock key"))
+            })
+            .transpose()
+    }
+
     /// What `sign_P` signs: the encoded answer, by hash, for this pairing.
     pub fn signed_bytes(pairing_id: &PairingId, answer: &[u8]) -> Vec<u8> {
         ad(
@@ -968,7 +1129,8 @@ impl Answer {
 
     /// Checks 2 to 4 of "Answering": this answers exactly `sent`, which
     /// visipassd sent as `sent_body` to this pairing; it has not expired; the
-    /// choice was offered; a value comes with a paste, and only with one. That
+    /// choice was offered; a value (a paste, or an unlock's key) comes with a
+    /// paste or an unlock that is not denied, and only then. That
     /// nothing has answered yet is visipassd's to know.
     pub fn check(&self, sent: &Request, sent_body: &[u8], now: u64) -> Result<()> {
         if self.request_id != sent.request_id || self.request_hash != Request::hash(sent_body) {
@@ -980,7 +1142,8 @@ impl Answer {
         if !sent.choices.contains(&self.choice) {
             return Err(Error("that choice was not offered"));
         }
-        let wants_value = sent.kind == Kind::Paste && self.choice != Choice::Deny;
+        let wants_value =
+            matches!(sent.kind, Kind::Paste | Kind::Unlock) && self.choice != Choice::Deny;
         if wants_value != self.value.is_some() {
             return Err(Error("a pasted value is missing or unexpected"));
         }

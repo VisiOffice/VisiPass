@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use vp_core::Failure;
 use vp_core::backend::Backend;
 use vp_core::model::{Destination, Field, Item, PasswordRequest, Scope, UrlEntry, VaultRef};
@@ -931,4 +931,223 @@ async fn a_device_can_sync_through_storage_its_program_supplies() {
 
     b.sync_off().unwrap();
     assert!(b.sync_round().await.is_none());
+}
+
+// ---- Phone unlock -------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phone {
+    /// Gives back the key it was handed.
+    Unlocks,
+    /// Gives back some other key.
+    WrongKey,
+    Denies,
+    /// Never answers.
+    Silent,
+}
+
+type Handed = ([u8; 32], u64, usize);
+
+/// A desk that never answers unless told to, and a phone that keeps what it is
+/// handed as the vault locks.
+#[derive(Clone)]
+struct PhoneUnlocker {
+    phone: Arc<Mutex<Phone>>,
+    desk: Arc<Mutex<Option<&'static str>>>,
+    asked: Arc<AtomicUsize>,
+    /// What it was handed last: the key, until when, and how many phones.
+    held: Arc<Mutex<Option<Handed>>>,
+    phone_asked: Arc<AtomicUsize>,
+}
+
+impl PhoneUnlocker {
+    fn new(phone: Phone) -> Self {
+        Self {
+            phone: Arc::new(Mutex::new(phone)),
+            desk: Arc::default(),
+            asked: Arc::default(),
+            held: Arc::default(),
+            phone_asked: Arc::default(),
+        }
+    }
+}
+
+impl Unlock for PhoneUnlocker {
+    async fn password(
+        &self,
+        _retry: bool,
+        _purpose: Option<&str>,
+    ) -> Result<Option<Secret>, Failure> {
+        self.asked.fetch_add(1, Ordering::SeqCst);
+        // Like the window: waits until someone types.
+        loop {
+            let typed = *self.desk.lock().unwrap();
+            if let Some(password) = typed {
+                return Ok(Some(Secret::new(password.into())));
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    fn hand_off(&self, handoff: vp_native::Handoff<'_>) -> bool {
+        *self.held.lock().unwrap() = Some((*handoff.key, handoff.until, handoff.phones.len()));
+        true
+    }
+
+    async fn phone_unlock(&self, _purpose: Option<&str>) -> vp_native::PhoneUnlock {
+        self.phone_asked.fetch_add(1, Ordering::SeqCst);
+        let held = self.held.lock().unwrap().map(|(key, _, _)| key);
+        let phone = *self.phone.lock().unwrap();
+        match (phone, held) {
+            (Phone::Unlocks, Some(key)) => vp_native::PhoneUnlock::Key(key.into()),
+            (Phone::WrongKey, Some(_)) => vp_native::PhoneUnlock::Key([7; 32].into()),
+            (Phone::Denies, _) => vp_native::PhoneUnlock::Denied,
+            _ => std::future::pending().await,
+        }
+    }
+}
+
+/// A vault with one paired phone, phone unlock on for `days`, unlocked.
+async fn with_phone_unlock(
+    dir: &tempfile::TempDir,
+    phone: Phone,
+) -> (NativeBackend<PhoneUnlocker>, PhoneUnlocker) {
+    drop(created(dir).await);
+    let unlock = PhoneUnlocker::new(phone);
+    let backend = NativeBackend::with_params(paths(dir), unlock.clone(), CHEAP);
+    backend
+        .set_phone_unlock(Some(7), Some(Secret::new(PASSWORD.into())))
+        .await
+        .unwrap();
+    backend
+        .set_phone(&[1; 16], Some(b"a pairing record"))
+        .unwrap();
+    (backend, unlock)
+}
+
+#[tokio::test]
+async fn a_phone_unlocks_after_a_lock_with_the_key_it_was_handed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (backend, unlock) = with_phone_unlock(&dir, Phone::Unlocks).await;
+    let (days, until) = backend.phone_unlock().unwrap();
+    assert_eq!(days, 7);
+    let week = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 7 * 86_400;
+    assert!(
+        until.unwrap().abs_diff(week) < 60,
+        "seven days from the password"
+    );
+
+    backend.lock();
+    assert!(!backend.is_unlocked());
+    let (_, handed_until, phones) = unlock.held.lock().unwrap().unwrap();
+    assert_eq!((handed_until, phones), (until.unwrap(), 1));
+    assert_eq!(backend.list(&Scope::default()).await.unwrap().len(), 1);
+    assert_eq!(unlock.phone_asked.load(Ordering::SeqCst), 1);
+
+    // Again after the next lock, with a new key; the days still count from the password.
+    let first = unlock.held.lock().unwrap().unwrap().0;
+    backend.lock();
+    let (second, again, _) = unlock.held.lock().unwrap().unwrap();
+    assert_ne!(first, second);
+    assert_eq!(again, until.unwrap());
+    backend.list(&Scope::default()).await.unwrap();
+}
+
+#[tokio::test]
+async fn the_master_password_still_wins_when_typed_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let (backend, unlock) = with_phone_unlock(&dir, Phone::Silent).await;
+    backend.lock();
+    *unlock.desk.lock().unwrap() = Some(PASSWORD);
+    backend.list(&Scope::default()).await.unwrap();
+    assert!(backend.is_unlocked());
+    assert_eq!(unlock.phone_asked.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_full_lock_leaves_nothing_for_the_phone() {
+    let dir = tempfile::tempdir().unwrap();
+    let (backend, unlock) = with_phone_unlock(&dir, Phone::Unlocks).await;
+    backend.lock_fully();
+    *unlock.desk.lock().unwrap() = Some(PASSWORD);
+    backend.list(&Scope::default()).await.unwrap();
+    assert_eq!(unlock.phone_asked.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_wrong_key_unlocks_nothing_and_a_denial_cancels() {
+    let dir = tempfile::tempdir().unwrap();
+    let (backend, unlock) = with_phone_unlock(&dir, Phone::WrongKey).await;
+    backend.lock();
+    let typed = {
+        let unlock = unlock.clone();
+        async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert_eq!(unlock.phone_asked.load(Ordering::SeqCst), 1);
+            *unlock.desk.lock().unwrap() = Some(PASSWORD);
+        }
+    };
+    // The wrong key is no answer; the desk, asked again, decides.
+    let (listed, ()) = tokio::join!(
+        async {
+            loop {
+                match backend.list(&Scope::default()).await {
+                    Ok(items) => break items,
+                    Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+                }
+            }
+        },
+        typed
+    );
+    assert_eq!(listed.len(), 1);
+
+    *unlock.phone.lock().unwrap() = Phone::Denies;
+    *unlock.desk.lock().unwrap() = None;
+    backend.lock();
+    let denied = backend.list(&Scope::default()).await.unwrap_err();
+    assert!(denied.0.contains("denied on the phone"), "{}", denied.0);
+    assert!(!backend.is_unlocked());
+}
+
+#[tokio::test]
+async fn phone_unlock_is_off_unless_turned_on_and_a_forged_setting_is_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let (backend, unlock) = with_phone_unlock(&dir, Phone::Unlocks).await;
+    backend.set_phone_unlock(None, None).await.unwrap();
+    assert!(backend.phone_unlock().is_none());
+    backend.lock();
+    assert!(
+        unlock.held.lock().unwrap().is_none(),
+        "off: nothing handed over"
+    );
+
+    // Written by anything running as the user, without the account's keys.
+    let settings = paths(&dir).settings;
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+    json["phoneUnlockDays"] = 30.into();
+    json["phoneUnlockTag"] = "00".repeat(32).into();
+    std::fs::write(&settings, json.to_string()).unwrap();
+    let unlock = PhoneUnlocker::new(Phone::Unlocks);
+    *unlock.desk.lock().unwrap() = Some(PASSWORD);
+    let backend = NativeBackend::with_params(paths(&dir), unlock.clone(), CHEAP);
+    backend.list(&Scope::default()).await.unwrap();
+    assert!(backend.phone_unlock().is_none());
+    backend.lock();
+    assert!(unlock.held.lock().unwrap().is_none());
+
+    assert!(
+        backend
+            .set_phone_unlock(Some(31), Some(Secret::new(PASSWORD.into())))
+            .await
+            .is_err()
+    );
+    assert!(
+        backend.set_phone_unlock(Some(7), None).await.is_err(),
+        "turning it on takes the master password"
+    );
 }

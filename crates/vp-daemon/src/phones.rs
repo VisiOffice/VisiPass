@@ -6,9 +6,12 @@
 //! every paired phone and the desktop every time. Pairing is refused to
 //! agents, confirmed with the master password and a code compared on both
 //! screens, and recorded sealed in the vault, so nothing an agent can write
-//! adds a phone. Phones are asked only while the vault is unlocked, and never
-//! about unlocking it, the master password or anything else typed only at the
-//! computer.
+//! adds a phone. Phones are asked while the vault is unlocked, and, with phone
+//! unlock on, to unlock it: as the vault locks it hands each phone the key the
+//! Account Key was wrapped under (`vp_native::Handoff`) and forgets it, so a
+//! phone's Face ID, alongside the master-password window, opens it again. The
+//! master password and anything else typed only at the computer never go to a
+//! phone.
 //!
 //! The phone reaches visipassd through the VisiPass relay (`relay`), which
 //! passes its requests down a WebSocket visipassd holds open, or through
@@ -34,7 +37,7 @@ use vp_core::Failure;
 use vp_core::ipc::PasteMode;
 use vp_core::secret::Secret;
 use vp_phone::{
-    Choice, Commit, DaemonKey, Invite, Kind, Nonce, PairingId, Phone, PushToken, Request,
+    Choice, Commit, DaemonKey, Held, Invite, Kind, Nonce, PairingId, Phone, PushToken, Request,
     RequestId, Reveal, SealedRequest, SignedAnswer,
 };
 use zeroize::Zeroizing;
@@ -68,6 +71,8 @@ pub trait PairingStore: Send + Sync + 'static {
     fn relay_secret(&self) -> Option<Zeroizing<[u8; 32]>>;
     /// Checks the master password, opening the vault if it is locked.
     fn confirm_password(&self, password: Secret) -> BoxFuture<'_, Result<(), Failure>>;
+    /// Unlocks if needed, as any request needing the vault would.
+    fn unlock(&self) -> BoxFuture<'_, Result<(), Failure>>;
 }
 
 impl<U: vp_native::Unlock> PairingStore for vp_native::NativeBackend<U> {
@@ -84,6 +89,10 @@ impl<U: vp_native::Unlock> PairingStore for vp_native::NativeBackend<U> {
 
     fn confirm_password(&self, password: Secret) -> BoxFuture<'_, Result<(), Failure>> {
         Box::pin(vp_native::NativeBackend::confirm_password(self, password))
+    }
+
+    fn unlock(&self) -> BoxFuture<'_, Result<(), Failure>> {
+        Box::pin(vp_native::NativeBackend::unlock(self))
     }
 }
 
@@ -221,6 +230,46 @@ pub struct PhoneAnswer {
     pub value: Option<Secret>,
     /// The phone's name, for the access log.
     pub phone: String,
+    /// The lock's `K`, for an unlock request answered with anything but Deny.
+    pub key: Option<Zeroizing<[u8; 32]>>,
+}
+
+/// A phone, as far as a request to it needs: who it is, the key its answers
+/// are checked with, and the key a value it sends is sealed to (`kem_D`, or
+/// for an unlock request the lock's `kem_L`).
+struct Asked {
+    pairing_id: PairingId,
+    name: String,
+    sign_p: vp_phone::PublicKey,
+    opener: DaemonKey,
+}
+
+impl Asked {
+    fn of(pairing: &vp_phone::Pairing) -> Self {
+        Self {
+            pairing_id: pairing.pairing_id,
+            name: pairing.name.clone(),
+            sign_p: pairing.sign_p,
+            opener: pairing.kem_d.clone(),
+        }
+    }
+}
+
+/// What the phones need to unlock after a lock with phone unlock on. Memory
+/// only: neither `K` nor `kem_D` is in it.
+struct Locked {
+    kem_l: DaemonKey,
+    until: u64,
+    relay_secret: Zeroizing<[u8; 32]>,
+    phones: Vec<LockedPhone>,
+}
+
+struct LockedPhone {
+    asked: Arc<Asked>,
+    kem_p: vp_phone::PublicKey,
+    push_token: Vec<u8>,
+    /// [`Held`], sealed to this phone by its pairing's `kem_D` as the vault locked.
+    held: vp_phone::Sealed,
 }
 
 /// One question to every paired phone; the first valid answer goes here.
@@ -230,7 +279,7 @@ struct Ask {
 
 /// A request one phone may fetch and answer.
 struct Pending {
-    pairing: Arc<vp_phone::Pairing>,
+    pairing: Arc<Asked>,
     request: Request,
     body: Vec<u8>,
     sealed: SealedRequest,
@@ -272,6 +321,13 @@ struct State {
     rates: HashMap<PairingId, (Instant, u32)>,
     /// Who answered the last approval, while it is read back.
     answered_by: Option<String>,
+    /// After a lock with phone unlock on.
+    locked: Option<Locked>,
+    /// An approval asked while the vault is locked: the phones see it with the
+    /// unlock request, and one answer covers both.
+    waiting: Option<Prompt>,
+    /// That answer, for the approval, and the phone that gave it.
+    unlock_answer: Option<(Choice, String)>,
 }
 
 pub struct Phones {
@@ -699,7 +755,7 @@ impl Phones {
             state.pending.insert(
                 request.request_id,
                 Pending {
-                    pairing: Arc::new(pairing),
+                    pairing: Arc::new(Asked::of(&pairing)),
                     request,
                     body,
                     sealed,
@@ -716,6 +772,209 @@ impl Phones {
             ids,
             receiver: Some(receiver),
         })
+    }
+
+    // ---- Unlocking -----------------------------------------------------------
+
+    /// As the vault locks with phone unlock on: seals `K` to every paired
+    /// phone with its `kem_D` (which is then dropped with the records) and
+    /// keeps the rest for asking them later. `false` with no phone to hand it to.
+    pub fn hand_off(&self, handoff: vp_native::Handoff<'_>) -> bool {
+        let kem_l = DaemonKey::generate();
+        let held = Held {
+            lock_id: handoff.lock_id,
+            key: Zeroizing::new(*handoff.key),
+            kem_l: kem_l.public(),
+            until: handoff.until,
+        };
+        let phones: Vec<LockedPhone> = handoff
+            .phones
+            .iter()
+            .filter_map(|(id, record)| {
+                let pairing = vp_phone::Pairing::decode(record)
+                    .ok()
+                    .filter(|p| p.pairing_id == *id)?;
+                let sealed = held
+                    .seal(&pairing.kem_d, &pairing.kem_p, &pairing.pairing_id)
+                    .ok()?;
+                Some(LockedPhone {
+                    asked: Arc::new(Asked {
+                        opener: kem_l.clone(),
+                        ..Asked::of(&pairing)
+                    }),
+                    kem_p: pairing.kem_p,
+                    push_token: pairing.push_token.clone(),
+                    held: sealed,
+                })
+            })
+            .collect();
+        let handed = !phones.is_empty();
+        self.state().locked = handed.then(|| Locked {
+            kem_l,
+            until: handoff.until,
+            relay_secret: handoff.relay_secret,
+            phones,
+        });
+        // The tunnel stays open for the phones while the vault is locked.
+        self.tunnel_wanted.notify_waiters();
+        handed
+    }
+
+    /// Whether the vault is locked and the phones can unlock it.
+    fn can_unlock(&self) -> bool {
+        // Not holding the state while asking the vault: the vault calls
+        // `hand_off` while holding its own.
+        let held = self
+            .state()
+            .locked
+            .as_ref()
+            .is_some_and(|l| now() < l.until);
+        held && matches!(self.store.phones(), Ok(None))
+    }
+
+    /// Asks every phone holding the lock's key to unlock, with the approval
+    /// waiting on it if there is one.
+    pub async fn phone_unlock(self: &Arc<Self>, purpose: Option<String>) -> vp_native::PhoneUnlock {
+        use vp_native::PhoneUnlock;
+        let waiting = self.state().waiting.clone();
+        let Some(mut posted) = self.post_unlock(waiting.as_ref(), purpose.as_deref()) else {
+            return PhoneUnlock::NoAnswer;
+        };
+        let Some(answer) = posted.answer().await else {
+            return PhoneUnlock::NoAnswer;
+        };
+        let mut state = self.state();
+        if waiting.is_some() {
+            state.unlock_answer = Some((answer.choice, answer.phone.clone()));
+        }
+        match (answer.choice, answer.key) {
+            (Choice::Deny, _) => PhoneUnlock::Denied,
+            (_, Some(key)) => {
+                state.locked = None;
+                PhoneUnlock::Key(key)
+            }
+            (_, None) => PhoneUnlock::NoAnswer,
+        }
+    }
+
+    /// Seals an unlock request from `kem_L` to every phone holding the lock's
+    /// key. `None` when there is none, or phone unlock's days are over.
+    fn post_unlock(
+        self: &Arc<Self>,
+        waiting: Option<&Prompt>,
+        purpose: Option<&str>,
+    ) -> Option<Posted> {
+        let (phone_prompt, choices) = match waiting {
+            Some(prompt) => {
+                let shown = prompt.cleaned();
+                let choices = if shown.every_time {
+                    vec![Choice::Deny, Choice::Once]
+                } else {
+                    vec![Choice::Deny, Choice::Once, Choice::Task, Choice::Hours]
+                };
+                (
+                    vp_phone::Prompt {
+                        who: shown.who,
+                        action: shown.action,
+                        details: shown.details,
+                        secrets: shown.secrets,
+                        purpose: shown.purpose,
+                        paste: None,
+                    },
+                    choices,
+                )
+            }
+            None => (
+                vp_phone::Prompt {
+                    who: "VisiPass".into(),
+                    action: vp_core::ipc::clean_text(
+                        purpose.unwrap_or("unlock your vault"),
+                        false,
+                        300,
+                    ),
+                    ..Default::default()
+                },
+                vec![Choice::Deny, Choice::Once],
+            ),
+        };
+        let (sender, receiver) = oneshot::channel();
+        let ask = Arc::new(Ask {
+            answer: Mutex::new(Some(sender)),
+        });
+        let issued = now();
+        let mut ids = Vec::new();
+        let mut notified = Vec::new();
+        let mut guard = self.state();
+        let state = &mut *guard;
+        let locked = state.locked.as_ref().filter(|l| issued < l.until)?;
+        for phone in &locked.phones {
+            let request = Request::new(
+                phone.asked.pairing_id,
+                Kind::Unlock,
+                phone_prompt.clone(),
+                choices.clone(),
+                issued,
+            );
+            let body = request.encode();
+            let Ok(sealed) = SealedRequest::seal_unlock(
+                &locked.kem_l,
+                &phone.kem_p,
+                &phone.asked.pairing_id,
+                &body,
+                phone.held.clone(),
+            ) else {
+                continue;
+            };
+            ids.push(request.request_id);
+            if !phone.push_token.is_empty() {
+                notified.push(phone.push_token.clone());
+            }
+            state.pending.insert(
+                request.request_id,
+                Pending {
+                    pairing: phone.asked.clone(),
+                    request,
+                    body,
+                    sealed,
+                    ask: ask.clone(),
+                },
+            );
+        }
+        drop(guard);
+        if !ids.is_empty() {
+            self.notify(&notified);
+        }
+        (!ids.is_empty()).then(|| Posted {
+            phones: self.clone(),
+            ids,
+            receiver: Some(receiver),
+        })
+    }
+
+    /// Unlocks first when the vault is locked and the phones can open it, so
+    /// they can be asked: the master-password window here, and on the phones
+    /// the unlock with `prompt` on it. A phone's one answer covers both, given
+    /// back as the approval's.
+    async fn unlock_first(&self, prompt: &Prompt) -> Result<Option<(Choice, String)>, Failure> {
+        if !self.can_unlock() {
+            return Ok(None);
+        }
+        {
+            let mut state = self.state();
+            state.waiting = Some(prompt.clone());
+            state.unlock_answer = None;
+        }
+        let unlocked = self.store.unlock().await;
+        let answer = {
+            let mut state = self.state();
+            state.waiting = None;
+            state.unlock_answer.take()
+        };
+        match (unlocked, answer) {
+            (Ok(()), answer) => Ok(answer),
+            (Err(_), Some((Choice::Deny, phone))) => Ok(Some((Choice::Deny, phone))),
+            (Err(e), _) => Err(e),
+        }
     }
 
     fn withdraw(&self, ids: &[RequestId]) {
@@ -789,9 +1048,23 @@ impl Phones {
             {
                 return refuse(422, "The answer does not fit the request");
             }
-            pending.ask.clone()
+            (pending.ask.clone(), pending.request.kind)
         };
-        let value = match answer.open_value(&pairing.kem_d, &pairing.pairing_id) {
+        let (ask, kind) = ask;
+        let key = if kind == Kind::Unlock {
+            match answer.open_key(&pairing.opener, &pairing.pairing_id) {
+                Ok(key) => key,
+                Err(_) => return refuse(422, "The unlock key does not open"),
+            }
+        } else {
+            None
+        };
+        let opened = if kind == Kind::Unlock {
+            Ok(None)
+        } else {
+            answer.open_value(&pairing.opener, &pairing.pairing_id)
+        };
+        let value = match opened {
             Ok(None) => None,
             Ok(Some(v)) => match String::from_utf8(v.to_vec()) {
                 Ok(text) => Some(Secret::new(text)),
@@ -812,6 +1085,7 @@ impl Phones {
             choice: answer.choice,
             value,
             phone: pairing.name.clone(),
+            key,
         });
         (200, Vec::new())
     }
@@ -998,6 +1272,10 @@ impl<A: Approver> Approver for WithPhones<A> {
 
     async fn ask(&self, prompt: &Prompt) -> Result<Decision, Failure> {
         self.phones.state().answered_by = None;
+        if let Some((choice, phone)) = self.phones.unlock_first(prompt).await? {
+            self.phones.state().answered_by = Some(phone);
+            return Ok(decision(choice));
+        }
         let Some(mut posted) = self.phones.post(prompt, Kind::Approve) else {
             return self.desktop.ask(prompt).await;
         };
@@ -1035,6 +1313,11 @@ impl<A: Approver> Approver for WithPhones<A> {
             .as_ref()
             .is_some_and(|p| matches!(p.mode, PasteMode::Secret));
         self.phones.state().answered_by = None;
+        // Locked: unlock first (the phones see what the paste is for), then
+        // ask for the value as usual.
+        if secret && let Some((Choice::Deny, _)) = self.phones.unlock_first(prompt).await? {
+            return Ok(None);
+        }
         let Some(mut posted) = secret
             .then(|| self.phones.post(prompt, Kind::Paste))
             .flatten()
@@ -1070,5 +1353,46 @@ impl<A: Approver> Approver for WithPhones<A> {
 
     fn answered_by(&self) -> Option<String> {
         self.phones.state().answered_by.take()
+    }
+}
+
+/// The vault's [`vp_native::Unlock`], with the phones that may unlock it: the
+/// master-password window as before, and phone unlock through [`Phones`].
+/// The phones are set once they exist, since they read their records from the
+/// vault this unlocks.
+pub struct WithPhoneUnlock<U> {
+    pub unlock: U,
+    pub phones: Arc<std::sync::OnceLock<Arc<Phones>>>,
+}
+
+impl<U: vp_native::Unlock> vp_native::Unlock for WithPhoneUnlock<U> {
+    fn password(
+        &self,
+        retry: bool,
+        purpose: Option<&str>,
+    ) -> impl Future<Output = Result<Option<Secret>, Failure>> + Send {
+        self.unlock.password(retry, purpose)
+    }
+
+    fn confirm_presence(&self) -> impl Future<Output = vp_native::Presence> + Send {
+        self.unlock.confirm_presence()
+    }
+
+    fn hand_off(&self, handoff: vp_native::Handoff<'_>) -> bool {
+        self.phones.get().is_some_and(|p| p.hand_off(handoff))
+    }
+
+    fn phone_unlock(
+        &self,
+        purpose: Option<&str>,
+    ) -> impl Future<Output = vp_native::PhoneUnlock> + Send {
+        let phones = self.phones.get().cloned();
+        let purpose = purpose.map(String::from);
+        async move {
+            match phones {
+                Some(phones) => phones.phone_unlock(purpose).await,
+                None => vp_native::PhoneUnlock::NoAnswer,
+            }
+        }
     }
 }

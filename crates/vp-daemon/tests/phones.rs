@@ -27,6 +27,10 @@ type Aead = hpke::aead::ChaCha20Poly1305;
 struct Vault {
     phones: Arc<Mutex<BTreeMap<PairingId, Vec<u8>>>>,
     locked: Arc<Mutex<bool>>,
+    /// The phones, for unlocking as the native vault does.
+    unlocking: Arc<std::sync::OnceLock<Arc<Phones>>>,
+    /// The key a phone gave back.
+    unlocked_with: Arc<Mutex<Option<[u8; 32]>>>,
 }
 
 impl PairingStore for Vault {
@@ -62,6 +66,25 @@ impl PairingStore for Vault {
                 Ok(())
             } else {
                 Err(Failure::new("Wrong master password"))
+            }
+        })
+    }
+
+    /// The phones only; nobody types the master password here.
+    fn unlock(&self) -> BoxFuture<'_, Result<(), Failure>> {
+        Box::pin(async move {
+            if !*self.locked.lock().unwrap() {
+                return Ok(());
+            }
+            let phones = self.unlocking.get().unwrap().clone();
+            match phones.phone_unlock(None).await {
+                vp_native::PhoneUnlock::Key(key) => {
+                    *self.unlocked_with.lock().unwrap() = Some(*key);
+                    *self.locked.lock().unwrap() = false;
+                    Ok(())
+                }
+                vp_native::PhoneUnlock::Denied => Err(Failure::new("denied on the phone")),
+                vp_native::PhoneUnlock::NoAnswer => Err(Failure::new("nobody answered")),
             }
         })
     }
@@ -294,6 +317,7 @@ struct Setup {
 async fn setup() -> Setup {
     let vault = Vault::default();
     let phones = Phones::new(vault.clone(), 0);
+    let _ = vault.unlocking.set(phones.clone());
     let port = phones.listen().await.unwrap();
     Setup {
         vault,
@@ -1021,4 +1045,226 @@ async fn only_the_paired_phone_sets_its_push_token() {
         404
     );
     assert_eq!(http(s.port, "POST", "/v1/push", b"junk").await.0, 400);
+}
+
+// ---- Unlocking from the phone ------------------------------------------------------
+
+impl SoftPhone {
+    /// Fetches an unlock request and opens it as the app would: `Held` from
+    /// this pairing's daemon first, then the request from the `kem_L` it names.
+    async fn pending_unlock(&self, port: u16, invite: &Invite) -> Option<(Request, Vec<u8>, Held)> {
+        let path = format!("/v1/pending/{}", vp_daemon::phones::hex(&invite.pairing_id));
+        let (status, body) = http(port, "GET", &path, &[]).await;
+        if status != 200 {
+            return None;
+        }
+        let sealed = decode_pending(&body).unwrap().pop()?;
+        let kem = DaemonKey::from_bytes(&self.kem.to_bytes()).unwrap();
+        let held = Held::open(
+            sealed.held.as_ref().unwrap(),
+            &kem,
+            &invite.kem_d,
+            &invite.pairing_id,
+        )
+        .unwrap();
+        let enc = <Kem as hpke::Kem>::EncappedKey::from_bytes(&sealed.sealed.enc).unwrap();
+        let sender = <Kem as hpke::Kem>::PublicKey::from_bytes(&held.kem_l).unwrap();
+        let body = hpke::single_shot_open::<Aead, Kdf, Kem>(
+            &OpModeR::Auth(sender),
+            &self.kem,
+            &enc,
+            &Request::info(&sealed.pairing_id),
+            &sealed.sealed.ciphertext,
+            &[],
+        )
+        .unwrap();
+        Some((Request::decode(&body).unwrap(), body, held))
+    }
+
+    fn answer_unlock(
+        &self,
+        invite: &Invite,
+        request: &Request,
+        body: &[u8],
+        choice: Choice,
+        held: &Held,
+    ) -> Vec<u8> {
+        let hash = Request::hash(body);
+        let answer = Answer {
+            request_id: request.request_id,
+            request_hash: hash,
+            choice,
+            value: (choice != Choice::Deny).then(|| {
+                Answer::seal_key(&held.kem_l, &invite.pairing_id, &hash, &held.key).unwrap()
+            }),
+        }
+        .encode();
+        SignedAnswer {
+            pairing_id: invite.pairing_id,
+            signature: self.sign(&Answer::signed_bytes(&invite.pairing_id, &answer)),
+            answer,
+        }
+        .encode()
+    }
+}
+
+/// Locks the vault as the native vault does with phone unlock on: `K` to the
+/// phones, then the records are out of reach. Returns `K`.
+fn lock_with_handoff(s: &Setup, until: u64) -> [u8; 32] {
+    let key = vp_crypto::random::<32>();
+    let records = s.vault.phones().unwrap().unwrap();
+    let handed = s.phones.hand_off(vp_native::Handoff {
+        key: &key,
+        lock_id: [3; 16],
+        until,
+        phones: &records,
+        relay_secret: Zeroizing::new([0x11; 32]),
+    });
+    assert!(handed);
+    *s.vault.locked.lock().unwrap() = true;
+    key
+}
+
+async fn unlock_question(
+    s: &Setup,
+    phone: &SoftPhone,
+    invite: &Invite,
+) -> (Request, Vec<u8>, Held) {
+    for _ in 0..100 {
+        if let Some(found) = phone.pending_unlock(s.port, invite).await {
+            return found;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("the phone was never asked to unlock");
+}
+
+#[tokio::test]
+async fn one_answer_on_the_phone_unlocks_and_approves() {
+    let s = setup().await;
+    let (phone, invite) = paired(&s, "Robert's iPhone").await;
+    let key = lock_with_handoff(&s, vp_daemon::phones::now() + 3600);
+    let approver = WithPhones {
+        desktop: Desktop::new(Desk::Never),
+        phones: s.phones.clone(),
+    };
+    let asked = prompt();
+    let (decision, ()) = tokio::join!(approver.ask(&asked), async {
+        let (request, body, held) = unlock_question(&s, &phone, &invite).await;
+        assert_eq!(request.kind, Kind::Unlock);
+        assert_eq!(request.prompt.action, "inject 1 secret into a command");
+        assert_eq!(*held.key, key);
+        let reply = http(
+            s.port,
+            "POST",
+            "/v1/answer",
+            &phone.answer_unlock(&invite, &request, &body, Choice::Task, &held),
+        )
+        .await;
+        assert_eq!(reply.0, 200, "{}", String::from_utf8_lossy(&reply.1));
+    });
+    assert_eq!(decision.unwrap(), Decision::Task);
+    assert_eq!(*s.vault.unlocked_with.lock().unwrap(), Some(key));
+    assert!(!*s.vault.locked.lock().unwrap());
+    assert_eq!(approver.answered_by().as_deref(), Some("Robert's iPhone"));
+}
+
+#[tokio::test]
+async fn denying_on_the_phone_keeps_the_vault_locked() {
+    let s = setup().await;
+    let (phone, invite) = paired(&s, "phone").await;
+    lock_with_handoff(&s, vp_daemon::phones::now() + 3600);
+    let approver = WithPhones {
+        desktop: Desktop::new(Desk::Never),
+        phones: s.phones.clone(),
+    };
+    let asked = prompt();
+    let (decision, ()) = tokio::join!(approver.ask(&asked), async {
+        let (request, body, held) = unlock_question(&s, &phone, &invite).await;
+        let reply = http(
+            s.port,
+            "POST",
+            "/v1/answer",
+            &phone.answer_unlock(&invite, &request, &body, Choice::Deny, &held),
+        )
+        .await;
+        assert_eq!(reply.0, 200);
+    });
+    assert_eq!(decision.unwrap(), Decision::Deny);
+    assert!(*s.vault.locked.lock().unwrap());
+    assert!(s.vault.unlocked_with.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn an_unlock_answer_without_the_key_or_from_another_phone_counts_as_none() {
+    let s = setup().await;
+    let (phone, invite) = paired(&s, "phone").await;
+    lock_with_handoff(&s, vp_daemon::phones::now() + 3600);
+    let unlocking = tokio::spawn({
+        let phones = s.phones.clone();
+        async move { phones.phone_unlock(Some("unlock your vault".into())).await }
+    });
+    let (request, body, held) = unlock_question(&s, &phone, &invite).await;
+    assert_eq!(request.choices, vec![Choice::Deny, Choice::Once]);
+
+    // "Once" with no key.
+    let hash = Request::hash(&body);
+    let keyless = Answer {
+        request_id: request.request_id,
+        request_hash: hash,
+        choice: Choice::Once,
+        value: None,
+    }
+    .encode();
+    let keyless = SignedAnswer {
+        pairing_id: invite.pairing_id,
+        signature: phone.sign(&Answer::signed_bytes(&invite.pairing_id, &keyless)),
+        answer: keyless,
+    };
+    assert_eq!(
+        http(s.port, "POST", "/v1/answer", &keyless.encode())
+            .await
+            .0,
+        422
+    );
+    // Signed by another phone.
+    let impostor = SoftPhone::new("impostor");
+    let forged = impostor.answer_unlock(&invite, &request, &body, Choice::Once, &held);
+    assert_eq!(http(s.port, "POST", "/v1/answer", &forged).await.0, 403);
+
+    let good = phone.answer_unlock(&invite, &request, &body, Choice::Once, &held);
+    assert_eq!(http(s.port, "POST", "/v1/answer", &good).await.0, 200);
+    assert!(matches!(
+        unlocking.await.unwrap(),
+        vp_native::PhoneUnlock::Key(key) if *key == *held.key
+    ));
+}
+
+#[tokio::test]
+async fn after_its_days_the_phone_is_not_asked_to_unlock() {
+    let s = setup().await;
+    let (phone, invite) = paired(&s, "phone").await;
+    let past = vp_daemon::phones::now() - 1;
+    let key = vp_crypto::random::<32>();
+    let records = s.vault.phones().unwrap().unwrap();
+    s.phones.hand_off(vp_native::Handoff {
+        key: &key,
+        lock_id: [3; 16],
+        until: past,
+        phones: &records,
+        relay_secret: Zeroizing::new([0x11; 32]),
+    });
+    *s.vault.locked.lock().unwrap() = true;
+    let desktop = Desktop::new(Desk::After(Duration::from_millis(100), Decision::Deny));
+    let approver = WithPhones {
+        desktop: desktop.clone(),
+        phones: s.phones.clone(),
+    };
+    assert_eq!(approver.ask(&prompt()).await.unwrap(), Decision::Deny);
+    assert_eq!(desktop.asked.lock().unwrap().len(), 1, "only the desktop");
+    assert!(phone.pending_unlock(s.port, &invite).await.is_none());
+    assert!(matches!(
+        s.phones.phone_unlock(None).await,
+        vp_native::PhoneUnlock::NoAnswer
+    ));
 }

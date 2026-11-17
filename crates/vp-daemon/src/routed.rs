@@ -129,12 +129,15 @@ impl<U: Unlock> Backend for Routed<U> {
 
     fn native_status(&self) -> Option<NativeStatus> {
         let quick = self.native.quick_unlock();
+        let phone = self.native.phone_unlock();
         Some(NativeStatus {
             exists: self.native.exists(),
             unlocked: self.native.is_unlocked(),
             auto_lock: self.native.auto_lock(),
             quick_unlock: quick.as_ref().map(|q| q.window),
             quick_unlock_remaining: quick.and_then(|q| q.remaining),
+            phone_unlock_days: phone.map(|(days, _)| days),
+            phone_unlock_until: phone.and_then(|(_, until)| until),
         })
     }
 
@@ -183,6 +186,28 @@ impl<U: Unlock> Backend for Routed<U> {
             ));
         }
         self.native.set_quick_unlock(window).await
+    }
+
+    async fn native_phone_unlock(
+        &self,
+        days: Option<u32>,
+        password: Option<Secret>,
+    ) -> Result<(), Failure> {
+        if !self.native.exists() {
+            return Err(Failure::new(
+                "Create your VisiPass vault first with `vp init`",
+            ));
+        }
+        self.native.set_phone_unlock(days, password).await
+    }
+
+    async fn native_unlock(&self, password: Secret) -> Result<(), Failure> {
+        if !self.native.exists() {
+            return Err(Failure::new(
+                "Create your VisiPass vault first with `vp init`",
+            ));
+        }
+        self.native.confirm_password(password).await
     }
 
     async fn native_import(&self, vault: Option<String>) -> Result<Value, Failure> {

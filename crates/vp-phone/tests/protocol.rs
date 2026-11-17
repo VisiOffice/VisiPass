@@ -678,3 +678,94 @@ fn only_the_paired_phone_can_set_its_push_token() {
         assert!(sealed.open(&kem_d, &kem_p.public()).is_err());
     }
 }
+
+#[test]
+fn an_unlock_key_goes_back_only_to_its_lock_from_its_phone() {
+    let p = paired();
+    let id = p.invite.pairing_id;
+    let phone_kem = DaemonKey::from_bytes(&p.phone.kem.to_bytes()).unwrap();
+
+    // As the vault locks: K and kem_L, handed to the phone under kem_D.
+    let kem_l = DaemonKey::generate();
+    let key = vp_crypto::random::<32>();
+    let held = Held {
+        lock_id: [7; 16],
+        key: key.into(),
+        kem_l: kem_l.public(),
+        until: NOW + 7 * 86_400,
+    };
+    let held_sealed = held.seal(&p.daemon, &p.phone.kem_p(), &id).unwrap();
+
+    // Later, locked: the request comes from kem_L.
+    let request = Request::new(
+        id,
+        Kind::Unlock,
+        prompt(),
+        vec![Choice::Deny, Choice::Once],
+        NOW,
+    );
+    let body = request.encode();
+    let sealed =
+        SealedRequest::seal_unlock(&kem_l, &p.phone.kem_p(), &id, &body, held_sealed.clone())
+            .unwrap();
+    let pending = decode_pending(&encode_pending(std::slice::from_ref(&sealed))).unwrap();
+    assert_eq!(pending[0], sealed);
+
+    // The phone opens Held from its daemon, then the request from kem_L.
+    let opened = Held::open(
+        pending[0].held.as_ref().unwrap(),
+        &phone_kem,
+        &p.daemon.public(),
+        &id,
+    )
+    .unwrap();
+    assert_eq!(opened, held);
+    assert_eq!(p.phone.open(&pending[0], &opened.kem_l).unwrap(), body);
+
+    // Held from anything but this pairing's daemon, or for another pairing.
+    let impostor = DaemonKey::generate();
+    let forged = held.seal(&impostor, &p.phone.kem_p(), &id).unwrap();
+    assert!(Held::open(&forged, &phone_kem, &p.daemon.public(), &id).is_err());
+    assert!(Held::open(&held_sealed, &phone_kem, &p.daemon.public(), &[9; 16]).is_err());
+    // A request from a key Held does not name.
+    let other = SealedRequest::seal(&impostor, &p.phone.kem_p(), &id, &body).unwrap();
+    assert!(p.phone.open(&other, &opened.kem_l).is_err());
+
+    // The answer: K sealed to kem_L, signed by sign_P.
+    let hash = Request::hash(&body);
+    let answer = Answer {
+        request_id: request.request_id,
+        request_hash: hash,
+        choice: Choice::Once,
+        value: Some(Answer::seal_key(&opened.kem_l, &id, &hash, &opened.key).unwrap()),
+    };
+    let verified = p
+        .phone
+        .answer(&id, &answer)
+        .verify(&p.phone.sign_p())
+        .unwrap();
+    verified.check(&request, &body, NOW).unwrap();
+    assert_eq!(*verified.open_key(&kem_l, &id).unwrap().unwrap(), key);
+
+    // Not with another lock's key, not moved from another request, and not as a paste.
+    assert!(verified.open_key(&DaemonKey::generate(), &id).is_err());
+    let moved = Answer {
+        value: Some(Answer::seal_key(&kem_l.public(), &id, &[0; 32], &key).unwrap()),
+        ..answer.clone()
+    };
+    assert!(moved.open_key(&kem_l, &id).is_err());
+    assert!(verified.open_value(&kem_l, &id).is_err());
+
+    // Unlocking needs the key; Deny sends none.
+    let empty = Answer {
+        value: None,
+        ..answer.clone()
+    };
+    assert!(empty.check(&request, &body, NOW).is_err());
+    let deny = Answer {
+        choice: Choice::Deny,
+        value: None,
+        ..answer
+    };
+    deny.check(&request, &body, NOW).unwrap();
+}
