@@ -1,6 +1,6 @@
 pkgbase = visipass-bin
 	pkgdesc = Password manager for coding agents: they find, use and save secrets without seeing them
-	pkgver = 0.14.2
+	pkgver = 0.16.0
 	pkgrel = 1
 	url = https://github.com/VisiOffice/VisiPass
 	arch = x86_64
@@ -20,9 +20,9 @@ pkgbase = visipass-bin
 	optdepends = zenity: fallback approval dialog
 	provides = visipass
 	conflicts = visipass
-	source_x86_64 = https://github.com/VisiOffice/VisiPass/releases/download/v0.14.2/visipass-0.14.2-linux-x86_64.tar.gz
-	sha256sums_x86_64 = 344662f1260a3ec751de469d0f9de52c629249e74c01ce756e4b69e6df204bab
-	source_aarch64 = https://github.com/VisiOffice/VisiPass/releases/download/v0.14.2/visipass-0.14.2-linux-aarch64.tar.gz
-	sha256sums_aarch64 = b9f090db84ce13301ea5fe61e48238d30315346bdc5b33772bd07b736947e01d
+	source_x86_64 = https://github.com/VisiOffice/VisiPass/releases/download/v0.16.0/visipass-0.16.0-linux-x86_64.tar.gz
+	sha256sums_x86_64 = 6fb852c05ec89a06ba2b4ec3f8438ba63e36ea3e2f9461a4d10bb1fd42c08dfb
+	source_aarch64 = https://github.com/VisiOffice/VisiPass/releases/download/v0.16.0/visipass-0.16.0-linux-aarch64.tar.gz
+	sha256sums_aarch64 = 82753214ea2e474f8d29ebc2ca366485f092f6cd31e20d19eccf53145513d8ae
 
 pkgname = visipass-bin
