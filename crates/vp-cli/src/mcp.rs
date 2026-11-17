@@ -1,11 +1,11 @@
 //! `vp mcp`: VisiPass as an MCP server over stdio (JSON-RPC 2.0, one message
 //! per line).
 //!
-//! The tools find, inventory, audit, request, write and check env files, and
-//! show grants and the log. None of them returns a secret value, and there is
-//! deliberately no tool that reads or runs with one: agents use `vp run` /
-//! `vp env run` in the shell for that, where the human sees the command in the
-//! approval prompt.
+//! The tools find, inventory, audit, request secrets, create vaults, write and
+//! check env files, and show grants and the log. None of them returns a secret
+//! value, and there is deliberately no tool that reads or runs with one: agents
+//! use `vp run` / `vp env run` in the shell for that, where the human sees the
+//! command in the approval prompt.
 
 use crate::{ImportOptions, client, env_import};
 use serde_json::{Value, json};
@@ -63,6 +63,18 @@ fn tools() -> Value {
                     "notes": { "type": "string" }
                 },
                 "required": ["title", "vault", "purpose"]
+            }
+        },
+        {
+            "name": "create_vault",
+            "description": "Create an empty vault. The human approves in a VisiPass window. Refused if a vault already has that name (any case): use that one.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "The vault's name, e.g. \"VisiCasts\"" },
+                    "purpose": { "type": "string", "description": "Why you need it; shown to the human" }
+                },
+                "required": ["name", "purpose"]
             }
         },
         {
@@ -153,6 +165,10 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, Failure> {
                 url: text(args, "url"),
                 notes: text(args, "notes"),
             },
+            purpose: text(args, "purpose"),
+        }),
+        "create_vault" => client::call(Request::CreateVault {
+            name: required(args, "name")?,
             purpose: text(args, "purpose"),
         }),
         "env_write" => {

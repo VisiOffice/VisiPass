@@ -2257,7 +2257,13 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
         channel: Channel,
     ) -> Response {
         let name = request.name();
-        let assessment = assess(&request, requester);
+        let mut assessment = assess(&request, requester);
+        // A vault made in the app is the human's own click, like saving an
+        // item there: nothing to approve.
+        if channel == Channel::App && matches!(request, Request::CreateVault { .. }) {
+            assessment.need = None;
+            assessment.prompt = None;
+        }
         // Everything is logged except reading VisiPass's own state, a page load
         // asking which logins it has (titles only, never an unlock), and the
         // app's own browsing, which would bury everything else.

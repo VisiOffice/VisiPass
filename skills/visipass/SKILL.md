@@ -78,7 +78,7 @@ vp env check .env.tpl                        # which references resolve; never v
 
 ## MCP
 
-`vp mcp` serves the same discovery, request, env and grant tools over MCP (stdio). None returns a value and none runs commands; use `vp run` / `vp env run` in the shell for that.
+`vp mcp` serves the same discovery, request, vault-creation, env and grant tools over MCP (stdio). None returns a value and none runs commands; use `vp run` / `vp env run` in the shell for that.
 
 ## Unattended agents
 

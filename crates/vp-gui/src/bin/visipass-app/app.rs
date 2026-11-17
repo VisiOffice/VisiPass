@@ -95,6 +95,8 @@ pub struct VisiPassApp {
     conflicts: Vec<Vec<(String, Item)>>,
     /// Conflicts whose concealed values are shown, until.
     conflicts_revealed: HashMap<String, Instant>,
+    /// The name field for a new vault, while the human is typing one.
+    new_vault: Option<Entity<TextInput>>,
 }
 
 const DUPLICATES_PAGE: usize = 40;
@@ -210,6 +212,7 @@ impl VisiPassApp {
             error: None,
             busy_since: None,
             confirm_archive: false,
+            new_vault: None,
             grants: Vec::new(),
             log: Vec::new(),
             duplicates: None,
@@ -507,6 +510,52 @@ impl VisiPassApp {
     fn note(&mut self, text: &str, cx: &mut Context<Self>) {
         self.toast = Some((text.to_string(), Instant::now() + Duration::from_secs(3)));
         cx.notify();
+    }
+
+    /// Shows the name field under the vault list.
+    fn start_new_vault(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| TextInput::new(self.theme.clone(), "Vault name", cx));
+        cx.subscribe(&input, |this, input, event: &InputEvent, cx| match event {
+            InputEvent::Submit => {
+                let name = input.read(cx).text().trim().to_string();
+                if !name.is_empty() {
+                    this.create_vault(name, cx);
+                }
+            }
+            InputEvent::Cancel => {
+                this.new_vault = None;
+                cx.notify();
+            }
+            InputEvent::Changed => {}
+        })
+        .detach();
+        window.focus(&input.read(cx).focus_handle(cx), cx);
+        self.new_vault = Some(input);
+        cx.notify();
+    }
+
+    /// Creating a vault from the app is the human's own act, so visipassd
+    /// asks nothing more (like saving an item).
+    fn create_vault(&mut self, name: String, cx: &mut Context<Self>) {
+        self.request(
+            Request::CreateVault {
+                name,
+                purpose: None,
+            },
+            cx,
+            |this, value, cx| {
+                this.new_vault = None;
+                let name = value["vault"]["name"].as_str().unwrap_or_default();
+                this.toast = Some((
+                    format!("Created the vault \"{name}\"."),
+                    Instant::now() + Duration::from_secs(4),
+                ));
+                if let Some(id) = value["vault"]["id"].as_str() {
+                    this.filter = Filter::Vault(id.to_string());
+                }
+                this.reload(cx);
+            },
+        );
     }
 
     fn set_filter(&mut self, filter: Filter, cx: &mut Context<Self>) {
@@ -1038,6 +1087,25 @@ impl VisiPassApp {
                 cx,
             ));
         }
+        sidebar = match &self.new_vault {
+            Some(input) => sidebar.child(div().px(px(4.)).py(px(2.)).child(input.clone())),
+            None => sidebar.child(
+                div()
+                    .id("new-vault")
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(10.))
+                    .py(px(4.))
+                    .rounded(px(t.radius))
+                    .cursor_pointer()
+                    .text_color(t.muted)
+                    .hover(|s| s.bg(alpha(t.foreground, t.controls.hover_fill_alpha)))
+                    .on_click(cx.listener(|this, _, window, cx| this.start_new_vault(window, cx)))
+                    .child(div().w(px(16.)).flex().justify_center().child("+"))
+                    .child("New vault"),
+            ),
+        };
         sidebar
             .child(div().flex_1().min_h(px(12.)))
             .when(!self.conflicts.is_empty(), |d| {
