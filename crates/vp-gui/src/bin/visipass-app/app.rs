@@ -416,6 +416,30 @@ impl VisiPassApp {
             .filter(|v| !v.is_empty())
     }
 
+    /// Which field `field_value` would read, for the key shown on its button.
+    fn field_id(&self, purpose: &str, id: &str) -> Option<String> {
+        let item = self.detail.as_ref()?;
+        item.fields
+            .iter()
+            .find(|f| f.purpose.as_deref() == Some(purpose) || f.id == id)
+            .filter(|f| f.value.as_ref().is_some_and(|v| !v.expose().is_empty()))
+            .map(|f| f.id.clone())
+    }
+
+    /// The shortcut for a field's Copy button, if it copies this field.
+    fn copy_shortcut(&self, key: &str) -> Option<&'static str> {
+        let password = self
+            .field_id("PASSWORD", "password")
+            .or_else(|| self.field_id("", "credential"));
+        if self.field_id("USERNAME", "username").as_deref() == Some(key) {
+            Some("copy-username")
+        } else if password.as_deref() == Some(key) {
+            Some("copy-password")
+        } else {
+            None
+        }
+    }
+
     fn copy_username(&mut self, cx: &mut Context<Self>) {
         match self.field_value("USERNAME", "username") {
             Some(v) => self.copy("username", &v, false, cx),
@@ -931,7 +955,29 @@ impl VisiPassApp {
         cx: &mut Context<Self>,
         on: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> impl IntoElement {
-        self.icon_button(id, None, label, cx, on)
+        self.icon_button(id, None, label, None, cx, on)
+    }
+
+    /// A button that shows the key of the shortcut that does the same.
+    fn keyed_button(
+        &self,
+        id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        shortcut: &str,
+        cx: &mut Context<Self>,
+        on: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> impl IntoElement {
+        self.icon_button(id, None, label, Some(shortcut), cx, on)
+    }
+
+    /// The first key bound to a shortcut, as the cheat sheet writes it.
+    fn key_for(&self, shortcut: &str) -> Option<String> {
+        SHORTCUTS
+            .iter()
+            .zip(&self.keymap.keys)
+            .find(|(s, _)| s.name == shortcut)
+            .and_then(|(_, keys)| keys.first())
+            .map(|k| pretty(k))
     }
 
     fn icon_button(
@@ -939,9 +985,11 @@ impl VisiPassApp {
         id: impl Into<SharedString>,
         leading: Option<(Icon, gpui::Rgba)>,
         label: impl Into<SharedString>,
+        shortcut: Option<&str>,
         cx: &mut Context<Self>,
         on: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> impl IntoElement {
+        let hint = shortcut.and_then(|s| self.key_for(s));
         let t = &self.theme;
         let c = &t.controls;
         div()
@@ -967,6 +1015,18 @@ impl VisiPassApp {
                 d.child(icon(glyph, t.size(1.0)).text_color(color))
             })
             .child(label.into())
+            .when_some(hint, |d, hint| {
+                d.child(
+                    div()
+                        .px(px(4.))
+                        .rounded(px(t.radius))
+                        .border_1()
+                        .border_color(alpha(t.foreground, 0.15))
+                        .text_size(px(t.size(0.75)))
+                        .text_color(t.muted)
+                        .child(hint),
+                )
+            })
     }
 
     fn nav_row(
@@ -1716,6 +1776,22 @@ impl VisiPassApp {
                 .into_any_element();
         };
 
+        // The fields the Reveal and one-time-code shortcuts act on.
+        let reveal_id = item
+            .fields
+            .iter()
+            .find(|f| f.concealed())
+            .map(|f| f.id.clone());
+        let code_id = item
+            .fields
+            .iter()
+            .filter(|f| f.kind == "OTP")
+            .find(|f| {
+                f.value
+                    .as_ref()
+                    .is_some_and(|v| Totp::parse(v.expose()).is_ok())
+            })
+            .map(|f| f.id.clone());
         let mut fields = div().min_w(px(0.)).flex().flex_col().gap(px(12.));
         for field in item
             .fields
@@ -1753,12 +1829,19 @@ impl VisiPassApp {
                                     .text_color(if left <= 5 { t.danger } else { t.muted })
                                     .child(format!("{left}s")),
                             )
-                            .child(self.button(
-                                format!("copy-{key}"),
-                                "Copy",
-                                cx,
-                                move |this, _, cx| this.copy("one-time code", &copy_code, true, cx),
-                            ));
+                            .child(
+                                self.icon_button(
+                                    format!("copy-{key}"),
+                                    None,
+                                    "Copy",
+                                    (code_id.as_deref() == Some(key.as_str()))
+                                        .then_some("copy-one-time-code"),
+                                    cx,
+                                    move |this, _, cx| {
+                                        this.copy("one-time code", &copy_code, true, cx)
+                                    },
+                                ),
+                            );
                     }
                     Err(_) => {
                         row = row.child(
@@ -1789,13 +1872,15 @@ impl VisiPassApp {
                         .truncate()
                         .child(shown),
                     )
-                    .child(self.button(
+                    .child(self.icon_button(
                         format!("reveal-{key}"),
+                        None,
                         if self.revealed.contains_key(&key) {
                             "Hide"
                         } else {
                             "Reveal"
                         },
+                        (reveal_id.as_deref() == Some(key.as_str())).then_some("reveal-password"),
                         cx,
                         move |this, _, cx| {
                             if this.revealed.remove(&toggle_key).is_none() {
@@ -1805,11 +1890,14 @@ impl VisiPassApp {
                             cx.notify();
                         },
                     ))
-                    .child(
-                        self.button(format!("copy-{key}"), "Copy", cx, move |this, _, cx| {
-                            this.copy(&copy_label, copy_value.expose(), true, cx)
-                        }),
-                    );
+                    .child(self.icon_button(
+                        format!("copy-{key}"),
+                        None,
+                        "Copy",
+                        self.copy_shortcut(&key),
+                        cx,
+                        move |this, _, cx| this.copy(&copy_label, copy_value.expose(), true, cx),
+                    ));
             } else {
                 let copy_value = value.clone();
                 let copy_label = label.clone();
@@ -1836,9 +1924,11 @@ impl VisiPassApp {
                         )
                     })
                     .when(!multiline, |d| {
-                        d.child(self.button(
+                        d.child(self.icon_button(
                             format!("copy-{key}"),
+                            None,
                             "Copy",
+                            self.copy_shortcut(&key),
                             cx,
                             move |this, _, cx| {
                                 this.copy(&copy_label, copy_value.expose(), false, cx)
@@ -1896,9 +1986,11 @@ impl VisiPassApp {
                                     .child(href.clone()),
                             )
                             .when(safe, |d| {
-                                d.child(self.button(
+                                d.child(self.icon_button(
                                     format!("open-{i}"),
+                                    None,
                                     "Open",
+                                    (i == 0).then_some("open-website"),
                                     cx,
                                     move |_, _, cx| cx.open_url(&open_href),
                                 ))
@@ -1961,19 +2053,23 @@ impl VisiPassApp {
                     (Icon::Star, t.muted)
                 }),
                 "Favorite",
+                Some("toggle-favorite"),
                 cx,
                 |this, _, cx| this.toggle_favorite(cx),
             ))
-            .child(self.button("edit", "Edit", cx, move |this, w, cx| {
-                this.start_editing(edit_item.clone(), w, cx)
-            }))
-            .child(self.button(
+            .child(
+                self.keyed_button("edit", "Edit", "edit-item", cx, move |this, w, cx| {
+                    this.start_editing(edit_item.clone(), w, cx)
+                }),
+            )
+            .child(self.keyed_button(
                 "archive",
                 if self.confirm_archive {
-                    "Click again to archive"
+                    "Again to archive"
                 } else {
                     "Archive"
                 },
+                "archive-item",
                 cx,
                 |this, _, cx| this.archive(cx),
             ));
@@ -2718,6 +2814,7 @@ impl Render for VisiPassApp {
                 cx.listener(|this, _: &NewItem, window, cx| this.new_item("LOGIN", window, cx)),
             )
             .on_action(cx.listener(|this, _: &ToggleFavorite, _, cx| this.toggle_favorite(cx)))
+            .on_action(cx.listener(|this, _: &ArchiveItem, _, cx| this.archive(cx)))
             .on_action(cx.listener(|this, _: &Dismiss, _, cx| {
                 if this.show_help {
                     this.show_help = false;
