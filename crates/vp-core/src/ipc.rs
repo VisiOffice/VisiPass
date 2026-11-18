@@ -160,6 +160,10 @@ pub struct PasteField {
     pub count: usize,
     /// The item already has this field; the paste replaces its value.
     pub replaces: bool,
+    /// Every field the request fills, in order, so the window can show where
+    /// this one comes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub names: Vec<String>,
 }
 
 /// What the paste window is for. Every mode returns its answer on the pipe

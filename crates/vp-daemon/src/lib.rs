@@ -1046,6 +1046,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                             number: i + 1,
                             count: names.len(),
                             replaces: targets[i].is_some(),
+                            names: names.clone(),
                         }),
                     }),
                 };

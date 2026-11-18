@@ -14,7 +14,7 @@
 //! and an overlay would cover it and hold the keyboard.
 //!
 //! `visipass-prompt --demo` shows a sample request, for checking the styling;
-//! `--demo-paste`, `--demo-unlock`, `--demo-new` and `--demo-key` show the paste window's modes.
+//! `--demo-paste`, `--demo-fields`, `--demo-unlock`, `--demo-new` and `--demo-key` show the paste window's modes.
 
 mod paste;
 mod view;
@@ -59,8 +59,10 @@ fn read_prompt() -> Option<ApprovalPrompt> {
     serde_json::from_str(&input).ok()
 }
 
-fn options(overlay: bool, title: &str, cx: &App) -> WindowOptions {
-    let size = Size::new(px(600.), px(560.));
+/// `own_top`: the view draws the window's top itself (macOS), so the title bar
+/// is transparent and only the traffic lights show.
+fn options(overlay: bool, title: &str, height: f32, own_top: bool, cx: &App) -> WindowOptions {
+    let size = Size::new(px(600.), px(height));
     let mut options = WindowOptions {
         titlebar: None,
         app_id: Some("visipass-prompt".into()),
@@ -99,9 +101,11 @@ fn options(overlay: bool, title: &str, cx: &App) -> WindowOptions {
             options.kind = WindowKind::PopUp;
         }
     } else {
+        let own_top = own_top && cfg!(target_os = "macos");
         options.titlebar = Some(gpui::TitlebarOptions {
             title: Some(title.into()),
-            ..Default::default()
+            appears_transparent: own_top,
+            traffic_light_position: own_top.then(|| gpui::point(px(14.), px(14.))),
         });
         options.kind = WindowKind::Normal;
     }
@@ -126,6 +130,40 @@ fn main() {
                 mode: Default::default(),
                 title: "Stripe Live Key".into(),
                 vault: "Dev".into(),
+            }),
+            ..demo()
+        }
+    } else if std::env::args().any(|a| a == "--demo-fields") {
+        let names: Vec<String> = [
+            "ALEXA_CLIENT_ID",
+            "ALEXA_CLIENT_SECRET",
+            "ALEXA_REDIRECT_URIS",
+        ]
+        .map(String::from)
+        .into();
+        ApprovalPrompt {
+            action: "add to \"production\" in the vault \"Dev\"".into(),
+            details: vec![
+                (
+                    "Project".into(),
+                    "/home/you/Code/visipass  (git@github.com:you/visipass.git)".into(),
+                ),
+                ("Item".into(), "production".into()),
+                ("Fields".into(), names.join(", ")),
+            ],
+            secrets: vec![],
+            purpose: Some("the Alexa skill's OAuth client, read at deploy".into()),
+            paste: Some(vp_core::ipc::PasteSpec {
+                title: "production".into(),
+                vault: "Dev".into(),
+                mode: Default::default(),
+                field: Some(vp_core::ipc::PasteField {
+                    name: names[1].clone(),
+                    number: 2,
+                    count: names.len(),
+                    replaces: true,
+                    names,
+                }),
             }),
             ..demo()
         }
@@ -180,7 +218,13 @@ fn main() {
                 let (prompt, theme) = (prompt.clone(), theme.clone());
                 if prompt.paste.is_some() {
                     cx.open_window(
-                        options(overlay, "VisiPass: add a secret", cx),
+                        options(
+                            overlay,
+                            "VisiPass: add a secret",
+                            paste::height(&prompt),
+                            true,
+                            cx,
+                        ),
                         move |window, cx| {
                             cx.new(|cx| paste::PasteView::new(prompt, theme, overlay, window, cx))
                         },
@@ -189,7 +233,7 @@ fn main() {
                     .map_err(|_| ())
                 } else {
                     cx.open_window(
-                        options(overlay, "VisiPass approval", cx),
+                        options(overlay, "VisiPass approval", 560., false, cx),
                         move |window, cx| {
                             let view = cx.new(|cx| ApprovalView::new(prompt, theme, overlay, cx));
                             let focus = view.read(cx).focus_handle().clone();

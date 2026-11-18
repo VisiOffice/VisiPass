@@ -19,6 +19,20 @@ use vp_gui::theme::{Theme, alpha};
 
 const ARM_DELAY: Duration = Duration::from_millis(700);
 
+/// The window's height: a request for several fields lists them all.
+pub fn height(prompt: &ApprovalPrompt) -> f32 {
+    let fields = prompt
+        .paste
+        .as_ref()
+        .and_then(|p| p.field.as_ref())
+        .map_or(0, |f| f.names.len());
+    if fields == 0 {
+        560.
+    } else {
+        (500. + 30. * fields as f32).min(860.)
+    }
+}
+
 pub struct PasteView {
     prompt: ApprovalPrompt,
     theme: Theme,
@@ -42,12 +56,15 @@ impl PasteView {
     ) -> Self {
         let placeholder = match prompt.paste.as_ref().map(|p| &p.mode) {
             Some(PasteMode::Unlock { .. }) | Some(PasteMode::NewPassword { .. }) => {
-                "Master password"
+                "Master password".to_string()
             }
-            Some(PasteMode::SecretKey) => "Secret Key (VP1-…)",
-            Some(PasteMode::BucketKey { secret: false }) => "Access key ID",
-            Some(PasteMode::BucketKey { secret: true }) => "Secret access key",
-            _ => "Paste the secret here (Ctrl+V)",
+            Some(PasteMode::SecretKey) => "Secret Key (VP1-…)".to_string(),
+            Some(PasteMode::BucketKey { secret: false }) => "Access key ID".to_string(),
+            Some(PasteMode::BucketKey { secret: true }) => "Secret access key".to_string(),
+            _ => match prompt.paste.as_ref().and_then(|p| p.field.as_ref()) {
+                Some(field) => format!("Paste {} here (Ctrl+V)", field.name),
+                None => "Paste the secret here (Ctrl+V)".to_string(),
+            },
         };
         let field = cx.new(|cx| {
             let mut input = TextInput::new(theme.clone(), placeholder, cx);
@@ -204,6 +221,78 @@ impl PasteView {
         }
     }
 
+    /// The fields of a request, one per line: done, this one, still to come.
+    fn steps(
+        &self,
+        field: &vp_core::ipc::PasteField,
+        spec: &vp_core::ipc::PasteSpec,
+        t: &Theme,
+    ) -> impl IntoElement {
+        let new = self
+            .prompt
+            .details
+            .iter()
+            .any(|(n, v)| n == "Item" && v.ends_with("(new)"));
+        let replaced: Vec<&str> = self
+            .prompt
+            .details
+            .iter()
+            .filter(|(n, _)| n == "Replaces")
+            .flat_map(|(_, v)| v.split(", "))
+            .collect();
+        let mut list = div().flex().flex_col().gap(px(4.)).child(
+            div()
+                .text_size(px(t.size(0.917)))
+                .text_color(t.muted)
+                .child(format!(
+                    "{}\"{}\" in the vault \"{}\"",
+                    if new { "A new item, " } else { "" },
+                    spec.title,
+                    spec.vault
+                )),
+        );
+        for (i, name) in field.names.iter().enumerate() {
+            let number = i + 1;
+            let (mark, color) = match number.cmp(&field.number) {
+                std::cmp::Ordering::Less => ("✓", t.muted),
+                std::cmp::Ordering::Equal => ("→", t.accent),
+                std::cmp::Ordering::Greater => ("", t.muted),
+            };
+            let current = number == field.number;
+            let note = if replaced.contains(&name.as_str()) || (current && field.replaces) {
+                " · replaces its value"
+            } else {
+                ""
+            };
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(8.))
+                    .py(px(3.))
+                    .rounded(px(t.radius))
+                    .when(current, |d| d.bg(alpha(t.accent, 0.12)))
+                    .text_color(if current { t.foreground } else { t.muted })
+                    .child(div().w(px(14.)).text_color(color).child(mark))
+                    .child(
+                        div()
+                            .flex_1()
+                            .when(current, |d| d.font_weight(FontWeight::BOLD))
+                            .child(format!("{name}{note}")),
+                    )
+                    .when(current, |d| {
+                        d.child(
+                            div()
+                                .text_size(px(t.size(0.833)))
+                                .child(format!("{number} of {}", field.count)),
+                        )
+                    }),
+            );
+        }
+        list
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn button(
         &self,
@@ -259,6 +348,10 @@ impl Render for PasteView {
         let mode = spec.mode.clone();
         let heading = match &mode {
             PasteMode::Secret => match &spec.field {
+                Some(field) if field.count > 1 => format!(
+                    "{} asks you to fill in {} fields of \"{}\".",
+                    self.prompt.who, field.count, spec.title
+                ),
                 Some(field) => format!("{} asks you to fill in {}.", self.prompt.who, field.name),
                 None => format!("{} asks you to add a secret.", self.prompt.who),
             },
@@ -290,8 +383,12 @@ impl Render for PasteView {
         };
 
         let mut details = div().flex().flex_col().gap(px(10.));
-        // The title is shown with the field it names.
-        for (name, value) in self.prompt.details.iter().filter(|(n, _)| n != "Title") {
+        // The title is shown with the field it names; a request for fields
+        // lists the item and its fields with the steps below.
+        let stepped = spec.field.as_ref().is_some_and(|f| !f.names.is_empty());
+        for (name, value) in self.prompt.details.iter().filter(|(n, _)| {
+            n != "Title" && !(stepped && matches!(n.as_str(), "Item" | "Fields" | "Replaces"))
+        }) {
             details = details.child(
                 div()
                     .flex()
@@ -320,9 +417,10 @@ impl Render for PasteView {
             .gap(px(16.))
             .p(px(18.))
             .bg(t.background)
-            .border_2()
-            .border_color(t.border)
-            .rounded(px(t.radius))
+            // In a plain window the window is the frame.
+            .when(self.overlay, |d| {
+                d.border_2().border_color(t.border).rounded(px(t.radius))
+            })
             .child(
                 div()
                     .flex()
@@ -354,6 +452,7 @@ impl Render for PasteView {
                 div()
                     .text_color(t.muted)
                     .child(match &mode {
+                        PasteMode::Secret if stepped => "Paste each value in turn; this window asks for one at a time. Nothing is saved until the last, and the agent gets references, never the values.".to_string(),
                         PasteMode::Secret => "Paste the value to save it in your vault. The agent gets a reference to it, never the value itself.".to_string(),
                         _ => instruction.clone(),
                     }),
@@ -364,11 +463,14 @@ impl Render for PasteView {
                     .flex()
                     .flex_col()
                     .gap(px(6.))
-                    .when(matches!(mode, PasteMode::Secret), |d| {
+                    .when(matches!(mode, PasteMode::Secret) && !stepped, |d| {
                         d.child(label(&format!(
                             "Saved as \"{}\" in the vault \"{}\"",
                             spec.title, spec.vault
                         )))
+                    })
+                    .when_some(spec.field.as_ref().filter(|_| stepped), |d, field| {
+                        d.child(self.steps(field, &spec, &t))
                     })
                     .child(
                         div()
@@ -408,7 +510,11 @@ impl Render for PasteView {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .child(self.button("save", match &mode { PasteMode::Secret => "Save to vault", _ => ok_label }, true, 2, focused == 2, cx, |this, cx| this.save(cx)))
+                    .child(self.button("save", match (&mode, &spec.field) {
+                        (PasteMode::Secret, Some(f)) if f.number < f.count => "Next",
+                        (PasteMode::Secret, _) => "Save to vault",
+                        _ => ok_label,
+                    }, true, 2, focused == 2, cx, |this, cx| this.save(cx)))
                     .child(self.button("cancel", "Cancel", false, 3, focused == 3, cx, |this, cx| {
                         this.finish(PasteAnswer::Cancel, cx)
                     }))
@@ -461,6 +567,20 @@ impl Render for PasteView {
                 )
             })
             .when(!self.overlay, |d| d.bg(t.background))
+            // The title bar is transparent (main.rs): this strip moves the window
+            // and keeps the card clear of the traffic lights.
+            .when(!self.overlay && cfg!(target_os = "macos"), |d| {
+                d.justify_start().child(
+                    div()
+                        .id("drag")
+                        .w_full()
+                        .h(px(28.))
+                        .flex_none()
+                        .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                            window.start_window_move()
+                        }),
+                )
+            })
             .child(card)
     }
 }
