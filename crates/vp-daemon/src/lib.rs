@@ -1021,6 +1021,8 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
             details.push(("Replaces".into(), replaced.join(", ")));
         }
         let mut values = Vec::new();
+        // Fields whose paste had spaces or line breaks at an end, dropped.
+        let mut trimmed = Vec::new();
         {
             // One window per value, in a row, before anything is written.
             let _turn = self.approvals.lock().await;
@@ -1055,6 +1057,15 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                         "The human cancelled, so nothing was saved. Do not ask again; ask them how to proceed",
                     )
                 })?;
+                let (value, was_trimmed) = value.trimmed();
+                if value.is_blank() {
+                    return Err(Failure::new(format!(
+                        "The value pasted for \"{name}\" was empty, so nothing was saved. Ask the human how to proceed"
+                    )));
+                }
+                if was_trimmed {
+                    trimmed.push(name.clone());
+                }
                 values.push(value);
             }
         }
@@ -1110,6 +1121,7 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
             "vault": saved.vault.name,
             "created": !existing,
             "replaced": replaced,
+            "trimmed": trimmed,
             "refs": refs,
             "verified": true,
         }))
@@ -1877,12 +1889,22 @@ impl<B: Backend, A: Approver> Daemon<B, A> {
                 let value = pasted.ok_or_else(|| {
                     Failure::new("The human cancelled. Do not ask again; ask them how to proceed")
                 })?;
-                Ok(to_json(
+                let (value, trimmed) = value.trimmed();
+                if value.is_blank() {
+                    return Err(Failure::new(
+                        "The pasted value was empty, so nothing was saved. Ask the human how to proceed",
+                    ));
+                }
+                let mut receipt = to_json(
                     &self
                         .backend
                         .create_api_credential(&destination, value)
                         .await?,
-                ))
+                );
+                if trimmed && let Some(receipt) = receipt.as_object_mut() {
+                    receipt.insert("trimmed".into(), Value::Bool(true));
+                }
+                Ok(receipt)
             }
             Request::RequestFields {
                 item,

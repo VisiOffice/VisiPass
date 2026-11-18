@@ -1429,6 +1429,51 @@ fn named_fields_are_pasted_into_one_item_and_replaced_only_when_asked() {
 }
 
 #[test]
+fn pasted_values_lose_spaces_and_line_breaks_at_the_ends() {
+    let world = World::native(&[
+        // init: password, confirmation, Secret Key window
+        Decision::Once,
+        Decision::Once,
+        Decision::Deny,
+        // the vault
+        Decision::Once,
+        // two fields, reading one back
+        Decision::Once,
+        Decision::Once,
+        Decision::Once,
+        // one secret, reading it back
+        Decision::Once,
+        Decision::Once,
+    ]);
+    clean(&world.vp(&["init"], None));
+    json(&world.vp(&["vault", "create", "Visi"], None));
+    let paste = |value: &str| world.approver.2.lock().unwrap().push_back(value.into());
+    let read = |reference: &str| {
+        let out = world.vp(&["read", reference], None);
+        text(&out.stdout).trim_end_matches('\n').to_string()
+    };
+
+    paste("4DYiXrJ-qQP.W6+t/Q8; ");
+    paste("inner space kept");
+    let fields = json(&world.vp(
+        &[
+            "request", "--title", "prod", "--vault", "Visi", "--field", "A", "--field", "B",
+        ],
+        None,
+    ));
+    assert_eq!(fields["trimmed"], serde_json::json!(["A"]), "{fields}");
+    assert_eq!(
+        read(fields["refs"]["A"].as_str().unwrap()),
+        "4DYiXrJ-qQP.W6+t/Q8;"
+    );
+
+    paste("\tsk-live-123\n");
+    let one = json(&world.vp(&["request", "--title", "key", "--vault", "Visi"], None));
+    assert_eq!(one["trimmed"], true, "{one}");
+    assert_eq!(read(one["ref"].as_str().unwrap()), "sk-live-123");
+}
+
+#[test]
 fn an_agent_requests_fields_over_mcp() {
     let world = World::new(&[]);
     let call = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "request_secret", "arguments": {"title": "X", "vault": "Nowhere", "purpose": "p", "fields": ["A", "a"]}}});

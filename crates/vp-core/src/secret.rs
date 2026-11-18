@@ -18,6 +18,17 @@ impl Secret {
     pub fn is_blank(&self) -> bool {
         self.0.trim().is_empty()
     }
+
+    /// A pasted value without the spaces, tabs and line breaks copying leaves
+    /// at either end, and whether there were any. Never for a password.
+    pub fn trimmed(self) -> (Self, bool) {
+        let trimmed = self.0.trim();
+        if trimmed.len() == self.0.len() {
+            (self, false)
+        } else {
+            (Self::new(trimmed.to_string()), true)
+        }
+    }
 }
 
 impl std::fmt::Debug for Secret {
@@ -47,5 +58,13 @@ mod tests {
     fn debug_is_redacted() {
         let secret = Secret::new("sentinel-secret-123".into());
         assert_eq!(format!("{secret:?}"), "Secret(<redacted>)");
+    }
+
+    #[test]
+    fn trims_only_the_ends() {
+        let (value, trimmed) = Secret::new(" \tab c;\n".into()).trimmed();
+        assert_eq!((value.expose(), trimmed), ("ab c;", true));
+        let (value, trimmed) = Secret::new("ab c".into()).trimmed();
+        assert_eq!((value.expose(), trimmed), ("ab c", false));
     }
 }
