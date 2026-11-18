@@ -58,6 +58,8 @@ vp request --title "VisiCasts production" --vault Visi --field SES_ACCESS_KEY_ID
 
 The human pastes each value in its own window; you get back `refs` (one per field name) and `verified`. The item is found by title in the vault, or created. A field the item already has is refused before asking; add `--replace` only when the human wants that value changed (they are told). Cancelling any window saves nothing.
 
+Spaces, tabs and line breaks at either end of a pasted value are dropped (left over from copying). When that happened the result says so: `"trimmed": true`, or for fields `"trimmed"` lists their names. If a value really needs them, tell the human it cannot be pasted this way.
+
 ## Kamal deploys
 
 In `.kamal/secrets`, use one `vp kamal-fetch` and `kamal secrets extract` per secret, never a
