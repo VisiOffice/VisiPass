@@ -493,12 +493,19 @@
       console.debug("VisiPass:", error.message);
       return;
     }
+    if (field !== target) return;
+    if (result.menu === false) {
+      // Nothing of ours will show here: the page's passkey autofill is the browser's.
+      if (conditional) settle(conditional.id, { fallback: true });
+      return hide();
+    }
+    if (mode === "new" && result.suggest === false) return hide();
     if (mode === "login") await refreshPasskeys();
     if (field !== target) return;
     locked = Boolean(result.locked);
     logins = result.logins || [];
     suggestion = mode === "new" ? result.password : null;
-    if (mode !== "new") quiet = Boolean(result.quiet);
+    quiet = Boolean(result.quiet);
     if (!locked && !entries().length) return hide();
     ensureUi();
     selected = 0;
@@ -839,6 +846,10 @@
       return settle(request.id, { fallback: true });
     }
     if (pk && pk.request !== request) return;
+    if (!offer) {
+      if (pk) closeCard();
+      return settle(request.id, { fallback: true });
+    }
     pk = { request, offer };
     renderCard({ status: offer.locked ? "passkey-locked" : "passkey-save", rp_id: request.rp_id, create: true });
   }

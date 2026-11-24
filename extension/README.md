@@ -3,13 +3,13 @@
 Fills logins from VisiPass in Chrome, Chromium and Brave.
 
 - Focus a login field: a VisiPass mark appears in it and a "Log in as…" menu lists the logins saved for this site. Click one, or use ↓/↑ and Enter; Esc dismisses it for that field.
-- **⋮** in the menu: **Don't open on this site** (the mark stays; click it to open the menu, or choose **Open on this site again**), **Search all logins** (opens the toolbar popup) and **Open VisiPass** (the desktop app).
+- **⋮** in the menu: **Don't open on this site** (the mark stays; click it to open the menu, choose **Open on this site again**, or undo it in Settings), **Search all logins** (opens the toolbar popup) and **Open VisiPass** (the desktop app).
 - Click the toolbar icon for the same list, or to search every login. Enter or a click fills.
 - `Ctrl+Shift+L` on a login page fills the best match.
 - Once VisiPass is unlocked, picking a login fills it with no further prompt, as in other password managers.
 - A login only fills on its own site. Filling it elsewhere needs "Fill anyway" and your confirmation every time.
 - On a sign-up or new-password field the menu suggests a strong password. Choosing it saves a new login for the site straight away (so a failed sign-up never loses it) and fills the password and its confirmation; when you submit the form, VisiPass adds the username the form took.
-- When you submit a login form with a password VisiPass doesn't have, a card at the top right offers to save it (pick the vault, or "Never for this site"). If the password differs from the saved one for that username, it offers to update it; updating asks in the VisiPass window every time. A two-page login (username, then password) is saved with the username from the first page.
+- When you submit a login form with a password VisiPass doesn't have, a card at the top right offers to save it (pick the vault, or "Never for this site", which you can undo in Settings). If the password differs from the saved one for that username, it offers to update it; updating asks in the VisiPass window every time. A two-page login (username, then password) is saved with the username from the first page.
 - **Passkeys.** When a site offers to create a passkey, a VisiPass card asks to save it: into the login already saved for that site and username, or as a new login in the vault you pick. When a site asks you to sign in with a passkey, the card lists yours for that site; on sites that offer passkeys in autofill they appear at the top of the inline menu. Picking one signs in, with no further prompt, as filling that login does. **Use another device** hands the request to Chrome (security keys, phones). Passkeys live in VisiPass's own vault only and the private key never leaves `visipassd`. `vp import proton` brings your Proton Pass passkeys over; 1Password's cannot be exported, so add a new passkey on each site. Run only one password manager's passkey support at a time: two cannot both answer a site.
 - On a two-factor code field the menu lists the site's logins and fills the current code.
 - The toolbar popup lists logins on the left and shows the selected one's details on the right: username, password (Show, Copy), the live two-factor code, other fields, websites and notes, with Fill and a favourite star. **Edit** changes any of them, adds websites and custom text or hidden fields, sets the two-factor secret (otpauth:// link or setup key), generates a password, or moves the login to the archive (restore it from the app). **+** in the header adds a new login for the current site. Like the desktop app, the popup shows values and saves changes without asking: no website can reach it.
@@ -18,6 +18,15 @@ Fills logins from VisiPass in Chrome, Chromium and Brave.
 - Site icons come from Chrome's own favicon cache (the `favicon` permission), so no request leaves the browser to fetch them; a site Chrome has no icon for shows its first letter. The background worker reads them and hands them to the inline menu, since pages cannot.
 - To draw the inline menu the extension runs on every http(s) page (the same access other password managers' extensions have). The menu lives in a closed shadow root, so the page cannot read it, and it holds titles and usernames only. Values are fetched when you pick a login, after VisiPass approves the site, and filled only into the frame you picked it in.
 - Fills run in the background worker, so approving in the VisiPass window (which closes the toolbar popup) still completes the fill.
+
+## Settings
+
+Click the gear button in the popup header (or open the extension's options page in your browser) to configure:
+
+- **Autofill & saving**: global switches (all on by default) for the inline menu, saving and updating logins, password suggestions, and passkeys. Turning the inline menu off hides the field mark too; the toolbar popup and keyboard shortcut still work. Turning passkeys off hands WebAuthn requests straight to your browser.
+- **Use VisiPass instead of your browser's password manager**: off by default. Requests the optional `privacy` permission to turn off your browser's built-in password saving prompts, and restores your browser's setting when switched off.
+- **Paused sites**: turn off Menu, Save, Suggest, or Passkeys per site, add sites by URL or host, or undo **Don't open on this site** and **Never for this site**.
+- **Keyboard shortcuts**: lists your current shortcuts (filling a login and opening VisiPass) and opens your browser's shortcuts page to change them.
 
 ## Load it unpacked
 

@@ -1,5 +1,8 @@
 import { siteIcon } from "./icons.js";
 import { ask, fill } from "./native.js";
+import { ensureMigrated, prefsFor, setSitePause } from "./prefs.js";
+
+ensureMigrated().catch(() => {});
 
 // Fills and saves run here, not in the popup: the popup closes as soon as the
 // VisiPass approval window takes focus, and anything it was waiting on dies with it.
@@ -49,16 +52,6 @@ const clearOffer = (tabId) => chrome.storage.session.remove(offerKey(tabId));
 const userKey = (tabId) => `user:${tabId}`;
 chrome.tabs.onRemoved.addListener((tabId) => chrome.storage.session.remove([offerKey(tabId), userKey(tabId)]));
 
-async function isQuiet(origin) {
-  const { quiet = [] } = await chrome.storage.local.get("quiet");
-  return quiet.includes(origin);
-}
-
-async function neverSave(origin) {
-  const { never = [] } = await chrome.storage.local.get("never");
-  return never.includes(origin);
-}
-
 // The vault new logins go to: the last one chosen on a save card, else a
 // personal vault, else the first.
 async function saveVault() {
@@ -103,7 +96,7 @@ async function submitted(tabId, url, username, password) {
     showCard(tabId, { host: offer.host, username, status: "saved", title: result.title, saved: result.vaultName });
     return;
   }
-  if (await neverSave(origin)) return;
+  if (!(await prefsFor(origin)).save) return;
   const status = await ask({ type: "save", check: true, url, username, password });
   if (status.status === "same") return;
   const next = { url, origin, host: new URL(url).host.replace(/^www\./, ""), username, password, status: status.status };
@@ -121,8 +114,7 @@ async function answer(tabId, choice, vault) {
   if (!offer || offer.draft) throw new Error("There is nothing to save");
   await clearOffer(tabId);
   if (choice === "never") {
-    const { never = [] } = await chrome.storage.local.get("never");
-    await chrome.storage.local.set({ never: [...new Set([...never, offer.origin])] });
+    await setSitePause(offer.origin, "save", true);
     return {};
   }
   if (choice !== "save") return {};
@@ -154,18 +146,17 @@ async function handle(message, sender) {
     // frame keeps its frameId when it navigates, its documentId does not.
     case "page-logins": {
       if (!fromPage) throw new Error("Not a page");
+      const prefs = await prefsFor(sender.url);
+      if (!prefs.menu) return { logins: [], locked: false, quiet: prefs.quiet, menu: false, suggest: prefs.suggest };
       const result = await matchFor(sender.url, Boolean(message.unlock));
       // Site icons come from Chrome's favicon cache, which pages cannot read.
       const logins = await Promise.all((result.logins || []).map(async (login) => ({ ...login, icon: await siteIcon(login.host) })));
-      return { logins, locked: Boolean(result.locked), quiet: await isQuiet(new URL(sender.url).origin) };
+      return { logins, locked: Boolean(result.locked), quiet: prefs.quiet, menu: true, suggest: prefs.suggest };
     }
     // From the inline menu's ⋮: don't open the menu by itself on this site.
     case "page-quiet": {
       if (!fromPage) throw new Error("Not a page");
-      const origin = new URL(sender.url).origin;
-      const { quiet = [] } = await chrome.storage.local.get("quiet");
-      const next = message.quiet ? [...new Set([...quiet, origin])] : quiet.filter((o) => o !== origin);
-      await chrome.storage.local.set({ quiet: next });
+      await setSitePause(sender.url, "menu", Boolean(message.quiet));
       return {};
     }
     case "page-search": {
@@ -191,7 +182,9 @@ async function handle(message, sender) {
     // A password to suggest on a sign-up form. Nothing is saved until it is used.
     case "page-generate": {
       if (!fromPage) throw new Error("Not a page");
-      return await ask({ type: "generate" });
+      const prefs = await prefsFor(sender.url);
+      if (!prefs.suggest) return { password: null, quiet: prefs.quiet, menu: prefs.menu, suggest: false };
+      return { ...(await ask({ type: "generate" })), quiet: prefs.quiet, menu: prefs.menu, suggest: true };
     }
     // The suggested password was chosen: save it now, so a failed sign-up or a
     // closed tab never loses it, then let the page fill it.
@@ -229,7 +222,9 @@ async function handle(message, sender) {
     case "page-offer": {
       if (!topFrame) return null;
       const offer = await getOffer(sender.tab.id);
-      return offer && !offer.draft ? cardOf(offer) : null;
+      if (!offer || offer.draft) return null;
+      if (!(await prefsFor(offer.origin)).save) return null;
+      return cardOf(offer);
     }
     case "page-offer-answer": {
       if (!topFrame) throw new Error("Not the page");
@@ -244,6 +239,7 @@ async function handle(message, sender) {
     // site verifies from it.
     case "page-passkeys": {
       if (!topFrame) throw new Error("Not the page");
+      if (!(await prefsFor(sender.url)).passkeys) return { passkeys: [], locked: false };
       const result = await ask({
         type: "passkeys",
         url: sender.url,
@@ -257,6 +253,7 @@ async function handle(message, sender) {
     // for this site and username takes it; else the vault new logins go to.
     case "page-passkey-offer": {
       if (!topFrame) throw new Error("Not the page");
+      if (!(await prefsFor(sender.url)).passkeys) return null;
       // Checks the RP ID before anything shows.
       const check = await ask({ type: "passkeys", url: sender.url, rp_id: String(message.rp_id || ""), unlock: Boolean(message.unlock) });
       if (check.locked) return { locked: true };
@@ -272,6 +269,7 @@ async function handle(message, sender) {
     }
     case "page-passkey-create": {
       if (!topFrame) throw new Error("Not the page");
+      if (!(await prefsFor(sender.url)).passkeys) throw new Error("Passkeys are turned off for this site");
       const result = await ask({
         type: "passkey-create",
         url: sender.url,
@@ -290,6 +288,7 @@ async function handle(message, sender) {
     }
     case "page-passkey-get": {
       if (!topFrame) throw new Error("Not the page");
+      if (!(await prefsFor(sender.url)).passkeys) throw new Error("Passkeys are turned off for this site");
       return await ask({
         type: "passkey-get",
         url: sender.url,

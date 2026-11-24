@@ -166,6 +166,7 @@ document.getElementById("open").addEventListener("click", (e) => {
   ask({ type: "open-app" }).then(() => window.close()).catch((error) => say(error.message, true));
 });
 document.getElementById("new").addEventListener("click", () => newLogin());
+document.getElementById("settings").addEventListener("click", () => chrome.runtime.openOptionsPage());
 
 async function load() {
   const query = search.value.trim();
@@ -715,6 +716,7 @@ async function start() {
   document.getElementById("brand").innerHTML = MARK;
   document.getElementById("search-icon").innerHTML = icon("search");
   document.getElementById("new").innerHTML = icon("plus");
+  document.getElementById("settings").innerHTML = icon("settings");
   clear.innerHTML = icon("close");
   [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   ask({ type: "theme" })

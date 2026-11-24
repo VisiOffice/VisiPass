@@ -1,0 +1,114 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VisiPass Settings</title>
+    <link rel="stylesheet" href="settings.css" />
+  </head>
+  <body>
+    <main class="page">
+      <header class="top">
+        <span id="brand" class="brand"></span>
+        <div>
+          <h1>VisiPass Settings</h1>
+          <p class="sub">Choose how VisiPass behaves on web pages.</p>
+        </div>
+      </header>
+
+      <section class="section">
+        <h2>Autofill &amp; saving</h2>
+        <div class="card">
+          <label class="row">
+            <span class="text">
+              <span class="title">Show the inline menu on login fields</span>
+              <span class="desc">When off, the toolbar button and keyboard shortcut still work.</span>
+            </span>
+            <input id="opt-menu" class="switch" type="checkbox" />
+          </label>
+          <label class="row">
+            <span class="text">
+              <span class="title">Offer to save and update logins</span>
+              <span class="desc">Show the save card when you submit a new or changed password.</span>
+            </span>
+            <input id="opt-save" class="switch" type="checkbox" />
+          </label>
+          <label class="row">
+            <span class="text">
+              <span class="title">Suggest strong passwords on sign-up fields</span>
+              <span class="desc">Offer a generated password when a page asks for a new password.</span>
+            </span>
+            <input id="opt-suggest" class="switch" type="checkbox" />
+          </label>
+          <label class="row">
+            <span class="text">
+              <span class="title">Passkeys: offer to save, and offer to sign in</span>
+              <span class="desc">When off, passkey requests go straight to your browser.</span>
+            </span>
+            <input id="opt-passkeys" class="switch" type="checkbox" />
+          </label>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>Browser</h2>
+        <div class="card">
+          <label class="row" id="browser-pm-row">
+            <span class="text">
+              <span class="title">Use VisiPass instead of your browser's password manager</span>
+              <span id="browser-pm-desc" class="desc">Turns off your browser's built-in password saving prompts.</span>
+            </span>
+            <input id="opt-browser-pm" class="switch" type="checkbox" />
+          </label>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>Paused sites</h2>
+        <p class="section-desc">
+          Check any feature to turn it off on that site. Pausing Menu keeps the VisiPass mark in login fields so you can
+          still click it.
+        </p>
+        <form id="add-site-form" class="add-site" novalidate>
+          <input
+            id="site-input"
+            type="text"
+            placeholder="example.com or https://example.com"
+            autocomplete="off"
+            spellcheck="false"
+            aria-label="Site URL or host"
+          />
+          <button type="submit" class="pill primary">Add site</button>
+        </form>
+        <div id="site-error" class="note error" role="alert"></div>
+        <div class="card table-wrap">
+          <table id="paused-table" class="paused-table" hidden>
+            <thead>
+              <tr>
+                <th scope="col" class="col-site">Site</th>
+                <th scope="col">Menu</th>
+                <th scope="col">Save</th>
+                <th scope="col">Suggest</th>
+                <th scope="col">Passkeys</th>
+                <th scope="col" class="col-remove"><span class="sr-only">Remove</span></th>
+              </tr>
+            </thead>
+            <tbody id="paused-body"></tbody>
+          </table>
+          <div id="paused-empty" class="empty-row">No paused sites.</div>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>Keyboard shortcuts</h2>
+        <div class="card">
+          <div id="shortcuts-list"></div>
+        </div>
+        <div class="section-actions">
+          <button id="open-shortcuts" type="button" class="pill">Change shortcuts</button>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="settings.js"></script>
+  </body>
+</html>
